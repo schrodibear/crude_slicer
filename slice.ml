@@ -11,6 +11,8 @@ open Cil_datatype
 open Cil
 open Visitor
 
+let (%>) f g x = f (g x)
+
 module Primitive_type : sig
   type t = private typ
 
@@ -30,17 +32,49 @@ end = struct
     else invalid_arg "Primitive_type.of_typ_exn"
 end
 
+module Make_var (C : sig val is_ok : varinfo -> bool end) : sig
+  type t = private varinfo
+
+  val of_varinfo : varinfo -> t option
+  val of_varinfo_exn : varinfo -> t
+end = struct
+  type t = varinfo
+
+  let of_varinfo vi = if C.is_ok vi then Some vi else None
+
+  let of_varinfo_exn vi =
+    if C.is_ok vi then vi
+    else invalid_arg "Formal_var.of_varinfo_exn"
+end
+
+module Global_var = Make_var (struct let is_ok vi = vi.vglob end)
+
+module Struct_field : sig
+  type t = private fieldinfo
+
+  val of_fieldinfo : fieldinfo -> t option
+  val of_fieldinfo_exn : fieldinfo -> t
+end = struct
+  type t = fieldinfo
+
+  let of_fieldinfo fi = if fi.fcomp.cstruct then Some fi else None
+
+  let of_fieldinfo_exn fi =
+    if fi.fcomp.cstruct then fi
+    else invalid_arg "Struct_field.of_fieldinfo_exn"
+end
+
 module Region = struct
   type t =
-    | Variable of varinfo
-    | Field of fieldinfo
+    | Variable of Global_var.t
+    | Field of Struct_field.t
     | Type_approximation of Primitive_type.t
 
   let compare r1 r2 =
     match r1, r2 with
-    | Variable v1, Variable v2 -> Varinfo.compare v1 v2
+    | Variable v1, Variable v2 -> Varinfo.compare (v1 :> varinfo) (v2 :> varinfo)
     | Variable _, _ -> -1
-    | Field f1, Field f2 -> Fieldinfo.compare f1 f2
+    | Field f1, Field f2 -> Fieldinfo.compare (f1 :> fieldinfo) (f2 :> fieldinfo)
     | Field _, Variable _ -> 1
     | Field _, _ -> -1
     | Type_approximation t1, Type_approximation t2 -> Typ.compare (t1 :> typ) (t2 :> typ)
@@ -48,15 +82,15 @@ module Region = struct
 
   let equal r1 r2 =
     match r1, r2 with
-    | Variable v1, Variable v2 -> Varinfo.equal v1 v2
-    | Field f1, Field f2 -> Fieldinfo.equal f1 f2
+    | Variable v1, Variable v2 -> Varinfo.equal (v1 :> varinfo) (v2 :> varinfo)
+    | Field f1, Field f2 -> Fieldinfo.equal (f1 :> fieldinfo) (f2 :> fieldinfo)
     | Type_approximation t1, Type_approximation t2 -> Typ.equal (t1 :> typ) (t2 :> typ)
     | _ -> false
 
   let hash =
     function
-    | Variable v1 -> 7 * Varinfo.hash v1
-    | Field f -> 7 * Fieldinfo.hash f + 1
+    | Variable v1 -> 7 * Varinfo.hash (v1 :> varinfo)
+    | Field f -> 7 * Fieldinfo.hash (f :> fieldinfo) + 1
     | Type_approximation t -> Typ.hash (t :> typ) + 3
 end
 
@@ -67,20 +101,7 @@ module Region_set =
       let compare = Region.compare
     end)
 
-module Formal_var : sig
-  type t = private varinfo
-
-  val of_varinfo : varinfo -> t option
-  val of_varinfo_exn : varinfo -> t
-end = struct
-  type t = varinfo
-
-  let of_varinfo vi = if vi.vformal then Some vi else None
-
-  let of_varinfo_exn vi =
-    if vi.vformal then vi
-    else invalid_arg "Formal_var.of_varinfo_exn"
-end
+module Formal_var = Make_var (struct let is_ok vi = vi.vformal end)
 
 module Formal_var_set =
   Set.Make
@@ -149,37 +170,32 @@ module Writes_map =
 module Effect = struct
   type t =
     {
-      writes : Region_set.t;
-      reads : Reads.t Writes_map.t;
+      writes : Reads.t Writes_map.t;
+      is_target : bool;
       depends : Reads.t;
-      requires : Requires.t;
-      is_target : bool
+      requires : Requires.t
     }
 
   let empty =
     {
-      writes = Region_set.empty;
-      reads = Writes_map.empty;
+      writes = Writes_map.empty;
+      is_target = false;
       depends = Reads.empty;
-      requires = Requires.empty;
-      is_target = false
+      requires = Requires.empty
     }
 
-  let with_write w e = { e with writes = Region_set.add w e.writes }
-  let with_writes w e = { e with writes = Region_set.union e.writes w }
-
   open Reads
-  let with_reads r e = { e with reads = Writes_map.union (fun _ r1 r2 -> Some (Reads.union r1 r2)) e.reads r }
+  let with_writes w e = { e with writes = Writes_map.union (fun _ r1 r2 -> Some (Reads.union r1 r2)) e.writes w }
   let with_global_dep d e = { e with depends = with_global d e.depends }
   let with_poly_dep d e = { e with depends = with_poly d e.depends }
   let with_depends d e = { e with depends = union e.depends d }
+  let with_target t e = if e.is_target == t then e else { e with is_target = t }
 
   open Requires
   let with_body_req f e = { e with requires = with_body f e.requires }
   let with_stmt_req s e = { e with requires = with_stmt s e.requires }
   let equal e1 e2 =
-    Region_set.equal e1.writes e2.writes &&
-    Writes_map.equal Reads.equal e1.reads e2.reads &&
+    Writes_map.equal Reads.equal e1.writes e2.writes &&
     Reads.equal e1.depends e2.depends &&
     Requires.equal e1.requires e2.requires &&
     e1.is_target = e2.is_target
@@ -190,7 +206,7 @@ module File_info = struct
 
   let empty = Fundec.Map.empty
   let get fi f = try Fundec.Map.find f fi with Not_found -> Effect.empty
-  let with_effect fi f e = Fundec.Map.add f fi (e @@ try Fundec.Map.find f fi with Not_found -> Effect.empty)
+  let with_effect fi f e = Fundec.Map.add f (e @@ try Fundec.Map.find f fi with Not_found -> Effect.empty) fi
 end
 
 module Components = Graph.Components.Make (Cg.G)
@@ -230,11 +246,14 @@ let visit_until_convergence =
       x
       sccs
 
+module Local_var = Make_var (struct let is_ok vi = not vi.vglob && not vi.vformal end)
+
 module Vertex = struct
   type t =
     | Region of Region.t
     | Result
     | Parameter of Formal_var.t
+    | Local of Local_var.t
 
   let compare v1 v2 =
     match v1, v2 with
@@ -242,21 +261,26 @@ module Vertex = struct
     | Region _, _ -> -1
     | Result, Result -> 0
     | Result, Region _ -> 1
-    | Result, Parameter _ -> -1
+    | Result, _ -> -1
     | Parameter v1, Parameter v2 -> Varinfo.compare (v1 :> varinfo) (v2 :> varinfo)
+    | Parameter _, Local _ -> -1
     | Parameter _, _ -> 1
+    | Local v1, Local v2 -> Varinfo.compare (v1 :> varinfo) (v2 :> varinfo)
+    | Local _, _ -> 1
 
   let hash =
     function
     | Region r -> 7 * Region.hash r
     | Result -> 1
     | Parameter v -> 7 * Varinfo.hash (v :> varinfo) + 3
+    | Local v -> 7 * Varinfo.hash (v :> varinfo) + 5
 
   let equal v1 v2 =
     match v1, v2 with
     | Region r1, Region r2 -> Region.equal r1 r2
     | Result, Result -> true
     | Parameter v1, Parameter v2 -> Varinfo.equal (v1 :> varinfo) (v2 :> varinfo)
+    | Local v1, Local v2 -> Varinfo.equal (v1 :> varinfo) (v2 :> varinfo)
     | _ -> false
 
   let of_writes =
@@ -264,11 +288,16 @@ module Vertex = struct
     | Writes.Region r -> Region r
     | Writes.Result -> Result
 
+  let is_writable =
+    function
+    | Region _ | Result -> true
+    | Parameter _ | Local _ -> false
+
   let to_writes =
     function
     | Region r -> Some (Writes.Region r)
     | Result -> Some Writes.Result
-    | Parameter _ -> None
+    | Parameter _ | Local _ -> None
 
   let to_writes_exn v =
     match to_writes v with
@@ -279,12 +308,40 @@ end
 module Deps = Graph.Imperative.Graph.Concrete (Vertex)
 module Oper = Graph.Oper.I (Deps)
 
+let vertices_of_lval lv =
+  let typ = typeOfLval lv in
+  if isArithmeticOrPointerType typ then
+    match lv with
+    | Var ({ vformal = true; _ } as vi), NoOffset -> [Vertex.Parameter (Formal_var.of_varinfo_exn vi)]
+    | Var ({ vglob = true; _ } as vi), NoOffset -> [Vertex.Region (Region.Variable (Global_var.of_varinfo_exn vi))]
+    | Var vi, NoOffset -> [Vertex.Local (Local_var.of_varinfo_exn vi)]
+    | _, off ->
+      match Cil.lastOffset off with
+      | Field ({ fcomp = { cstruct = true; _ }; faddrof = false; _ } as fi, NoOffset) ->
+        [Vertex.Region (Region.Field (Struct_field.of_fieldinfo_exn fi))]
+      | _ -> [Vertex.Region (Region.Type_approximation (Primitive_type.of_typ_exn typ))]
+  else
+    match unrollType typ with
+    | TVoid _
+    | TInt _
+    | TEnum _
+    | TFloat _
+    | TPtr _
+    | TNamed _ -> assert false (* Unrolled, not a pointer or arithmetic *)
+    | TArray (typ,_,_,_) ->
+      [Vertex.Region (Region.Type_approximation (Primitive_type.of_typ_exn (TPtr (typ, []))))]
+    | TFun _ as t ->
+      [Vertex.Region (Region.Type_approximation (Primitive_type.of_typ_exn (TPtr (t, []))))]
+    | TComp (ci, _, _) ->
+      
+    | TBuiltin_va_list _ ->
+      [Vertex.Region (Region.Type_approximation (Primitive_type.of_typ_exn voidPtrType))]
+
 class effect_collector file_info def =
-  let with_effect = File_info.with_effect file_info def in
+  let eff = File_info.get file_info def in
   object
-    val reads =
-      let eff = File_info.get file_info def in
-      let g = Deps.create ~size:(Writes_map.cardinal eff.Effect.reads) () in
+    val writes =
+      let g = Deps.create ~size:(Writes_map.cardinal eff.Effect.writes) () in
       Writes_map.iter
         (fun x from ->
            let x = Vertex.of_writes x in
@@ -294,16 +351,33 @@ class effect_collector file_info def =
            Formal_var_set.iter
              (fun v -> Deps.add_edge g x (Vertex.Parameter v))
              from.Reads.poly)
-        eff.Effect.reads;
+        eff.Effect.writes;
       g
+    val is_target = eff.Effect.is_target
     method result =
-      ignore @@ Oper.add_transitive_closure reads;
-      let reads =
+      ignore @@ Oper.add_transitive_closure writes;
+      let writes =
         Writes_map.empty |>
         Deps.fold_vertex
-          (fun v acc ->
-          )
-          
+          (fun v ->
+             if Vertex.is_writable v then
+               Reads.empty |>
+               Deps.fold_succ
+                 (function
+                   | Vertex.Region r -> Reads.with_global r
+                   | Vertex.Parameter v -> Reads.with_poly v
+                   | Vertex.Local v -> Extlib.id
+                   | Vertex.Result -> failwith "Should not happen: dependence on the return value")
+                 writes
+                 v |>
+               Writes_map.add @@ Vertex.to_writes_exn v
+             else
+               Extlib.id)
+          writes
       in
-      File_info.get file_info def
+      File_info.with_effect file_info def (Effect.with_target is_target %> Effect.with_writes writes)
+
+    inherit frama_c_inplace
+
+    
   end
