@@ -1,0 +1,15 @@
+*.cmi
+*.cmt
+*.cmti
+*.cmo
+*.cmx
+*.cma
+*.cmxa
+*.cmxs
+*.o
+frama-c
+*.plugin.generated
+*.check_mli_exists
+META.*
+.depend
+top
