@@ -29,3 +29,12 @@ module Target_functions =
       let arg_name = ""
       let default = Datatype.String.Set.of_list ["__VERIFIER_error"; "ldv_assume"]
     end)
+
+module Alloc_functions =
+  Filled_string_set
+    (struct
+      let option_name = "-alloc_functions"
+      let help = "Specify names of memory allocating functions"
+      let arg_name = ""
+      let default = Datatype.String.Set.of_list ["malloc"; "kmalloc"; "kzalloc"]
+    end)

@@ -7,6 +7,8 @@
 *.cmxa
 *.cmxs
 *.o
+*.annot
+Crude_slicer_DEP
 frama-c
 *.plugin.generated
 *.check_mli_exists
