@@ -15,6 +15,8 @@ open Cil_datatype
 open Cil
 open Visitor
 
+module Console = Options
+
 let (%>) f g x = f (g x)
 
 module Primitive_type : sig
@@ -222,9 +224,9 @@ module Cg = Callgraph.Cg
 module Components = Graph.Components.Make (Cg.G)
 
 let condensate () =
-  Kernel.feedback "Computing callgraph...";
+  Console.feedback "Computing callgraph...";
   let cg = Cg.get () in
-  Kernel.feedback "Callgraph computed";
+  Console.feedback "Callgraph computed";
   Components.scc_list cg
 
 let rec until_convergence ~fixpoint_reached f x =
@@ -251,6 +253,7 @@ let visit_until_convergence ~order ~fixpoint_reached (v : _ -> _ -> _ #frama_c_c
               (fun acc kf ->
                  if Kernel_function.is_definition kf then
                    let def = Kernel_function.get_definition kf in
+                   Console.feedback "Analysing function %s" def.svar.vname;
                    let v = v acc def in
                    ignore @@ visitFramacFunction (v :> frama_c_visitor) def;
                    v#result
@@ -318,7 +321,7 @@ module Vertex = struct
     | None -> invalid_arg "Vertex.to_writes_exn"
 end
 
-module Deps = Graph.Imperative.Graph.Concrete (Vertex)
+module Deps = Graph.Imperative.Digraph.Concrete (Vertex)
 module Oper = Graph.Oper.I (Deps)
 
 module Vertex_set = Set.Make (Vertex)
@@ -330,7 +333,7 @@ let rec vertices_of_lval =
   let local vi = single @@ Vertex.Local (Local_var.of_varinfo_exn vi) in
   let field fi = single @@ Vertex.Region (Region.Field (Struct_field.of_fieldinfo_exn fi)) in
   let type_ typ =
-    let typ = typeDeepDropAllAttributes typ in
+    let typ = typeDeepDropAllAttributes @@ unrollTypeDeep typ in
     single @@ Vertex.Region (Region.Type_approximation (Primitive_type.of_typ_exn typ))
   in
   fun lv ->
@@ -352,8 +355,9 @@ let rec vertices_of_lval =
       | TPtr _
       | TNamed _                                                                        -> assert false
       (* Unrolled, not a pointer or arithmetic *)
-      | TVoid _                                                                         -> type_ voidType
-      | TArray (typ, _, _, _)                                                           -> type_ typ
+      | TVoid _                                                                         -> type_ charType
+      | TArray _                                                                        ->
+        vertices_of_lval @@ addOffsetLval (Index (integer ~loc:Location.unknown 0, NoOffset)) lv
       | TFun _ as t                                                                     -> type_ (TPtr (t, []))
       | TComp (ci, _, _)                                                                ->
         List.fold_left
@@ -468,9 +472,34 @@ let restore_depends eff =
 let project_reads ~fundec ~params =
   let params = List.(combine fundec.sformals @@ map vertices_of_expr params) in
   fun from ->
+    Console.debug " ...project_reads... ";
     Formal_var_set.fold
       (fun fv -> Vertex_set.union @@ List.assoc (fv :> varinfo) params) from.Reads.poly Vertex_set.empty |>
     Region_set.fold (fun r -> Vertex_set.add @@ Vertex.Region r) from.Reads.global
+
+(* Imcomplete! Assumes no cycles present in the graph! But applicable in case we iterate until fixpoint anyway *)
+let add_transitive_closure =
+  let module H = Hashtbl.Make(Vertex) in
+  let module Sccs = Graph.Components.Make (Deps) in
+  fun g ->
+    let n = Deps.nb_vertex g in
+    let h = H.create n in
+    let topo = List.flatten @@ Sccs.scc_list g in
+    let sets = Array.init n (fun _ -> Bitset.create n) in
+    ignore @@ List.fold_left (fun acc v -> H.add h v acc; acc + 1) 0 topo;
+    ignore @@
+    List.iter
+      (fun v ->
+         let i = H.find h v in
+         Deps.iter_succ
+           (fun v ->
+              let j = H.find h v in
+              Bitset.set sets.(i) j;
+              Bitset.unite sets.(i) sets.(j))
+           g
+           v)
+      topo;
+    H.iter (fun k v -> H.iter (fun k' v' -> if Bitset.mem sets.(v) v' then Deps.add_edge g k k') h) h
 
 class effect_collector file_info def =
   let eff = File_info.get file_info def in
@@ -493,7 +522,10 @@ class effect_collector file_info def =
     val mutable depends = restore_depends eff
 
     method result =
-      ignore @@ Oper.add_transitive_closure writes;
+      Console.debug " ...result... ";
+      (*ignore @@ Oper.add_transitive_closure writes;*)
+      add_transitive_closure writes;
+      Console.debug " ...closed... ";
       let depends, local_deps, result_dep = store_depends ~writes depends in
       let writes =
         Writes_map.empty |>
@@ -532,16 +564,22 @@ class effect_collector file_info def =
     method! vstmt =
       let collect_reads () = Stack.fold Vertex_set.union all_reads curr_reads in
       let add_edges ~lv ~from =
+        Console.debug " ...add_edges... (%d x %d)" (Vertex_set.cardinal lv) (Vertex_set.cardinal from);
         let from = Vertex_set.union from @@ collect_reads () in
         Vertex_set.iter (fun lv -> Deps.add_vertex writes lv; Vertex_set.iter (Deps.add_edge writes lv) from) lv
       in
       let add_depends ~reach_target =
+        Console.debug " ...add_depends... ";
         if reach_target then is_target <- true;
         if is_target then depends <- Vertex_set.union depends @@ collect_reads ()
       in
       let handle_call lvo fundec params =
+        Console.debug " ... handle_call... ";
         let eff = File_info.get file_info fundec in
-        if eff.Effect.is_target then add_depends ~reach_target:true;
+        if eff.Effect.is_target then begin
+          add_depends ~reach_target:true;
+          depends <- Vertex_set.union depends @@ project_reads ~fundec ~params eff.Effect.depends
+        end;
         let lvo = opt_map vertices_of_lval lvo in
         let project_reads = project_reads ~fundec ~params in
         Writes_map.iter
@@ -555,9 +593,11 @@ class effect_collector file_info def =
         eff.Effect.writes
       in
       let handle_all_reads () =
+        Console.debug " ...handle_all_reads... ";
         let all_reads' = collect_reads () in
         add_depends ~reach_target:false;
         Deps.iter_vertex (fun v -> Vertex_set.iter (Deps.add_edge writes v) all_reads') writes;
+        Console.debug " ...ready... ";
         all_reads <- all_reads'
       in
       let continue_under vs =
@@ -620,6 +660,7 @@ let effects_settled fs ~old ~fresh =
     fs
 
 let collect_effects () =
+  Console.feedback "Collecting initial effects...";
   visit_until_convergence
     ~order:`topological
     ~fixpoint_reached:effects_settled
@@ -646,7 +687,7 @@ class marker file_info def =
     inherit frama_c_inplace
     method! vstmt =
       let handle_call ~s lvo fundec params =
-        let mark () = requires <- Requires.(with_body def @@ with_stmt s requires) in
+        let mark () = requires <- Requires.(with_body fundec @@ with_stmt s requires) in
         let eff = File_info.get file_info fundec in
         let lvo = opt_map vertices_of_lval lvo in
         let writes =
