@@ -472,7 +472,6 @@ let restore_depends eff =
 let project_reads ~fundec ~params =
   let params = List.(combine fundec.sformals @@ map vertices_of_expr params) in
   fun from ->
-    Console.debug " ...project_reads... ";
     Formal_var_set.fold
       (fun fv -> Vertex_set.union @@ List.assoc (fv :> varinfo) params) from.Reads.poly Vertex_set.empty |>
     Region_set.fold (fun r -> Vertex_set.add @@ Vertex.Region r) from.Reads.global
@@ -522,10 +521,8 @@ class effect_collector file_info def =
     val mutable depends = restore_depends eff
 
     method result =
-      Console.debug " ...result... ";
       (*ignore @@ Oper.add_transitive_closure writes;*)
       add_transitive_closure writes;
-      Console.debug " ...closed... ";
       let depends, local_deps, result_dep = store_depends ~writes depends in
       let writes =
         Writes_map.empty |>
@@ -564,17 +561,14 @@ class effect_collector file_info def =
     method! vstmt =
       let collect_reads () = Stack.fold Vertex_set.union all_reads curr_reads in
       let add_edges ~lv ~from =
-        Console.debug " ...add_edges... (%d x %d)" (Vertex_set.cardinal lv) (Vertex_set.cardinal from);
         let from = Vertex_set.union from @@ collect_reads () in
         Vertex_set.iter (fun lv -> Deps.add_vertex writes lv; Vertex_set.iter (Deps.add_edge writes lv) from) lv
       in
       let add_depends ~reach_target =
-        Console.debug " ...add_depends... ";
         if reach_target then is_target <- true;
         if is_target then depends <- Vertex_set.union depends @@ collect_reads ()
       in
       let handle_call lvo fundec params =
-        Console.debug " ... handle_call... ";
         let eff = File_info.get file_info fundec in
         if eff.Effect.is_target then begin
           add_depends ~reach_target:true;
@@ -593,11 +587,9 @@ class effect_collector file_info def =
         eff.Effect.writes
       in
       let handle_all_reads () =
-        Console.debug " ...handle_all_reads... ";
         let all_reads' = collect_reads () in
         add_depends ~reach_target:false;
         Deps.iter_vertex (fun v -> Vertex_set.iter (Deps.add_edge writes v) all_reads') writes;
-        Console.debug " ...ready... ";
         all_reads <- all_reads'
       in
       let continue_under vs =
@@ -669,10 +661,13 @@ let collect_effects () =
 
 class marker file_info def =
   let eff = File_info.get file_info def in
-  object
+  object(self)
     val mutable depends = restore_depends eff
     val mutable requires = eff.Effect.requires
-
+    method add_stmt s =
+      requires <- Requires.with_stmt s requires
+    method add_body f =
+      requires <- Requires.with_body f requires
     method result =
       let depends, local_deps, result_dep = store_depends depends in
       File_info.with_effect
@@ -687,7 +682,7 @@ class marker file_info def =
     inherit frama_c_inplace
     method! vstmt =
       let handle_call ~s lvo fundec params =
-        let mark () = requires <- Requires.(with_body fundec @@ with_stmt s requires) in
+        let mark () = self#add_body fundec; self#add_stmt s in
         let eff = File_info.get file_info fundec in
         let lvo = opt_map vertices_of_lval lvo in
         let writes =
@@ -727,23 +722,22 @@ class marker file_info def =
       let handle_assignment ~s ~lv ~vs =
         if Vertex_set.exists (fun v -> Vertex_set.mem v depends) @@ vertices_of_lval lv then begin
           depends <- Vertex_set.union depends vs;
-          requires <- Requires.with_stmt s requires
+          self#add_stmt s
         end;
         SkipChildren
       in
       let handle_stmt_list ~s stmts =
         if List.exists (fun s -> Stmt.Set.mem s requires.Requires.stmts) stmts then
-          requires <- Requires.with_stmt s requires
+          self#add_stmt s
       in
       fun s ->
         match s.skind with
         | Instr (Set (lv, e, _)) ->
           handle_assignment ~s ~lv ~vs:(vertices_of_expr e)
         | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _)) when Options.Target_functions.mem vi.vname ->
-          requires <- Requires.with_stmt s requires;
+          self#add_stmt s;
           begin try
-            requires <-
-              Requires.with_body (Kernel_function.get_definition @@ Globals.Functions.find_by_name vi.vname) requires
+            self#add_body (Kernel_function.get_definition @@ Globals.Functions.find_by_name vi.vname)
           with
           | Kernel_function.No_Definition -> ()
           end;
@@ -759,7 +753,7 @@ class marker file_info def =
           begin try
             handle_call ~s lvo (Kernel_function.get_definition (Globals.Functions.find_by_name vi.vname)) params
           with
-          | Kernel_function.No_Definition -> ()
+          | Kernel_function.No_Definition -> self#add_stmt s
           end;
           SkipChildren
         (* call by pointer *)
@@ -771,7 +765,7 @@ class marker file_info def =
         | Instr (Asm _ | Skip _ | Code_annot _) ->
           SkipChildren
         | Return (eo, _) ->
-          requires <- Requires.with_stmt s requires;
+          self#add_stmt s;
           opt_fold
             (fun e _ ->
                if Vertex_set.mem Vertex.Result depends then
@@ -780,7 +774,7 @@ class marker file_info def =
             ();
           SkipChildren
         | Goto _ | Break _ | Continue _ ->
-          requires <- Requires.with_stmt s requires;
+          self#add_stmt s;
           SkipChildren
         | If (_, block1, block2, _) ->
           DoChildrenPost (fun s -> handle_stmt_list ~s @@ block1.bstmts @ block2.bstmts; s)
@@ -811,14 +805,36 @@ class sweeper file_info =
     method! vfunc f =
       required_stmts <- (File_info.get file_info f).Effect.requires.Requires.stmts;
       DoChildren
-    method! vstmt s =
+    method! vstmt_aux s =
       if not (Stmt.Set.mem s required_stmts) then
-        s.ghost <- true;
-      SkipChildren
+        if Options.Use_ghosts.is_set () then begin
+          s.ghost <- true;
+          DoChildren
+        end else begin
+          let rec collect_labels acc s =
+            let acc = List.fold_right Label.Set.add s.labels acc in
+            match s.skind with
+            | If (_, block1, block2, _) ->
+              List.fold_left collect_labels acc @@ block1.bstmts @ block2.bstmts
+            | Switch (_, block, _, _)
+            | Loop (_, block, _, _, _)
+            | Block block ->
+              List.fold_left collect_labels acc block.bstmts
+            | UnspecifiedSequence l ->
+              List.fold_left collect_labels acc @@ List.map (fun (s, _ ,_ ,_, _) -> s) l
+            | _ -> acc
+          in
+          let collect_labels s = Label.Set.(elements @@ collect_labels empty s) in
+          ChangeTo { s with skind = Instr (Skip (Stmt.loc s)); labels = collect_labels s }
+        end
+      else
+        DoChildren
+
     method! vglob_aux  =
       function
       | GFun (f, _) when not (Fundec.Set.mem f required_bodies) ->
-        ChangeTo []
+        (* ChangeTo [] *)
+        DoChildren
       | _ -> DoChildren
   end
 

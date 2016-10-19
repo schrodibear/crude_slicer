@@ -21,6 +21,13 @@ module Analysis =
       let help = "perform crude slicing as preprocessing of a reachability verification task"
     end)
 
+module Use_ghosts =
+  False
+    (struct
+      let option_name = "-use_ghosts"
+      let help = "make sliced out statements ghost instead of removing them"
+    end)
+
 module Target_functions =
   Filled_string_set
     (struct
