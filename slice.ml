@@ -224,9 +224,7 @@ module Cg = Callgraph.Cg
 module Components = Graph.Components.Make (Cg.G)
 
 let condensate () =
-  Console.feedback "Computing callgraph...";
   let cg = Cg.get () in
-  Console.feedback "Callgraph computed";
   Components.scc_list cg
 
 let rec until_convergence ~fixpoint_reached f x =
@@ -253,7 +251,6 @@ let visit_until_convergence ~order ~fixpoint_reached (v : _ -> _ -> _ #frama_c_c
               (fun acc kf ->
                  if Kernel_function.is_definition kf then
                    let def = Kernel_function.get_definition kf in
-                   Console.feedback "Analysing function %s" def.svar.vname;
                    let v = v acc def in
                    ignore @@ visitFramacFunction (v :> frama_c_visitor) def;
                    v#result
@@ -652,7 +649,6 @@ let effects_settled fs ~old ~fresh =
     fs
 
 let collect_effects () =
-  Console.feedback "Collecting initial effects...";
   visit_until_convergence
     ~order:`topological
     ~fixpoint_reached:effects_settled
