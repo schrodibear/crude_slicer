@@ -6,6 +6,8 @@
 (*                                                                        *)
 (**************************************************************************)
 
+[@@@ocaml.warning "-4-9"]
+
 open Extlib
 
 open Cil_types
@@ -90,7 +92,9 @@ module Region = struct
     | Variable v1, Variable v2 -> Varinfo.equal (v1 :> varinfo) (v2 :> varinfo)
     | Field f1, Field f2 -> Fieldinfo.equal (f1 :> fieldinfo) (f2 :> fieldinfo)
     | Type_approximation t1, Type_approximation t2 -> Typ.equal (t1 :> typ) (t2 :> typ)
-    | _ -> false
+    | Variable _, (Field _ | Type_approximation _)
+    | Field _, (Variable _ | Type_approximation _)
+    | Type_approximation _, (Variable _ | Field _) -> false
 
   let hash =
     function
@@ -130,6 +134,7 @@ module Requires = struct
   let with_body f r = { r with bodies = Fundec.Set.add f r.bodies }
   let with_stmt s r = { r with stmts = Stmt.Set.add s r.stmts }
   let equal r1 r2 = Fundec.Set.equal r1.bodies r2.bodies && Stmt.Set.equal r1.stmts r2.stmts
+  let union r1 r2 = { bodies = Fundec.Set.union r1.bodies r2.bodies; stmts = Stmt.Set.union r1.stmts r2.stmts }
 end
 
 module Writes = struct
@@ -147,7 +152,8 @@ module Writes = struct
     match w1, w2 with
     | Region r1, Region r2 -> Region.equal r1 r2
     | Result, Result -> true
-    | _ -> false
+    | Region _, Result
+    | Result, Region _ -> false
 
   let hash =
     function
@@ -168,6 +174,7 @@ module Effect = struct
               is_target  : bool;
       mutable depends    : Reads.t; (* Mutabilty should only be used for forward depends propagation! *)
               local_deps : Local_var_set.t;
+      mutable result_dep : bool;
               requires   : Requires.t
     }
 
@@ -177,6 +184,7 @@ module Effect = struct
       is_target = false;
       depends = Reads.empty;
       local_deps = Local_var_set.empty;
+      result_dep = false;
       requires = Requires.empty
     }
 
@@ -186,7 +194,9 @@ module Effect = struct
   let with_poly_dep d e = { e with depends = with_poly d e.depends }
   let with_depends d e = { e with depends = union e.depends d }
   let with_local_deps d e = { e with local_deps = Local_var_set.union e.local_deps d }
-  let with_target t e = if e.is_target == t then e else { e with is_target = t }
+  let with_result_dep d e = let d' = e.result_dep || d in if e.result_dep = d' then e else { e with result_dep = d' }
+  let with_requires d e = { e with requires = Requires.union d e.requires }
+  let with_target t e = let t' = e.is_target || t in if e.is_target = t' then e else { e with is_target = t' }
 
   open Requires
   let with_body_req f e = { e with requires = with_body f e.requires }
@@ -206,6 +216,8 @@ module File_info = struct
   let get fi f = try Fundec.Map.find f fi with Not_found -> Effect.empty
   let with_effect fi f e = Fundec.Map.add f (e @@ try Fundec.Map.find f fi with Not_found -> Effect.empty) fi
 end
+
+module Cg = Callgraph.Cg
 
 module Components = Graph.Components.Make (Cg.G)
 
@@ -312,13 +324,14 @@ module Oper = Graph.Oper.I (Deps)
 module Vertex_set = Set.Make (Vertex)
 
 let rec vertices_of_lval =
-  let parameter vi = [Vertex.Parameter (Formal_var.of_varinfo_exn vi)] in
-  let global vi = [Vertex.Region (Region.Variable (Global_var.of_varinfo_exn vi))] in
-  let local vi = [Vertex.Local (Local_var.of_varinfo_exn vi)] in
-  let field fi = [Vertex.Region (Region.Field (Struct_field.of_fieldinfo_exn fi))] in
+  let single = Vertex_set.singleton in
+  let parameter vi = single @@ Vertex.Parameter (Formal_var.of_varinfo_exn vi) in
+  let global vi = single @@ Vertex.Region (Region.Variable (Global_var.of_varinfo_exn vi)) in
+  let local vi = single @@ Vertex.Local (Local_var.of_varinfo_exn vi) in
+  let field fi = single @@ Vertex.Region (Region.Field (Struct_field.of_fieldinfo_exn fi)) in
   let type_ typ =
-    let typ = typeDeepDropAllAttributes @@ unrollTypeDeep typ in
-    [Vertex.Region (Region.Type_approximation (Primitive_type.of_typ_exn typ))]
+    let typ = typeDeepDropAllAttributes typ in
+    single @@ Vertex.Region (Region.Type_approximation (Primitive_type.of_typ_exn typ))
   in
   fun lv ->
     let typ = typeOfLval lv in
@@ -340,10 +353,13 @@ let rec vertices_of_lval =
       | TNamed _                                                                        -> assert false
       (* Unrolled, not a pointer or arithmetic *)
       | TVoid _                                                                         -> type_ voidType
-      | TArray (typ, _, _, _)                                                           -> type_ (TPtr (typ, []))
+      | TArray (typ, _, _, _)                                                           -> type_ typ
       | TFun _ as t                                                                     -> type_ (TPtr (t, []))
       | TComp (ci, _, _)                                                                ->
-        List.(flatten @@ map (fun fi -> vertices_of_lval @@ addOffsetLval (Field (fi, NoOffset)) lv) ci.cfields)
+        List.fold_left
+          (fun acc fi -> Vertex_set.union acc @@ vertices_of_lval @@ addOffsetLval (Field (fi, NoOffset)) lv)
+          Vertex_set.empty
+          ci.cfields
       | TBuiltin_va_list _                                                              -> type_ voidPtrType
 
 class vertex_collector =
@@ -353,7 +369,7 @@ class vertex_collector =
 
     inherit frama_c_inplace
     method! vlval lv =
-      vertices <- List.fold_right Vertex_set.add (vertices_of_lval lv) vertices;
+      vertices <- Vertex_set.union (vertices_of_lval lv) vertices;
       DoChildren
   end
 
@@ -413,12 +429,13 @@ let store_depends ?writes depends =
   let local_deps =
     Vertex_set.fold (function Vertex.Local lv -> Local_var_set.add lv | _ -> id) depends Local_var_set.empty
   in
+  let result_dep = Vertex_set.mem Vertex.Result depends in
   let depends =
     Reads.empty |>
     Vertex_set.fold
       (fun v ->
          match v with
-         | Vertex.Local lv    ->
+         | Vertex.Local _  ->
            opt_fold
              (fun writes _ ->
                 Reads.union
@@ -436,16 +453,17 @@ let store_depends ?writes depends =
              id
          | Vertex.Parameter p -> Reads.with_poly p
          | Vertex.Region r    -> Reads.with_global r
-         | Vertex.Result      -> fail_on_result ())
+         | Vertex.Result      -> id)
       depends
   in
-  depends, local_deps
+  depends, local_deps, result_dep
 
 let restore_depends eff =
   let open Vertex_set in
   Region_set.fold (fun r -> add @@ Vertex.Region r) eff.Effect.depends.Reads.global empty |>
   Formal_var_set.fold (fun v -> add @@ Vertex.Parameter v) eff.Effect.depends.Reads.poly |>
-  Local_var_set.fold (fun v -> add @@ Vertex.Local v) eff.Effect.local_deps
+  Local_var_set.fold (fun v -> add @@ Vertex.Local v) eff.Effect.local_deps |>
+  if eff.Effect.result_dep then add Vertex.Result else id
 
 let project_reads ~fundec ~params =
   let params = List.(combine fundec.sformals @@ map vertices_of_expr params) in
@@ -476,7 +494,7 @@ class effect_collector file_info def =
 
     method result =
       ignore @@ Oper.add_transitive_closure writes;
-      let depends, local_deps = store_depends ~writes depends in
+      let depends, local_deps, result_dep = store_depends ~writes depends in
       let writes =
         Writes_map.empty |>
         Deps.fold_vertex
@@ -487,7 +505,7 @@ class effect_collector file_info def =
                  (function
                    | Vertex.Region r    -> Reads.with_global r
                    | Vertex.Parameter v -> Reads.with_poly v
-                   | Vertex.Local v     -> id
+                   | Vertex.Local _     -> id
                    | Vertex.Result      -> fail_on_result ())
                  writes
                  v |>
@@ -499,7 +517,12 @@ class effect_collector file_info def =
       File_info.with_effect
         file_info
         def
-        Effect.(with_target is_target %> with_writes writes %> with_depends depends %> with_local_deps local_deps)
+        Effect.(
+          with_target is_target %>
+          with_writes writes %>
+          with_depends depends %>
+          with_local_deps local_deps %>
+          with_result_dep result_dep)
 
     val mutable all_reads = Vertex_set.empty
     val curr_reads = Stack.create ()
@@ -510,7 +533,7 @@ class effect_collector file_info def =
       let collect_reads () = Stack.fold Vertex_set.union all_reads curr_reads in
       let add_edges ~lv ~from =
         let from = Vertex_set.union from @@ collect_reads () in
-        List.iter (fun lv -> Deps.add_vertex writes lv; Vertex_set.iter (Deps.add_edge writes lv) from) lv
+        Vertex_set.iter (fun lv -> Deps.add_vertex writes lv; Vertex_set.iter (Deps.add_edge writes lv) from) lv
       in
       let add_depends ~reach_target =
         if reach_target then is_target <- true;
@@ -525,8 +548,8 @@ class effect_collector file_info def =
           (fun w from ->
              let lv =
                match w with
-               | Writes.Region _ -> [Vertex.of_writes w]
-               | Writes.Result   -> opt_conv [] lvo
+               | Writes.Region _ -> Vertex_set.singleton @@ Vertex.of_writes w
+               | Writes.Result   -> opt_conv Vertex_set.empty lvo
              in
              add_edges ~lv ~from:(project_reads from))
         eff.Effect.writes
@@ -574,7 +597,9 @@ class effect_collector file_info def =
           SkipChildren
         | Return (eo, _) ->
           handle_all_reads ();
-          add_edges ~lv:[Vertex.Result] ~from:(opt_fold (fun e _ -> vertices_of_expr e) eo Vertex_set.empty);
+          add_edges
+            ~lv:(Vertex_set.singleton Vertex.Result)
+            ~from:(opt_fold (fun e _ -> vertices_of_expr e) eo Vertex_set.empty);
           SkipChildren
         | Goto _ | Break _ | Continue _ ->
           handle_all_reads ();
@@ -608,15 +633,20 @@ class marker file_info def =
     val mutable requires = eff.Effect.requires
 
     method result =
-      let depends, local_deps = store_depends depends in
+      let depends, local_deps, result_dep = store_depends depends in
       File_info.with_effect
         file_info
         def
-        Effect.(with_depends depends %> with_local_deps local_deps %> fun e -> { e with requires })
+        Effect.(
+          with_depends depends %>
+          with_local_deps local_deps %>
+          with_requires requires %>
+          with_result_dep result_dep)
 
     inherit frama_c_inplace
     method! vstmt =
-      let handle_call lvo fundec params =
+      let handle_call ~s lvo fundec params =
+        let mark () = requires <- Requires.(with_body def @@ with_stmt s requires) in
         let eff = File_info.get file_info fundec in
         let lvo = opt_map vertices_of_lval lvo in
         let writes =
@@ -625,23 +655,36 @@ class marker file_info def =
                match w with
                | Writes.Region r -> Vertex_set.mem (Vertex.Region r) depends
                | Writes.Result
-                 when has_some lvo -> List.exists (fun v -> Vertex_set.mem v depends) @@ the lvo
+                 when has_some lvo -> Vertex_set.exists (fun v -> Vertex_set.mem v depends) @@ the lvo
                | Writes.Result -> false)
             eff.Effect.writes
         in
+        if eff.Effect.is_target then mark ();
         if writes <> Writes_map.empty && eff <> Effect.empty then
-          let reads =
+          let depends', result_dep =
             Writes_map.fold
-              (fun _ -> Reads.union)
+              (function
+                | Writes.Region r -> fun _ ->  Reads.with_global r
+                | Writes.Result -> fun _ -> id)
               writes
-              Reads.empty
+              Reads.empty |> fun d ->
+            d, if Writes_map.mem Writes.Result writes then true else false
           in
-          eff.Effect.depends <- Reads.union reads eff.Effect.depends;
-          depends <- Vertex_set.union depends @@ project_reads ~fundec ~params reads;
-          requires <- Requires.with_body def requires
+          (* !!! *)
+          eff.Effect.depends <- Reads.union depends' eff.Effect.depends;
+          eff.Effect.result_dep <- result_dep || eff.Effect.result_dep;
+          depends <-
+            Vertex_set.union
+              depends @@
+              project_reads ~fundec ~params @@
+                Writes_map.fold
+                  (fun _ -> Reads.union)
+                  writes
+                  Reads.empty;
+          mark ()
       in
       let handle_assignment ~s ~lv ~vs =
-        if List.exists (fun v -> Vertex_set.mem v depends) @@ vertices_of_lval lv then begin
+        if Vertex_set.exists (fun v -> Vertex_set.mem v depends) @@ vertices_of_lval lv then begin
           depends <- Vertex_set.union depends vs;
           requires <- Requires.with_stmt s requires
         end;
@@ -673,7 +716,7 @@ class marker file_info def =
           end
         | Instr (Call (lvo, { enode = Lval (Var vi, NoOffset) }, params, _)) when isFunctionType vi.vtype ->
           begin try
-            handle_call lvo (Kernel_function.get_definition (Globals.Functions.find_by_name vi.vname)) params
+            handle_call ~s lvo (Kernel_function.get_definition (Globals.Functions.find_by_name vi.vname)) params
           with
           | Kernel_function.No_Definition -> ()
           end;
@@ -681,12 +724,21 @@ class marker file_info def =
         (* call by pointer *)
         | Instr (Call (lvo, _, params, _)) ->
           List.iter
-            (fun kf -> handle_call lvo (Kernel_function.get_definition kf) params)
+            (fun kf -> handle_call ~s lvo (Kernel_function.get_definition kf) params)
             (filter_matching_kfs params);
           SkipChildren
         | Instr (Asm _ | Skip _ | Code_annot _) ->
           SkipChildren
-        | Return _ | Goto _ | Break _ | Continue _ ->
+        | Return (eo, _) ->
+          requires <- Requires.with_stmt s requires;
+          opt_fold
+            (fun e _ ->
+               if Vertex_set.mem Vertex.Result depends then
+                 depends <- Vertex_set.union depends (vertices_of_expr e))
+            eo
+            ();
+          SkipChildren
+        | Goto _ | Break _ | Continue _ ->
           requires <- Requires.with_stmt s requires;
           SkipChildren
         | If (_, block1, block2, _) ->

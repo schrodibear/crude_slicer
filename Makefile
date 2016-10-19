@@ -33,12 +33,14 @@ endif
 
 PLUGIN_DIR      ?= .
 
+INCLUDES:=-I $(FRAMAC_LIBDIR)/plugins
+
 PLUGIN_NAME:=Crude_slicer
-PLUGIN_CMO:= options register
+PLUGIN_CMO:= options slice register
 PLUGIN_HAS_MLI:=yes
 PLUGIN_DEPENDENCIES:=Callgraph
-PLUGIN_BFLAGS:=$(JESSIE_INCLUDES) -w +a -safe-string -short-paths -strict-formats -no-alias-deps
-PLUGIN_OFLAGS:=$(JESSIE_INCLUDES) -w +a -safe-string -short-paths -strict-formats -no-alias-deps
+PLUGIN_BFLAGS:=$(INCLUDES) -w +a -safe-string -short-paths -strict-formats -no-alias-deps
+PLUGIN_OFLAGS:=$(INCLUDES) -w +a -safe-string -short-paths -strict-formats -no-alias-deps
 
 ifeq ($(FRAMAC_MAKE),yes)
 unexport $(FRAMAC_MAKE)

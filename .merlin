@@ -1,5 +1,6 @@
 S .
 B .
+B /home/schrodi/.opam/4.03.0/lib/frama-c/plugins/
 S frama-c/src/
 B frama-c/src/
 S frama-c/src/kernel_services
