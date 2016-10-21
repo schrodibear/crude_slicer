@@ -203,7 +203,7 @@ module Make_reporting_hashmap (M_key : Hashtbl.HashedType) (S : Set) : sig
   val mem : t -> key -> bool
   val iter : (key -> set -> unit) -> t -> unit
   exception Different_flag
-  val filter_map_inplace : (key -> set -> set option) -> t -> unit
+  val filter_map_inplace : check:bool -> (key -> set -> set option) -> t -> unit
   val find : t -> key -> set
   val fold : (key -> set -> 'b -> 'b) -> t -> 'b -> 'b
   val length : t -> int
@@ -249,13 +249,13 @@ end = struct
       H.replace h k r;
       r
   exception Different_flag
-  let filter_map_inplace f (h, fl) =
+  let filter_map_inplace ~check f (h, fl) =
     H.filter_map_inplace
       (fun e set ->
          let r = f e set in
          match r with
          | None -> Flag.report fl; None
-         | Some s -> if S.flag s != fl then raise Different_flag else (if s != set then Flag.report fl; r))
+         | Some s -> if check && S.flag s != fl then raise Different_flag else (if s != set then Flag.report fl; r))
       h
   let fold f (h, _) x =
     H.fold f h x
@@ -405,7 +405,7 @@ end
 let rec until_convergence f fi scc fl =
   f fi scc;
   if not (Flag.reported fl) then ()
-  else until_convergence f fi scc fl
+  else (Flag.clear fl; until_convergence f fi scc fl)
 
 let until_convergence f fi scc fl =
   Flag.clear fl;
@@ -842,6 +842,7 @@ class marker fl file_info def =
         (* first project writes *)
         let writes = H_write.shallow_copy (Flag.create ()) eff.Effect.writes in
         H_write.filter_map_inplace
+          ~check:false
           (fun w reads ->
              match w with
              | Writes.Region r ->
@@ -957,6 +958,8 @@ class sweeper fl file_info =
          try Fundec.Hashtbl.replace result (Kernel_function.get_definition kf) ()
          with Kernel_function.No_Definition -> ())
       (get_addressed_kfs ());
+    let main = Globals.Functions.find_by_name @@ Kernel.MainFunction.get () in
+    if Kernel_function.is_definition main then Fundec.Hashtbl.add result (Kernel_function.get_definition main) ();
     result
   in
   object
