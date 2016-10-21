@@ -38,8 +38,7 @@ end = struct
     else None
 
   let of_typ_exn t =
-    let t = unrollTypeDeep t in
-    if isArithmeticOrPointerType t then t
+    if isArithmeticOrPointerType @@ unrollType t then t
     else invalid_arg "Primitive_type.of_typ_exn"
 end
 
@@ -505,7 +504,7 @@ let rec add_vertices_of_lval acc =
   let add_local vi = add @@ Vertex.Local (Local_var.of_varinfo_exn vi) in
   let add_field fi = add @@ Vertex.Region (Region.Field (Struct_field.of_fieldinfo_exn fi)) in
   let add_type typ =
-    let typ = typeDeepDropAllAttributes @@ unrollTypeDeep typ in
+    let typ = typeDeepDropAllAttributes (*@@ unrollTypeDeep*) typ in
     add @@ Vertex.Region (Region.Type_approximation (Primitive_type.of_typ_exn typ))
   in
   fun lv ->
@@ -976,7 +975,9 @@ class sweeper fl file_info =
           DoChildren
         end else begin
           let rec collect_labels acc s =
-            let acc = List.fold_right Label.Set.add s.labels acc in
+            let acc =
+              List.fold_right Label.Set.add (List.filter (function Label _ -> true | _ -> false) s.labels) acc
+            in
             match s.skind with
             | If (_, block1, block2, _) ->
               List.fold_left collect_labels acc @@ block1.bstmts @ block2.bstmts
@@ -988,7 +989,7 @@ class sweeper fl file_info =
               List.fold_left collect_labels acc @@ List.map (fun (s, _ ,_ ,_, _) -> s) l
             | _ -> acc
           in
-          let collect_labels s = Label.Set.(elements @@ collect_labels empty s) in
+          let collect_labels s = Label.Set.(elements @@ collect_labels (Label.Set.of_list s.labels) s) in
           ChangeTo { s with skind = Instr (Skip (Stmt.loc s)); labels = collect_labels s }
         end
       else
