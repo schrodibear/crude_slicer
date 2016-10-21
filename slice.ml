@@ -352,7 +352,8 @@ module Effect = struct
               depends    : Reads.t;
               local_deps : H_local_var.t;
       mutable result_dep : bool;
-              requires   : Requires.t
+              requires   : Requires.t;
+              flag       : Flag.t;
     }
 
   let create f =
@@ -362,7 +363,8 @@ module Effect = struct
       depends = Reads.create f;
       local_deps = H_local_var.create f;
       result_dep = false;
-      requires = Requires.create f
+      requires = Requires.create f;
+      flag = f
     }
 
   let get_reads e w = H_write.find e.writes w
@@ -374,9 +376,9 @@ module Effect = struct
   let add_depends d e = Reads.import ~from:d e.depends
   let add_local_dep d e = H_local_var.add e.local_deps d
   let add_local_deps from e = H_local_var.import ~from e.local_deps
-  let add_result_dep e = e.result_dep <- true
+  let add_result_dep e = if not e.result_dep then Flag.report e.flag; e.result_dep <- true
   let add_requires d e = Requires.import ~from:d e.requires
-  let set_is_target e = e.is_target <- true
+  let set_is_target e = if not e.is_target then Flag.report e.flag; e.is_target <- true
 
   let add_body_req f e = Requires.add_body f e.requires
   let add_stmt_req s e = Requires.add_stmt s e.requires
@@ -387,7 +389,8 @@ module Effect = struct
       depends = Reads.copy f e.depends;
       local_deps = H_local_var.copy f e.local_deps;
       result_dep = e.result_dep;
-      requires = Requires.copy f e.requires
+      requires = Requires.copy f e.requires;
+      flag = f
     }
 end
 
