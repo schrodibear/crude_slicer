@@ -111,62 +111,207 @@ module Region = struct
     function
     | Variable v1 -> 7 * Varinfo.hash (v1 :> varinfo)
     | Field f -> 7 * Fieldinfo.hash (f :> fieldinfo) + 1
-    | Type_approximation t -> Typ.hash (t :> typ) + 3
+    | Type_approximation t -> 7 * Typ.hash (t :> typ) + 2
 end
 
-module H_region = Hashtbl.Make (Region)
+module Flag : sig
+  type t
+  val create : unit -> t
+  val report : t -> unit
+  val reported : t -> bool
+  val clear : t -> unit
+end = struct
+  type t = bool ref
+  let create () = ref false
+  let report f = f := true
+  let reported f = !f
+  let clear f = f := false
+end
+
+module type Reporting_hashset = sig
+  type elt
+  type t
+  val create : Flag.t -> t
+  val clear : t -> unit
+  val copy :  Flag.t -> t -> t
+  val add : t -> elt -> unit
+  val import : from:t -> t -> unit
+  val remove : t -> elt -> unit
+  val mem : t -> elt -> bool
+  val iter : (elt -> unit) -> t -> unit
+  val filter_inplace : (elt -> bool) -> t -> unit
+  val fold : (elt -> 'b -> 'b) -> t -> 'b -> 'b
+  val length : t -> int
+  val flag : t -> Flag.t
+  val stats : t -> Hashtbl.statistics
+end
+
+module Make_reporting_hashset (M : Hashtbl.HashedType) : Reporting_hashset with type elt = M.t =
+struct
+  type elt = M.t
+  module H = Hashtbl.Make(M)
+  open H
+  type nonrec t = unit t * Flag.t
+  let create f =
+    H.create 32, f
+  let clear (h, f) =
+    if H.length h > 0 then Flag.report f;
+    H.clear h
+  let copy f (h, _) = H.copy h, f
+  let add (h, f) e =
+    if not (H.mem h e) then Flag.report f;
+    H.replace h e ()
+  let import ~from:(from, _) (h, f) =
+    H.iter (fun e () -> if not (H.mem h e) then Flag.report f; H.replace h e ()) from
+  let remove (h, f) e =
+    if H.mem h e then Flag.report f;
+    H.remove h e
+  let mem (h, _) e = H.mem h e
+  let iter f (h, _) =
+    H.iter (fun k () -> f k) h
+  let filter_inplace f (h, fl) =
+    H.filter_map_inplace (fun e () -> let r = f e in if not r then (Flag.report fl; None) else Some ()) h
+  let fold f (h, _) x =
+    H.fold (fun e () x -> f e x) h x
+  let length (h, _) = H.length h
+  let flag (_, f) = f
+  let stats (h, _) = H.stats h
+end
+
+module type Set = sig
+  type t
+  type 'a kind
+  val create : Flag.t -> t
+  val add : t -> 'a kind -> 'a -> unit
+  val import : from:t -> t -> unit
+  val flag : t -> Flag.t
+  val copy : Flag.t -> t -> t
+end
+
+module Make_reporting_hashmap (M_key : Hashtbl.HashedType) (S : Set) : sig
+  type key = M_key.t
+  type set = S.t
+  type 'a kind = 'a S.kind
+  type t
+  val create : Flag.t -> t
+  val clear : t -> unit
+  val copy :  Flag.t -> t -> t
+  val shallow_copy :  Flag.t -> t -> t
+  val add : t -> key -> 'a kind -> 'a -> unit
+  val import : from:t -> t -> unit
+  val remove : t -> key -> unit
+  val mem : t -> key -> bool
+  val iter : (key -> set -> unit) -> t -> unit
+  exception Different_flag
+  val filter_map_inplace : (key -> set -> set option) -> t -> unit
+  val find : t -> key -> set
+  val fold : (key -> set -> 'b -> 'b) -> t -> 'b -> 'b
+  val length : t -> int
+  val flag : t -> Flag.t
+  val stats : t -> Hashtbl.statistics
+end = struct
+  type key = M_key.t
+  type set = S.t
+  type 'a kind = 'a S.kind
+  module H = Hashtbl.Make(M_key)
+  open H
+  type nonrec t = S.t t * Flag.t
+  let create f =
+    H.create 32, f
+  let clear (h, f) =
+    if H.length h > 0 then Flag.report f;
+    H.clear h
+  let copy f (h, _) =
+    let r = H.copy h in
+    H.filter_map_inplace (fun _ r -> Some (S.copy f r)) r;
+    r, f
+  let shallow_copy f (h, _) = H.copy h, f
+  let add (h, f) k kind e  =
+    if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f));
+    S.add (H.find h k) kind e
+  let import ~from:(from, _) (h, f) =
+    H.iter
+      (fun k from ->
+         if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f));
+         S.import ~from (H.find h k))
+      from
+  let remove (h, f) k =
+    if H.mem h k then Flag.report f;
+    H.remove h k
+  let mem (h, _) k = H.mem h k
+  let iter f (h, _) =
+    H.iter f h
+  let find (h, f) k =
+    try H.find h k
+    with Not_found ->
+      let r = S.create f in
+      Flag.report f;
+      H.replace h k r;
+      r
+  exception Different_flag
+  let filter_map_inplace f (h, fl) =
+    H.filter_map_inplace
+      (fun e set ->
+         let r = f e set in
+         match r with
+         | None -> Flag.report fl; None
+         | Some s -> if S.flag s != fl then raise Different_flag else (if s != set then Flag.report fl; r))
+      h
+  let fold f (h, _) x =
+    H.fold f h x
+  let length (h, _) = H.length h
+  let flag (_, f) = f
+  let stats (h, _) = H.stats h
+end
+
+module H_region = Make_reporting_hashset (Region)
 
 module Formal_var = Make_var (struct let is_ok vi = vi.vformal end)
 
-module H_formal_var = Hashtbl.Make (Formal_var)
+module H_formal_var = Make_reporting_hashset (Formal_var)
 
 module Reads = struct
   type t =
     {
-      global : unit H_region.t;
-      poly   : unit H_formal_var.t
+      global : H_region.t;
+      poly   : H_formal_var.t
     }
 
-  let create () = { global = H_region.create 16; poly = H_formal_var.create 16 }
+  type _ kind =
+    | Global : Region.t kind
+    | Poly : Formal_var.t kind
+
+  let create f = { global = H_region.create f; poly = H_formal_var.create f }
   let import ~from r =
-    H_region.(iter (replace r.global) from.global);
-    H_formal_var.(iter (replace r.poly) from.poly)
-  let add_global g r = H_region.replace r.global g ()
-  let add_poly p r = H_formal_var.replace r.poly p ()
-  let subseteq r1 r2 =
-    try
-      H_region.(iter (const' @@ find r2.global) r1.global);
-      H_formal_var.(iter (const' @@ find r2.poly) r2.poly);
-      true
-    with
-    | Not_found -> false
-  let copy r = { global = H_region.copy r.global; poly = H_formal_var.copy r.poly }
+    H_region.import ~from:from.global r.global;
+    H_formal_var.import ~from:from.poly r.poly
+  let add_global g r = H_region.add r.global g
+  let add_poly p r = H_formal_var.add r.poly p
+  let add : type a. _ -> a kind -> a -> _ = fun r ->
+    function
+    | Global -> H_region.add r.global
+    | Poly -> H_formal_var.add r.poly
+  let flag r = H_region.flag r.global
+  let copy f r = { global = H_region.copy f r.global; poly = H_formal_var.copy f r.poly }
 end
 
-module H_fundec = Fundec.Hashtbl
-module H_stmt = Stmt.Hashtbl
+module H_fundec = Make_reporting_hashset (Fundec)
+module H_stmt = Make_reporting_hashset (Stmt)
 
 module Requires = struct
   type t =
     {
-      bodies : unit H_fundec.t;
-      stmts  : unit H_stmt.t
+      bodies : H_fundec.t;
+      stmts  : H_stmt.t
     }
 
-  let create () = { bodies = H_fundec.create 16; stmts = H_stmt.create 64 }
+  let create f = { bodies = H_fundec.create f; stmts = H_stmt.create f }
   let import ~from r =
-    H_fundec.(iter (replace r.bodies) from.bodies);
-    H_stmt.(iter (replace r.stmts) from.stmts)
-  let add_body f r = H_fundec.replace r.bodies f ()
-  let add_stmt s r = H_stmt.replace r.stmts s ()
-  let subseteq r1 r2 =
-    try
-      H_fundec.(iter (const' @@ find r2.bodies) r1.bodies);
-      H_stmt.(iter (const' @@ find r2.stmts) r2.stmts);
-      true
-    with
-    | Not_found -> false
-  let copy r = { bodies = H_fundec.copy r.bodies; stmts = H_stmt.copy r.stmts }
+    H_fundec.import ~from:from.bodies r.bodies;
+    H_stmt.import ~from:from.stmts r.stmts
+  let add_body f r = H_fundec.add r.bodies f
+  let add_stmt s r = H_stmt.add r.stmts s
+  let copy f r = { bodies = H_fundec.copy f r.bodies; stmts = H_stmt.copy f r.stmts }
 end
 
 module Writes = struct
@@ -193,125 +338,99 @@ module Writes = struct
     | Result -> 1
 end
 
-module H_write = Hashtbl.Make (Writes)
+module H_write = Make_reporting_hashmap (Writes) (Reads)
 
 module Local_var = Make_var (struct let is_ok vi = not vi.vglob && not vi.vformal end)
 
-module H_local_var = Hashtbl.Make (Local_var)
+module H_local_var = Make_reporting_hashset (Local_var)
 
 module Effect = struct
   type t =
     {
-              writes     : Reads.t H_write.t;
+              writes     : H_write.t;
       mutable is_target  : bool;
               depends    : Reads.t;
-              local_deps : unit H_local_var.t;
+              local_deps : H_local_var.t;
       mutable result_dep : bool;
               requires   : Requires.t
     }
 
-  let create () =
+  let create f =
     {
-      writes = H_write.create 16;
+      writes = H_write.create f;
       is_target = false;
-      depends = Reads.create ();
-      local_deps = H_local_var.create 16;
+      depends = Reads.create f;
+      local_deps = H_local_var.create f;
       result_dep = false;
-      requires = Requires.create ()
+      requires = Requires.create f
     }
 
-  let get_write e w =
-    try H_write.find e.writes w with Not_found -> let r = Reads.create () in H_write.replace e.writes w r; r
-  let add_writes w e =
-    H_write.iter (fun w from -> Reads.import ~from (get_write e w)) w
-  let add_global_read w r e = Reads.add_global r (get_write e w)
-  let add_poly_read w p e = Reads.add_poly p (get_write e w)
+  let get_reads e w = H_write.find e.writes w
+  let add_writes from e = H_write.import ~from e
+  let add_global_read w r e = Reads.add_global r (get_reads e w)
+  let add_poly_read w p e = Reads.add_poly p (get_reads e w)
   let add_global_dep d e = Reads.add_global d e.depends
   let add_poly_dep d e = Reads.add_poly d e.depends
   let add_depends d e = Reads.import ~from:d e.depends
-  let add_local_dep d e = H_local_var.replace e.local_deps d ()
-  let add_local_deps d e = H_local_var.(iter (replace e.local_deps) d)
+  let add_local_dep d e = H_local_var.add e.local_deps d
+  let add_local_deps from e = H_local_var.import ~from e.local_deps
   let add_result_dep e = e.result_dep <- true
   let add_requires d e = Requires.import ~from:d e.requires
   let set_is_target e = e.is_target <- true
 
   let add_body_req f e = Requires.add_body f e.requires
   let add_stmt_req s e = Requires.add_stmt s e.requires
-  let subseteq e1 e2 =
-    try
-      (H_write.(iter (fun w r -> if not (Reads.subseteq r (find e2.writes w)) then raise Not_found) e1.writes); true)
-      &&
-      (not e1.is_target || e2.is_target) &&
-      Reads.subseteq e1.depends e2.depends &&
-      (H_local_var.(iter (const' @@ find e2.local_deps) e2.local_deps); true) &&
-      (not e1.result_dep || e2.result_dep) &&
-      Requires.subseteq e1.requires e2.requires
-    with
-    | Not_found -> false
-  let copy e =
+  let copy f e =
     {
-      writes =
-        (let writes = H_write.copy e.writes in
-         H_write.filter_map_inplace (fun _ r -> Some (Reads.copy r)) writes;
-         writes);
+      writes = H_write.copy f e.writes;
       is_target = e.is_target;
-      depends = Reads.copy e.depends;
-      local_deps = H_local_var.copy e.local_deps;
+      depends = Reads.copy f e.depends;
+      local_deps = H_local_var.copy f e.local_deps;
       result_dep = e.result_dep;
-      requires = Requires.copy e.requires
+      requires = Requires.copy f e.requires
     }
 end
 
 module File_info = struct
-  type t = Effect.t H_fundec.t
+  module H = Fundec.Hashtbl
+  type t = Effect.t H.t
 
-  let create () = H_fundec.create 256
-  let get fi f = try H_fundec.find fi f with Not_found -> let r = Effect.create () in H_fundec.replace fi f r; r
+  let create () = H.create 256
+  let get fi fl f = try H.find fi f with Not_found -> let r = Effect.create fl in H.replace fi f r; r
 end
 
-module Cg = Callgraph.Cg
-
-module Components = Graph.Components.Make (Cg.G)
-
-let condensate () =
-  Console.debug " ...condensating... ";
-  let cg = Cg.get () in
-  Console.debug " ...sccs... ";
-  let r = Components.scc_list cg in
-  Console.debug " ...finished sccs... ";
-  r
-
-let rec until_convergence ~fixpoint_reached scc f fi =
-  let old = File_info.create () in
-  List.iter (fun d -> H_fundec.replace old d @@ Effect.copy @@ File_info.get fi d) scc;
+let rec until_convergence f fi scc fl =
   f fi scc;
-  if fixpoint_reached scc ~old ~fresh:fi then ()
-  else until_convergence ~fixpoint_reached scc f fi
+  if not (Flag.reported fl) then ()
+  else until_convergence f fi scc fl
+
+let until_convergence f fi scc fl =
+  Flag.clear fl;
+  until_convergence f fi scc fl
 
 class type ['a] frama_c_collector = object inherit frama_c_inplace method reflect : 'a end
 
-let visit_until_convergence ~order ~fixpoint_reached (v : _ -> _ -> _ #frama_c_collector) fi =
-  let sccs = condensate () in
+let visit_until_convergence ~order (v : _ -> _ -> _ -> _ #frama_c_collector) fi sccs =
   let iter =
     match order with
     | `topological -> List.iter
-    | `reversed ->
-      fun f l -> List.(iter f (rev l))
+    | `reversed -> fun f l -> List.(iter f (rev l))
   in
+  let fl = Flag.create () in
   iter
     (fun scc ->
        let scc = List.(Kernel_function.(scc |> filter is_definition |> map get_definition)) in
        until_convergence
-         ~fixpoint_reached
-         scc
          (fun fi ->
             List.iter
               (fun d ->
                  Console.debug "Analysing function %s..." d.svar.vname;
-                 let v = v fi d in
+                 let v = v fl fi d in
                  ignore @@ visitFramacFunction (v :> frama_c_visitor) d;
                  v#reflect))
-         fi)
+         fi
+         scc
+         fl)
     sccs
 
 module Vertex = struct
@@ -499,18 +618,33 @@ let store_depends ?writes depends e =
 let restore_depends eff =
   let open H_vertex in
   let acc = create 32 in
-  H_region.iter (fun r -> replace acc (Vertex.Region r)) eff.Effect.depends.Reads.global;
-  H_formal_var.iter (fun v -> replace acc (Vertex.Parameter v)) eff.Effect.depends.Reads.poly;
-  H_local_var.iter (fun v -> replace acc (Vertex.Local v)) eff.Effect.local_deps;
+  H_region.iter (fun r -> replace acc (Vertex.Region r) ()) eff.Effect.depends.Reads.global;
+  H_formal_var.iter (fun v -> replace acc (Vertex.Parameter v) ()) eff.Effect.depends.Reads.poly;
+  H_local_var.iter (fun v -> replace acc (Vertex.Local v) ()) eff.Effect.local_deps;
   if eff.Effect.result_dep then replace acc (Vertex.Result) ();
   acc
 
+let take n l =
+  let rec loop n dst = function
+    | h :: t when n > 0 ->
+      loop (n - 1) (h :: dst) t
+    | _ -> List.rev dst
+  in
+  loop n [] l
+
 let project_reads ~fundec ~params =
+  let params =
+    if
+      match unrollType fundec.svar.vtype with
+      | TFun (_, _, true, _) -> true
+      | _ -> false
+    then take (List.length fundec.sformals) params
+    else params
+  in
   let params = List.(combine fundec.sformals @@ map (swap add_vertices_of_expr) params) in
   fun from acc ->
-    H_formal_var.iter
-      (fun fv () -> (List.assoc (fv :> varinfo) params) acc) from.Reads.poly;
-    H_region.iter (fun r -> H_vertex.replace acc (Vertex.Region r)) from.Reads.global
+    H_formal_var.iter (fun fv -> (List.assoc (fv :> varinfo) params) acc) from.Reads.poly;
+    H_region.iter (fun r -> H_vertex.replace acc (Vertex.Region r) ()) from.Reads.global
 
 (* Imcomplete! Assumes no cycles present in the graph! But applicable in case we iterate until fixpoint anyway *)
 let add_transitive_closure =
@@ -522,7 +656,7 @@ let add_transitive_closure =
     let topo = List.flatten @@ Sccs.scc_list g in
     let sets = Array.init n (fun _ -> Bitset.create n) in
     ignore @@ List.fold_left (fun acc v -> H.add h v acc; acc + 1) 0 topo;
-    Console.debug " ...adding tr. closure... ";
+    Console.debug "...adding transitive closure...";
     ignore @@
     List.iter
       (fun v ->
@@ -535,12 +669,12 @@ let add_transitive_closure =
            g
            v)
       topo;
-    Console.debug " ...propagating to the graph... ";
+    Console.debug "...propagating to the graph...";
     H.iter (fun k v -> H.iter (fun k' v' -> if Bitset.mem sets.(v) v' then Deps.add_edge g k k') h) h;
-    Console.debug " ...finished tr. closure... "
+    Console.debug "...finished transitive closure..."
 
-class effect_collector file_info def =
-  let eff = File_info.get file_info def in
+class effect_collector fl file_info def =
+  let eff = File_info.get file_info fl def in
   object
     (* Since we visit *until convergence* we need to restore previously saved deps (from write effects) *)
     val writes =
@@ -548,12 +682,8 @@ class effect_collector file_info def =
       H_write.iter
         (fun x from ->
            let x = Vertex.of_writes x in
-           H_region.iter
-             (fun r () -> Deps.add_edge g x (Vertex.Region r))
-             from.Reads.global;
-           H_formal_var.iter
-             (fun v () -> Deps.add_edge g x (Vertex.Parameter v))
-             from.Reads.poly)
+           H_region.iter (fun r -> Deps.add_edge g x (Vertex.Region r)) from.Reads.global;
+           H_formal_var.iter (fun v -> Deps.add_edge g x (Vertex.Parameter v)) from.Reads.poly)
         eff.Effect.writes;
       g
     val mutable is_target = eff.Effect.is_target
@@ -605,7 +735,7 @@ class effect_collector file_info def =
         if is_target then collect_reads depends
       in
       let handle_call lvo fundec params =
-        let eff = File_info.get file_info fundec in
+        let eff = File_info.get file_info fl fundec in
         if eff.Effect.is_target then begin
           add_depends ~reach_target:true;
           project_reads ~fundec ~params eff.Effect.depends depends
@@ -682,17 +812,13 @@ class effect_collector file_info def =
           failwith "Unsupported features: exceptions and their handling"
   end
 
-let effects_settled fs ~old ~fresh =
-  List.for_all (fun f -> Effect.subseteq (File_info.get fresh f) (File_info.get old f)) fs
-
 let collect_effects =
   visit_until_convergence
     ~order:`topological
-    ~fixpoint_reached:effects_settled
     (new effect_collector)
 
-class marker file_info def =
-  let eff = File_info.get file_info def in
+class marker fl file_info def =
+  let eff = File_info.get file_info fl def in
   object(self)
     val mutable depends = restore_depends eff
     val mutable requires = eff.Effect.requires
@@ -709,23 +835,23 @@ class marker file_info def =
       in
       let handle_call ~s lvo fundec params =
         let mark () = self#add_body fundec; self#add_stmt s in
-        let eff = File_info.get file_info fundec in
+        let eff = File_info.get file_info fl fundec in
         (* first project writes *)
-        let writes = H_write.create 16 in
-        H_write.iter
+        let writes = H_write.shallow_copy (Flag.create ()) eff.Effect.writes in
+        H_write.filter_map_inplace
           (fun w reads ->
              match w with
              | Writes.Region r ->
                let v = Vertex.Region r in
-               if H_vertex.mem depends v then
-                 H_write.replace writes w reads
+               if H_vertex.mem depends v then Some reads
+               else None
              | Writes.Result when has_some lvo ->
                let h = H_vertex.create 4 in
                opt_iter (add_vertices_of_lval h) lvo;
-               if has_nonempty_intersection ~bigger:depends ~smaller:h then
-                 H_write.replace writes w reads
-             | Writes.Result -> ())
-          eff.Effect.writes;
+               if has_nonempty_intersection ~bigger:depends ~smaller:h then Some reads
+               else None
+             | Writes.Result -> None)
+          writes;
         if eff.Effect.is_target then mark ();
         if H_write.length writes > 0 then begin
           (* propagate projected writes to callee depends *)
@@ -736,7 +862,7 @@ class marker file_info def =
               | Writes.Result -> Effect.add_result_dep eff)
             writes;
           (* project reads and propagate them to our (caller) depends *)
-          let reads = Reads.create () in
+          let reads = Reads.create (Flag.create ()) in
           H_write.iter (fun _ from -> Reads.import ~from reads) writes;
           project_reads ~fundec ~params reads depends;
           mark ()
@@ -815,26 +941,27 @@ class marker file_info def =
 let mark =
   visit_until_convergence
     ~order:`reversed
-    ~fixpoint_reached:effects_settled
     (new marker)
 
-class sweeper file_info =
+class sweeper fl file_info =
   let required_bodies =
-    let result = H_fundec.create 256 in
-    H_fundec.(iter (fun _ e -> iter (replace result) e.Effect.requires.Requires.bodies) file_info);
+    let result = Fundec.Hashtbl.create 256 in
+    Fundec.Hashtbl.iter
+      (fun _ e -> H_fundec.iter (fun f -> Fundec.Hashtbl.replace result f ()) e.Effect.requires.Requires.bodies)
+      file_info;
     List.iter
       (fun kf ->
-         try H_fundec.replace result (Kernel_function.get_definition kf) ()
+         try Fundec.Hashtbl.replace result (Kernel_function.get_definition kf) ()
          with Kernel_function.No_Definition -> ())
       (get_addressed_kfs ());
     result
   in
   object
-    val mutable required_stmts = H_stmt.create 1
+    val mutable required_stmts = H_stmt.create (Flag.create ())
 
     inherit frama_c_inplace
     method! vfunc f =
-      required_stmts <- (File_info.get file_info f).Effect.requires.Requires.stmts;
+      required_stmts <- (File_info.get file_info fl f).Effect.requires.Requires.stmts;
       DoChildren
     method! vstmt_aux s =
       if not (H_stmt.mem required_stmts s) then
@@ -863,15 +990,35 @@ class sweeper file_info =
 
     method! vglob_aux  =
       function
-      | GFun (f, _) when not (H_fundec.mem required_bodies f) ->
+      | GFun (f, _) when not (Fundec.Hashtbl.mem required_bodies f) ->
         ChangeTo []
       | _ -> DoChildren
   end
 
-let sweep file_info = visitFramacFile (new sweeper file_info) @@ Ast.get ()
+let sweep fl file_info = visitFramacFile (new sweeper fl file_info) @@ Ast.get ()
+
+let condensate () =
+  let module Cg = Callgraph.Cg in
+  Console.debug "...computing callgraph...";
+  let cg = Cg.get () in
+  Console.debug "..syntactic slicing...";
+  let module H = Kernel_function.Hashtbl in
+  let module Traverse = Graph.Traverse.Bfs (Cg.G) in
+  let h = H.create 512 in
+  let main = Globals.Functions.find_by_name @@ Kernel.MainFunction.get () in
+  Traverse.iter_component (fun v -> H.replace h v ()) cg main;
+  let module G = Graph.Imperative.Digraph.Concrete (Kernel_function) in
+  let module Components = Graph.Components.Make (G) in
+  let g = G.create ~size:(H.length h) () in
+  Cg.G.iter_edges (fun f t -> if H.mem h f && H.mem h t then G.add_edge g f t) cg;
+  Console.debug "...sccs...";
+  let r = Components.scc_list g in
+  Console.debug "...finished sccs...";
+  r
 
 let slice () =
+  let sccs = condensate () in
   let fi = File_info.create () in
-  collect_effects fi;
-  mark fi;
-  sweep fi
+  collect_effects fi sccs;
+  mark fi sccs;
+  sweep (Flag.create ()) fi
