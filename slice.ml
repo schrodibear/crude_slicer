@@ -504,7 +504,7 @@ let rec add_vertices_of_lval acc =
   let add_local vi = add @@ Vertex.Local (Local_var.of_varinfo_exn vi) in
   let add_field fi = add @@ Vertex.Region (Region.Field (Struct_field.of_fieldinfo_exn fi)) in
   let add_type typ =
-    let typ = typeDeepDropAllAttributes (*@@ unrollTypeDeep*) typ in
+    let typ = typeDeepDropAllAttributes @@ unrollTypeDeep typ in
     add @@ Vertex.Region (Region.Type_approximation (Primitive_type.of_typ_exn typ))
   in
   fun lv ->
