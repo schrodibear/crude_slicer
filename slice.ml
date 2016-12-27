@@ -13,15 +13,16 @@ open Extlib
 open Cil_types
 open Cil_datatype
 open Cil
+open Cil_printer
+open Format
 open Visitor
 
 module Console = Options
 
-let (%>) f g x = f (g x)
-
+let (%) f g x = f (g x)
+let (%>) f g x = g (f x)
 let const f _x = f
 let const' f x _y = f x
-
 let opt_iter f o = opt_fold (const' f) o ()
 
 module Primitive_type : sig
@@ -29,6 +30,7 @@ module Primitive_type : sig
 
   val of_typ : typ -> t option
   val of_typ_exn : typ -> t
+  val pp : formatter -> t -> unit
 end = struct
   type t = typ
 
@@ -40,6 +42,8 @@ end = struct
   let of_typ_exn t =
     if isArithmeticOrPointerType @@ unrollType t then t
     else invalid_arg "Primitive_type.of_typ_exn"
+
+  let pp fmt = fprintf fmt "%a" pp_typ
 end
 
 module Make_var (C : sig val is_ok : varinfo -> bool end) : sig
@@ -50,6 +54,7 @@ module Make_var (C : sig val is_ok : varinfo -> bool end) : sig
   val compare : t -> t -> int
   val equal : t -> t -> bool
   val hash : t -> int
+  val pp : formatter -> t -> unit
 end = struct
   type t = varinfo
 
@@ -62,6 +67,7 @@ end = struct
   let compare v1 v2 = Varinfo.compare (v1 :> varinfo) (v2 :> varinfo)
   let equal v1 v2 = Varinfo.equal (v1 :> varinfo) (v2 :> varinfo)
   let hash v = Varinfo.hash (v :> varinfo)
+  let pp fmt = fprintf fmt "%a" pp_varinfo
 end
 
 module Global_var = Make_var (struct let is_ok vi = vi.vglob end)
@@ -71,6 +77,7 @@ module Struct_field : sig
 
   val of_fieldinfo : fieldinfo -> t option
   val of_fieldinfo_exn : fieldinfo -> t
+  val pp : formatter -> t -> unit
 end = struct
   type t = fieldinfo
 
@@ -79,6 +86,8 @@ end = struct
   let of_fieldinfo_exn fi =
     if fi.fcomp.cstruct then fi
     else invalid_arg "Struct_field.of_fieldinfo_exn"
+
+  let pp fmt fi = fprintf fmt "%s.%s" fi.fcomp.cname fi.fname
 end
 
 module Region = struct
@@ -111,6 +120,13 @@ module Region = struct
     | Variable v1 -> 7 * Varinfo.hash (v1 :> varinfo)
     | Field f -> 7 * Fieldinfo.hash (f :> fieldinfo) + 1
     | Type_approximation t -> 7 * Typ.hash (t :> typ) + 2
+
+  let pp fmttr =
+    let pp fmt = fprintf fmttr fmt in
+    function
+    | Variable v -> pp "%a" Global_var.pp v
+    | Field f -> pp "%a" Struct_field.pp f
+    | Type_approximation t -> pp "(%a)" Primitive_type.pp t
 end
 
 module Flag : sig
@@ -125,6 +141,11 @@ end = struct
   let report f = f := true
   let reported f = !f
   let clear f = f := false
+end
+
+module type Printable_hashed_type = sig
+  include Hashtbl.HashedType
+  val pp : formatter -> t -> unit
 end
 
 module type Reporting_hashset = sig
@@ -143,9 +164,10 @@ module type Reporting_hashset = sig
   val length : t -> int
   val flag : t -> Flag.t
   val stats : t -> Hashtbl.statistics
+  val pp : formatter -> t -> unit
 end
 
-module Make_reporting_hashset (M : Hashtbl.HashedType) : Reporting_hashset with type elt = M.t =
+module Make_reporting_hashset (M : Printable_hashed_type) : Reporting_hashset with type elt = M.t =
 struct
   type elt = M.t
   module H = Hashtbl.Make(M)
@@ -175,6 +197,9 @@ struct
   let length (h, _) = H.length h
   let flag (_, f) = f
   let stats (h, _) = H.stats h
+  let pp fmt (h, _) =
+    fprintf fmt "{@[%a@]}"
+      (pp_print_list ~pp_sep:(fun fmt () -> fprintf fmt ",@ ") M.pp) (H.fold (const' List.cons) h [])
 end
 
 module type Set = sig
@@ -185,9 +210,10 @@ module type Set = sig
   val import : from:t -> t -> unit
   val flag : t -> Flag.t
   val copy : Flag.t -> t -> t
+  val pp : formatter -> t -> unit
 end
 
-module Make_reporting_hashmap (M_key : Hashtbl.HashedType) (S : Set) : sig
+module Make_reporting_hashmap (M_key : Printable_hashed_type) (S : Set) : sig
   type key = M_key.t
   type set = S.t
   type 'a kind = 'a S.kind
@@ -198,16 +224,18 @@ module Make_reporting_hashmap (M_key : Hashtbl.HashedType) (S : Set) : sig
   val shallow_copy :  Flag.t -> t -> t
   val add : t -> key -> 'a kind -> 'a -> unit
   val import : from:t -> t -> unit
+  val import_values : key -> set -> t -> unit
   val remove : t -> key -> unit
   val mem : t -> key -> bool
   val iter : (key -> set -> unit) -> t -> unit
   exception Different_flag
-  val filter_map_inplace : check:bool -> (key -> set -> set option) -> t -> unit
+  val filter_map_inplace : ?check:bool -> (key -> set -> set option) -> t -> unit
   val find : t -> key -> set
   val fold : (key -> set -> 'b -> 'b) -> t -> 'b -> 'b
   val length : t -> int
   val flag : t -> Flag.t
   val stats : t -> Hashtbl.statistics
+  val pp : formatter -> t -> unit
 end = struct
   type key = M_key.t
   type set = S.t
@@ -234,6 +262,9 @@ end = struct
          if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f));
          S.import ~from (H.find h k))
       from
+  let import_values k from (h, f) =
+    if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f));
+    S.import ~from (H.find h k)
   let remove (h, f) k =
     if H.mem h k then Flag.report f;
     H.remove h k
@@ -248,7 +279,7 @@ end = struct
       H.replace h k r;
       r
   exception Different_flag
-  let filter_map_inplace ~check f (h, fl) =
+  let filter_map_inplace ?(check=true) f (h, fl) =
     H.filter_map_inplace
       (fun e set ->
          let r = f e set in
@@ -261,6 +292,12 @@ end = struct
   let length (h, _) = H.length h
   let flag (_, f) = f
   let stats (h, _) = H.stats h
+  let pp fmt (h, _) =
+    fprintf fmt "@[[%a]@]"
+      (pp_print_list
+         ~pp_sep:(fun fmt () -> fprintf fmt ";@ ")
+         (fun fmt (k, h) -> fprintf fmt "%a@ ->@ %a" M_key.pp k S.pp h))
+      (H.fold (fun k h -> List.cons (k, h)) h [])
 end
 
 module H_region = Make_reporting_hashset (Region)
@@ -269,35 +306,93 @@ module Formal_var = Make_var (struct let is_ok vi = vi.vformal end)
 
 module H_formal_var = Make_reporting_hashset (Formal_var)
 
-module Reads = struct
+module Local_var = Make_var (struct let is_ok vi = not vi.vglob && not vi.vformal end)
+
+module H_local_var = Make_reporting_hashset (Local_var)
+
+module Reads : sig
+  type t
+
+  type _ kind =
+    | Global : Region.t kind
+    | Poly : Formal_var.t kind
+    | Local : Local_var.t kind
+
+  val create : Flag.t -> t
+  val import : from:t -> t -> unit
+  val add_global : Region.t -> t -> unit
+  val add_poly : Formal_var.t -> t -> unit
+  val add_local : Local_var.t -> t -> unit
+  val add : t -> 'a kind -> 'a -> unit
+  val mem : t -> 'a kind -> 'a -> bool
+  val flag : t -> Flag.t
+  val copy : Flag.t -> t -> t
+
+  val iter_global : (Region.t -> unit) -> t -> unit
+  val iter_poly : (Formal_var.t -> unit) -> t -> unit
+  val iter_local : (Local_var.t -> unit) -> t -> unit
+
+  val pp : formatter -> t -> unit
+end = struct
   type t =
     {
       global : H_region.t;
-      poly   : H_formal_var.t
+      poly   : H_formal_var.t;
+      local  : H_local_var.t
     }
 
   type _ kind =
     | Global : Region.t kind
     | Poly : Formal_var.t kind
+    | Local : Local_var.t kind
 
-  let create f = { global = H_region.create f; poly = H_formal_var.create f }
+  let create f = { global = H_region.create f; poly = H_formal_var.create f; local = H_local_var.create f }
   let import ~from r =
     H_region.import ~from:from.global r.global;
     H_formal_var.import ~from:from.poly r.poly
   let add_global g r = H_region.add r.global g
   let add_poly p r = H_formal_var.add r.poly p
+  let add_local l r = H_local_var.add r.local l
   let add : type a. _ -> a kind -> a -> _ = fun r ->
     function
     | Global -> H_region.add r.global
     | Poly -> H_formal_var.add r.poly
+    | Local -> H_local_var.add r.local
+  let mem : type a. _ -> a kind -> a -> _ = fun r ->
+    function
+    | Global -> H_region.mem r.global
+    | Poly -> H_formal_var.mem r.poly
+    | Local -> H_local_var.mem r.local
   let flag r = H_region.flag r.global
-  let copy f r = { global = H_region.copy f r.global; poly = H_formal_var.copy f r.poly }
+  let copy f r =
+    { global = H_region.copy f r.global; poly = H_formal_var.copy f r.poly; local = H_local_var.copy f r.local }
+
+  let iter_global f r = H_region.iter f r.global
+  let iter_poly f r = H_formal_var.iter f r.poly
+  let iter_local f r = H_local_var.iter f r.local
+
+  let pp fmt r =
+    fprintf fmt "gl:%a,@,pol:%a@,loc:%a" H_region.pp r.global H_formal_var.pp r.poly H_local_var.pp r.local
 end
+
+module Fundec = struct include Fundec let pp = pretty end
+module Stmt = struct include Stmt let pp = pretty end
 
 module H_fundec = Make_reporting_hashset (Fundec)
 module H_stmt = Make_reporting_hashset (Stmt)
 
-module Requires = struct
+module Requires : sig
+  type t
+
+  val create : Flag.t -> t
+  val import : from:t -> t -> unit
+  val add_body : fundec -> t -> unit
+  val add_stmt : stmt -> t -> unit
+  val copy : Flag.t -> t -> t
+
+  val iter_bodies : (fundec -> unit) -> t -> unit
+  val iter_stmts : (stmt -> unit) -> t -> unit
+end = struct
   type t =
     {
       bodies : H_fundec.t;
@@ -311,45 +406,93 @@ module Requires = struct
   let add_body f r = H_fundec.add r.bodies f
   let add_stmt s r = H_stmt.add r.stmts s
   let copy f r = { bodies = H_fundec.copy f r.bodies; stmts = H_stmt.copy f r.stmts }
+
+  let iter_bodies f r = H_fundec.iter f r.bodies
+  let iter_stmts f r = H_stmt.iter f r.stmts
 end
 
 module Writes = struct
   type t =
-    | Region of Region.t
+    | Global of Region.t
+    | Local of Local_var.t
+    | Poly of Formal_var.t
     | Result
+
   let compare w1 w2 =
     match w1, w2 with
-    | Region r1, Region r2 -> Region.compare r1 r2
-    | Region _, Result -> -1
+    | Global r1, Global r2 -> Region.compare r1 r2
+    | Global _, _ -> -1
+    | Local _, Global _ -> 1
+    | Local v1, Local v2 -> Local_var.compare v1 v2
+    | Local _, _ -> -1
+    | Poly v1, Poly v2 -> Formal_var.compare v1 v2
+    | Poly _, Result -> -1
+    | Poly _, _ -> 1
     | Result, Result -> 0
-    | Result, Region _ -> 1
+    | Result, _ -> 1
 
   let equal w1 w2 =
     match w1, w2 with
-    | Region r1, Region r2 -> Region.equal r1 r2
+    | Global r1, Global r2 -> Region.equal r1 r2
+    | Local v1, Local v2 -> Local_var.equal v1 v2
+    | Poly v1, Poly v2 -> Formal_var.equal v1 v2
     | Result, Result -> true
-    | Region _, Result
-    | Result, Region _ -> false
+    | _ -> false
 
   let hash =
     function
-    | Region r -> 3 * Region.hash r
-    | Result -> 1
+    | Global r -> Region.hash r * 11
+    | Local v -> 3 * Local_var.hash v + 1
+    | Poly v -> 5 * Formal_var.hash v + 3
+    | Result -> 7
+
+  let pp fmttr =
+    let pp fmt = fprintf fmttr fmt in
+    function
+    | Global r -> pp "%a" Region.pp r
+    | Local v -> pp "~%a" Local_var.pp v
+    | Poly v -> pp "\'%a" Formal_var.pp v
+    | Result -> pp "R"
 end
 
 module H_write = Make_reporting_hashmap (Writes) (Reads)
 
-module Local_var = Make_var (struct let is_ok vi = not vi.vglob && not vi.vformal end)
+module Effect : sig
+  type t
 
-module H_local_var = Make_reporting_hashset (Local_var)
+  val create : Flag.t -> t
+  val get_reads : t -> Writes.t -> Reads.t
+  val add_writes : H_write.t -> t -> unit
+  val add_global_read : Writes.t -> Region.t -> t -> unit
+  val add_poly_read : Writes.t -> Formal_var.t -> t -> unit
+  val add_local_read : Writes.t -> Local_var.t -> t -> unit
+  val add_global_dep : Region.t -> t -> unit
+  val add_poly_dep : Formal_var.t -> t -> unit
+  val add_local_dep : Local_var.t -> t -> unit
+  val add_depends : Reads.t -> t -> unit
+  val add_result_dep : t -> unit
+  val add_requires : Requires.t -> t -> unit
+  val add_body_req : fundec -> t -> unit
+  val add_stmt_req : stmt -> t -> unit
+  val copy : Flag.t -> t -> t
 
-module Effect = struct
+  val iter_writes : (Writes.t -> Reads.t -> unit) -> t -> unit
+  val is_target : t -> bool
+  val iter_global_deps : (Region.t -> unit) -> t -> unit
+  val iter_poly_deps : (Formal_var.t -> unit) -> t -> unit
+  val iter_local_deps : (Local_var.t -> unit) -> t -> unit
+  val has_result_dep : t -> bool
+  val iter_body_reqs : (fundec -> unit) -> t -> unit
+  val iter_stmt_reqs : (stmt -> unit) -> t -> unit
+  val flag : t -> Flag.t
+
+  val pp : formatter -> t -> unit
+end = struct
   type t =
     {
               writes     : H_write.t;
       mutable is_target  : bool;
               depends    : Reads.t;
-              local_deps : H_local_var.t;
       mutable result_dep : bool;
               requires   : Requires.t;
               flag       : Flag.t;
@@ -360,21 +503,20 @@ module Effect = struct
       writes = H_write.create f;
       is_target = false;
       depends = Reads.create f;
-      local_deps = H_local_var.create f;
       result_dep = false;
       requires = Requires.create f;
       flag = f
     }
 
   let get_reads e w = H_write.find e.writes w
-  let add_writes from e = H_write.import ~from e
+  let add_writes from e = H_write.import ~from e.writes
   let add_global_read w r e = Reads.add_global r (get_reads e w)
   let add_poly_read w p e = Reads.add_poly p (get_reads e w)
+  let add_local_read w l e = Reads.add_local l (get_reads e w)
   let add_global_dep d e = Reads.add_global d e.depends
   let add_poly_dep d e = Reads.add_poly d e.depends
+  let add_local_dep d e = Reads.add_local d e.depends
   let add_depends d e = Reads.import ~from:d e.depends
-  let add_local_dep d e = H_local_var.add e.local_deps d
-  let add_local_deps from e = H_local_var.import ~from e.local_deps
   let add_result_dep e = if not e.result_dep then Flag.report e.flag; e.result_dep <- true
   let add_requires d e = Requires.import ~from:d e.requires
   let set_is_target e = if not e.is_target then Flag.report e.flag; e.is_target <- true
@@ -386,11 +528,24 @@ module Effect = struct
       writes = H_write.copy f e.writes;
       is_target = e.is_target;
       depends = Reads.copy f e.depends;
-      local_deps = H_local_var.copy f e.local_deps;
       result_dep = e.result_dep;
       requires = Requires.copy f e.requires;
       flag = f
     }
+
+  let iter_writes f e = H_write.iter f e.writes
+  let is_target e = e.is_target
+  let iter_global_deps f e = Reads.iter_global f e.depends
+  let iter_poly_deps f e = Reads.iter_poly f e.depends
+  let iter_local_deps f e = Reads.iter_local f e.depends
+  let has_result_dep e = e.result_dep
+  let iter_body_reqs f e = Requires.iter_bodies f e.requires
+  let iter_stmt_reqs f e = Requires.iter_stmts f e.requires
+  let flag e = e.flag
+
+  let pp fmt e =
+    fprintf fmt "@[w:@;%a;@.tar:%B;@.deps:@;%a@.RD:%B@]"
+      H_write.pp e.writes e.is_target Reads.pp e.depends e.result_dep
 end
 
 module File_info = struct
@@ -435,77 +590,14 @@ let visit_until_convergence ~order (v : _ -> _ -> _ -> _ #frama_c_collector) fi 
          fl)
     sccs
 
-module Vertex = struct
-  type t =
-    | Region of Region.t
-    | Result
-    | Parameter of Formal_var.t
-    | Local of Local_var.t
-
-  let compare v1 v2 =
-    match v1, v2 with
-    | Region r1, Region r2 -> Region.compare r1 r2
-    | Region _, _ -> -1
-    | Result, Result -> 0
-    | Result, Region _ -> 1
-    | Result, _ -> -1
-    | Parameter v1, Parameter v2 -> Varinfo.compare (v1 :> varinfo) (v2 :> varinfo)
-    | Parameter _, Local _ -> -1
-    | Parameter _, _ -> 1
-    | Local v1, Local v2 -> Varinfo.compare (v1 :> varinfo) (v2 :> varinfo)
-    | Local _, _ -> 1
-
-  let hash =
-    function
-    | Region r -> 7 * Region.hash r
-    | Result -> 1
-    | Parameter v -> 7 * Varinfo.hash (v :> varinfo) + 3
-    | Local v -> 7 * Varinfo.hash (v :> varinfo) + 5
-
-  let equal v1 v2 =
-    match v1, v2 with
-    | Region r1, Region r2 -> Region.equal r1 r2
-    | Result, Result -> true
-    | Parameter v1, Parameter v2 -> Varinfo.equal (v1 :> varinfo) (v2 :> varinfo)
-    | Local v1, Local v2 -> Varinfo.equal (v1 :> varinfo) (v2 :> varinfo)
-    | _ -> false
-
-  let of_writes =
-    function
-    | Writes.Region r -> Region r
-    | Writes.Result -> Result
-
-  let is_writable =
-    function
-    | Region _ | Result -> true
-    | Parameter _ | Local _ -> false
-
-  let to_writes =
-    function
-    | Region r -> Some (Writes.Region r)
-    | Result -> Some Writes.Result
-    | Parameter _ | Local _ -> None
-
-  let to_writes_exn v =
-    match to_writes v with
-    | Some w -> w
-    | None -> invalid_arg "Vertex.to_writes_exn"
-end
-
-module Deps = Graph.Imperative.Digraph.Concrete (Vertex)
-module Oper = Graph.Oper.I (Deps)
-
-module H_vertex = Hashtbl.Make (Vertex)
-
-let rec add_vertices_of_lval acc =
-  let add v = H_vertex.replace acc v () in
-  let add_parameter vi = add @@ Vertex.Parameter (Formal_var.of_varinfo_exn vi) in
-  let add_global vi = add @@ Vertex.Region (Region.Variable (Global_var.of_varinfo_exn vi)) in
-  let add_local vi = add @@ Vertex.Local (Local_var.of_varinfo_exn vi) in
-  let add_field fi = add @@ Vertex.Region (Region.Field (Struct_field.of_fieldinfo_exn fi)) in
+let rec add_from_lval acc =
+  let add_parameter vi = Reads.add_poly (Formal_var.of_varinfo_exn vi) acc in
+  let add_global vi = Reads.add_global (Region.Variable (Global_var.of_varinfo_exn vi)) acc in
+  let add_local vi = Reads.add_local (Local_var.of_varinfo_exn vi) acc in
+  let add_field fi = Reads.add_global (Region.Field (Struct_field.of_fieldinfo_exn fi)) acc in
   let add_type typ =
     let typ = typeDeepDropAllAttributes @@ unrollTypeDeep typ in
-    add @@ Vertex.Region (Region.Type_approximation (Primitive_type.of_typ_exn typ))
+    Reads.add_global (Region.Type_approximation (Primitive_type.of_typ_exn typ)) acc
   in
   fun lv ->
     let typ = typeOfLval lv in
@@ -528,23 +620,26 @@ let rec add_vertices_of_lval acc =
       (* Unrolled, not a pointer or arithmetic *)
       | TVoid _                                                                         -> add_type charType
       | TArray _                                                                        ->
-        add_vertices_of_lval acc @@ addOffsetLval (Index (integer ~loc:Location.unknown 0, NoOffset)) lv
+        add_from_lval acc @@ addOffsetLval (Index (integer ~loc:Location.unknown 0, NoOffset)) lv
       | TFun _ as t                                                                     -> add_type (TPtr (t, []))
       | TComp (ci, _, _)                                                                ->
-        List.iter (fun fi -> add_vertices_of_lval acc @@ addOffsetLval (Field (fi, NoOffset)) lv) ci.cfields
+        List.iter (fun fi -> add_from_lval acc @@ addOffsetLval (Field (fi, NoOffset)) lv) ci.cfields
       | TBuiltin_va_list _                                                              -> add_type voidPtrType
 
 class vertex_collector vertices =
   object
     inherit frama_c_inplace
     method! vlval lv =
-      add_vertices_of_lval vertices lv;
+      add_from_lval vertices lv;
       DoChildren
   end
 
-let add_vertices_of_expr acc =
+let add_from_expr acc =
   let o = new vertex_collector acc in
   fun e -> ignore (visitFramacExpr (o :> frama_c_visitor) e)
+
+let add_from_lval lv acc = add_from_lval acc lv
+let add_from_expr lv acc = add_from_expr acc lv
 
 let get_addressed_kfs =
   let cache = ref None in
@@ -591,41 +686,6 @@ let filter_matching_kfs params =
          List.for_all2 (fun vi e -> not @@ need_cast vi.vtype @@ typeOf e) formals params
        else false)
 
-let fail_on_result () = failwith "Should not happen: dependence on the return value"
-
-let store_depends ?writes depends e =
-  H_vertex.iter (function Vertex.Local lv -> const @@ Effect.add_local_dep lv e | _ -> const ()) depends;
-  if H_vertex.mem depends Vertex.Result then Effect.add_result_dep e;
-  H_vertex.iter
-    (fun v () ->
-       match v with
-       | Vertex.Local _  ->
-         opt_iter
-           (fun writes ->
-              Deps.iter_succ
-                  (function
-                     (* no need to recurse, because the transitive closure is already computed *)
-                     | Vertex.Local _     -> ()
-                     | Vertex.Parameter p -> Effect.add_poly_dep p e
-                     | Vertex.Region r    -> Effect.add_global_dep r e
-                     | Vertex.Result      -> fail_on_result ())
-                   writes
-                   v)
-           writes
-       | Vertex.Parameter p -> Effect.add_poly_dep p e
-       | Vertex.Region r    -> Effect.add_global_dep r e
-       | Vertex.Result      -> ())
-    depends
-
-let restore_depends eff =
-  let open H_vertex in
-  let acc = create 32 in
-  H_region.iter (fun r -> replace acc (Vertex.Region r) ()) eff.Effect.depends.Reads.global;
-  H_formal_var.iter (fun v -> replace acc (Vertex.Parameter v) ()) eff.Effect.depends.Reads.poly;
-  H_local_var.iter (fun v -> replace acc (Vertex.Local v) ()) eff.Effect.local_deps;
-  if eff.Effect.result_dep then replace acc (Vertex.Result) ();
-  acc
-
 let take n l =
   let rec loop n dst = function
     | h :: t when n > 0 ->
@@ -643,74 +703,59 @@ let project_reads ~fundec ~params =
     then take (List.length fundec.sformals) params
     else params
   in
-  let params = List.(combine fundec.sformals @@ map (swap add_vertices_of_expr) params) in
+  let params = List.(combine fundec.sformals @@ map add_from_expr params) in
   fun from acc ->
-    H_formal_var.iter (fun fv -> (List.assoc (fv :> varinfo) params) acc) from.Reads.poly;
-    H_region.iter (fun r -> H_vertex.replace acc (Vertex.Region r) ()) from.Reads.global
+    Reads.iter_poly (fun fv -> (List.assoc (fv :> varinfo) params) acc) from;
+    Reads.iter_global (fun r -> Reads.add_global r acc) from
 
-(* Imcomplete! Assumes no cycles present in the graph! But applicable in case we iterate until fixpoint anyway *)
 let add_transitive_closure =
-  let module H = Hashtbl.Make(Vertex) in
+  let module Vertex = struct
+    type t = Writes.t * Reads.t
+    let compare (a, _) (b, _) = Writes.compare a b
+    let equal (a, _) (b, _) = Writes.equal a b
+    let hash (x, _) = Writes.hash x
+  end in
+  let module Deps = Graph.Imperative.Digraph.Concrete (Vertex) in
   let module Sccs = Graph.Components.Make (Deps) in
-  fun g ->
-    let n = Deps.nb_vertex g in
-    let h = H.create n in
-    let topo = List.flatten @@ Sccs.scc_list g in
-    let sets = Array.init n (fun _ -> Bitset.create n) in
-    ignore @@ List.fold_left (fun acc v -> H.add h v acc; acc + 1) 0 topo;
-    Console.debug "...adding transitive closure...";
-    ignore @@
+  fun e ->
+    let g = Deps.create () in
+    Effect.iter_writes (fun w r -> Deps.add_vertex g (w, r)) e;
+    Deps.iter_vertex
+      (fun (w_from, _ as v_from) ->
+        if w_from <> Writes.Result then
+          Deps.iter_vertex
+            (fun (_, r_to as v_to) ->
+               let finish kind r =
+                 if Reads.mem r_to kind r then
+                   Deps.add_edge g v_from v_to
+               in
+               if not (Vertex.equal v_from v_to) then
+                 match w_from with
+                 | Writes.Global r -> finish Reads.Global r
+                 | Writes.Local v -> finish Reads.Local v
+                 | Writes.Poly v -> finish Reads.Poly v
+                 | Writes.Result -> assert false (* See the `if' above *))
+          g)
+      g;
+    let sccs = Sccs.scc_list g in
     List.iter
-      (fun v ->
-         let i = H.find h v in
-         Deps.iter_succ
-           (fun v ->
-              let j = H.find h v in
-              Bitset.set sets.(i) j;
-              Bitset.unite sets.(i) sets.(j))
-           g
-           v)
-      topo;
-    Console.debug "...propagating to the graph...";
-    H.iter (fun k v -> H.iter (fun k' v' -> if Bitset.mem sets.(v) v' then Deps.add_edge g k k') h) h;
-    Console.debug "...finished transitive closure..."
+      (fun scc ->
+         let scc' = scc @ [List.hd scc] in
+         let rec round ((_, from) :: _ as h) =
+           function
+           | [] -> ()
+           | (_, r_c as c) :: t ->
+             Reads.import ~from r_c;
+             round (c :: h) t
+         in
+         round [List.hd scc'] (List.tl scc');
+         List.iter (fun (_, from as v) -> Deps.iter_succ (fun (_, r) -> Reads.import ~from r) g v) scc)
+      sccs
 
 class effect_collector fl file_info def =
   let eff = File_info.get file_info fl def in
   object
-    (* Since we visit *until convergence* we need to restore previously saved deps (from write effects) *)
-    val writes =
-      let g = Deps.create ~size:(H_write.length eff.Effect.writes) () in
-      H_write.iter
-        (fun x from ->
-           let x = Vertex.of_writes x in
-           H_region.iter (fun r -> Deps.add_edge g x (Vertex.Region r)) from.Reads.global;
-           H_formal_var.iter (fun v -> Deps.add_edge g x (Vertex.Parameter v)) from.Reads.poly)
-        eff.Effect.writes;
-      g
-    val mutable is_target = eff.Effect.is_target
-    val mutable depends = restore_depends eff
-
-    method reflect =
-      (* ignore @@ Oper.add_transitive_closure writes; *)
-      add_transitive_closure writes;
-      store_depends ~writes depends eff;
-      Deps.iter_vertex
-        (fun v ->
-           if Vertex.is_writable v then
-             let w = Vertex.to_writes_exn v in
-             Deps.iter_succ
-               (function
-                 | Vertex.Region r    -> Effect.add_global_read w r eff
-                 | Vertex.Parameter v -> Effect.add_poly_read w v eff
-                 | Vertex.Local _     -> ()
-                 | Vertex.Result      -> fail_on_result ())
-               writes
-               v)
-        writes;
-      if is_target then Effect.set_is_target eff
-
-    val all_reads = H_vertex.create 16
+    val all_reads = Reads.create (Flag.create ())
     val curr_reads = Stack.create ()
 
     inherit frama_c_inplace
