@@ -960,8 +960,8 @@ class marker fl file_info def =
           H_write.iter
             (const' @@
               function
-              | Writes.Global r -> Effect.add_global_dep r eff
-              | Writes.Result -> Effect.add_result_dep eff
+              | Writes.Global r -> Effect.add_global_dep r eff'
+              | Writes.Result -> Effect.add_result_dep eff'
               | Writes.Local _
               | Writes.Poly _ -> assert false)
             writes;
@@ -983,9 +983,11 @@ class marker fl file_info def =
         end;
         SkipChildren
       in
-      let handle_stmt_list ~s stmts =
-        if List.exists (fun s -> Effect.has_stmt_req s eff) stmts then
-          self#add_stmt s
+      let handle_stmt_list ~from ~s stmts =
+        if List.exists (fun s -> Effect.has_stmt_req s eff) stmts then begin
+          self#add_stmt s;
+          from (Effect.depends eff)
+        end
       in
       fun s ->
         match s.skind with
@@ -1030,14 +1032,15 @@ class marker fl file_info def =
         | Goto _ | Break _ | Continue _ ->
           self#add_stmt s;
           SkipChildren
-        | If (_, block1, block2, _) ->
-          DoChildrenPost (fun s -> handle_stmt_list ~s @@ block1.bstmts @ block2.bstmts; s)
-        | Switch (_, block, _, _)
+        | If (e, block1, block2, _) ->
+          DoChildrenPost (fun s -> handle_stmt_list ~from:(add_from_expr e) ~s @@ block1.bstmts @ block2.bstmts; s)
+        | Switch (e, block, _, _) ->
+          DoChildrenPost (fun s -> handle_stmt_list ~from:(add_from_expr e) ~s block.bstmts; s)
         | Loop (_, block, _, _, _)
         | Block block ->
-          DoChildrenPost (fun s -> handle_stmt_list ~s block.bstmts; s)
+          DoChildrenPost (fun s -> handle_stmt_list ~from:ignore ~s block.bstmts; s)
         | UnspecifiedSequence l ->
-          DoChildrenPost (fun s -> handle_stmt_list ~s @@ List.map (fun (s, _ ,_ ,_, _) -> s) l; s)
+          DoChildrenPost (fun s -> handle_stmt_list ~from:ignore ~s @@ List.map (fun (s, _ ,_ ,_, _) -> s) l; s)
         | Throw _ | TryCatch _ | TryFinally _ | TryExcept _  ->
           failwith "Unsupported features: exceptions and their handling"
   end
