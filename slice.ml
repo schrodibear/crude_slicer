@@ -130,16 +130,19 @@ end
 
 module Flag : sig
   type t
-  val create : unit -> t
+  val create : string -> t
   val report : t -> unit
   val reported : t -> bool
   val clear : t -> unit
+  val pp : formatter -> t -> unit
 end = struct
-  type t = bool ref
-  let create () = ref false
-  let report f = f := true
-  let reported f = !f
-  let clear f = f := false
+  type t = bool ref * string
+
+  let create name = ref false, name
+  let report (f, _) = f := true
+  let reported (f, _) = !f
+  let clear (f, _) = f := false
+  let pp fmt (_, name) = fprintf fmt "%s" name
 end
 
 module type Printable_hashed_type = sig
@@ -168,7 +171,7 @@ module type Reporting_bithashset = sig
   val pp : formatter -> t -> unit
 end
 
-module Make_reporting_hashset (M : Printable_hashed_type) : Reporting_bithashset with type elt = M.t =
+module Make_reporting_bithashset (M : Printable_hashed_type) : Reporting_bithashset with type elt = M.t =
 struct
   type elt = M.t
   module H = Hashtbl.Make (M)
@@ -325,15 +328,15 @@ end = struct
       (H.fold (fun k h -> List.cons (k, h)) h [])
 end
 
-module H_region = Make_reporting_hashset (Region)
+module H_region = Make_reporting_bithashset (Region)
 
 module Formal_var = Make_var (struct let is_ok vi = vi.vformal end)
 
-module H_formal_var = Make_reporting_hashset (Formal_var)
+module H_formal_var = Make_reporting_bithashset (Formal_var)
 
 module Local_var = Make_var (struct let is_ok vi = not vi.vglob && not vi.vformal end)
 
-module H_local_var = Make_reporting_hashset (Local_var)
+module H_local_var = Make_reporting_bithashset (Local_var)
 
 module Writes = struct
   type t =
@@ -468,8 +471,8 @@ end
 module Fundec = struct include Fundec let pp = pretty end
 module Stmt = struct include Stmt let pp = pretty end
 
-module H_fundec = Make_reporting_hashset (Fundec)
-module H_stmt = Make_reporting_hashset (Stmt)
+module H_fundec = Make_reporting_bithashset (Fundec)
+module H_stmt = Make_reporting_bithashset (Stmt)
 
 module Requires : sig
   type t
@@ -617,24 +620,22 @@ module File_info = struct
   let get fi fl f = try H.find fi f with Not_found -> let r = Effect.create fl in H.replace fi f r; r
 end
 
-let rec until_convergence f fi scc fl =
-  f fi scc;
-  if not (Flag.reported fl) then ()
-  else (Flag.clear fl; until_convergence f fi scc fl)
+let flag = Flag.create "convergence"
 
-let until_convergence f fi scc fl =
-  Flag.clear fl;
-  until_convergence f fi scc fl
+let rec until_convergence f fi scc =
+  Flag.clear flag;
+  f fi scc;
+  if not (Flag.reported flag) then ()
+  else until_convergence f fi scc
 
 class type ['a] frama_c_collector = object inherit frama_c_inplace method finish : 'a end
 
-let visit_until_convergence ~order (v : _ -> _ -> _ -> _ #frama_c_collector) fi sccs =
+let visit_until_convergence ~order (v : _ -> _ -> _ #frama_c_collector) fi sccs =
   let iter =
     match order with
     | `topological -> List.iter
     | `reversed -> fun f l -> List.(iter f (rev l))
   in
-  let fl = Flag.create () in
   iter
     (fun scc ->
        let scc = List.(Kernel_function.(scc |> filter is_definition |> map get_definition)) in
@@ -643,13 +644,12 @@ let visit_until_convergence ~order (v : _ -> _ -> _ -> _ #frama_c_collector) fi 
             List.iter
               (fun d ->
                  Console.debug "Analysing function %s..." d.svar.vname;
-                 let v = v fl fi d in
+                 let v = v fi d in
                  ignore @@ visitFramacFunction (v :> frama_c_visitor) d;
                  v#finish;
-                 Console.debug "Resulting effect is:@.%a@." Effect.pp @@ File_info.get fi fl d))
+                 Console.debug "Resulting effect is:@.%a@." Effect.pp @@ File_info.get fi flag d))
          fi
-         scc
-         fl)
+         scc)
     sccs
 
 let rec add_from_lval acc =
@@ -766,7 +766,7 @@ let project_reads ~fundec ~params =
     else params
   in
   let params = List.(combine fundec.sformals @@ map add_from_expr params) in
-  fun from acc ->
+  fun ~from acc ->
     Reads.iter_poly (fun fv -> (List.assoc (fv :> varinfo) params) acc) from;
     Reads.iter_global (fun r -> Reads.add_global r acc) from
 
@@ -812,12 +812,13 @@ let add_transitive_closure =
          List.iter (fun (_, from as v) -> Deps.iter_succ (fun (_, r) -> Reads.import ~from r) g v) scc)
       sccs
 
-class effect_collector fl file_info def =
-  let eff = File_info.get file_info fl def in
+class effect_collector file_info def =
+  let eff = File_info.get file_info flag def in
+  let dummy_flag = Flag.create "effect_collector_dummy" in
   object
     method finish = add_transitive_closure eff
 
-    val all_reads = Reads.create (Flag.create ())
+    val all_reads = Reads.create dummy_flag
     val curr_reads = Stack.create ()
 
     inherit frama_c_inplace
@@ -828,7 +829,7 @@ class effect_collector fl file_info def =
         Stack.iter (fun from -> Reads.import ~from acc) curr_reads
       in
       let add_edges =
-        let h_lv = Reads.create (Flag.create ()) and h_from = Reads.create (Flag.create ()) in
+        let h_lv = Reads.create dummy_flag and h_from = Reads.create dummy_flag in
         fun ?lv ~from ->
           Reads.clear h_lv;
           Reads.clear h_from;
@@ -847,21 +848,21 @@ class effect_collector fl file_info def =
         if Effect.is_target eff then collect_reads (Effect.depends eff)
       in
       let handle_call lvo fundec params =
-        let eff' = File_info.get file_info fl fundec in
+        let eff' = File_info.get file_info flag fundec in
         if Effect.is_target eff' then begin
           add_depends ~reach_target:true;
-          project_reads ~fundec ~params (Effect.depends eff') (Effect.depends eff)
+          project_reads ~fundec ~params ~from:(Effect.depends eff') (Effect.depends eff)
         end;
         let lvo = may_map add_from_lval lvo ~dft:(const ()) in
         let project_reads = project_reads ~fundec ~params in
         Effect.iter_writes
           (fun w from ->
              let lv = may_map (fun (Reads.Some (k, x)) r -> Reads.add k x r) ~dft:lvo (Reads.of_writes w) in
-             add_edges ~lv ~from:(project_reads from))
+             add_edges ~lv ~from:(project_reads ~from))
         eff'
       in
       let handle_all_reads =
-        let from = Reads.create (Flag.create ()) in
+        let from = Reads.create dummy_flag in
         fun () ->
           Reads.clear from;
           collect_reads from;
@@ -914,7 +915,7 @@ class effect_collector fl file_info def =
           handle_all_reads ();
           SkipChildren
         | If (e, _, _, _) | Switch (e, _, _, _) ->
-          continue_under (let r = Reads.create (Flag.create ()) in add_from_expr e r; r)
+          continue_under (let r = Reads.create dummy_flag in add_from_expr e r; r)
         | Loop _ | Block _ | UnspecifiedSequence _ -> DoChildren
         | Throw _ | TryCatch _ | TryFinally _ | TryExcept _  ->
           failwith "Unsupported features: exceptions and their handling"
@@ -925,8 +926,9 @@ let collect_effects =
     ~order:`topological
     (new effect_collector)
 
-class marker fl file_info def =
-  let eff = File_info.get file_info fl def in
+class marker file_info def =
+  let eff = File_info.get file_info flag def in
+  let dummy_flag = Flag.create "marker_dummy" in
   object(self)
     method add_stmt s = Effect.add_stmt_req s eff
     method add_body f = Effect.add_body_req f eff
@@ -936,9 +938,9 @@ class marker fl file_info def =
     method! vstmt =
       let handle_call ~s lvo fundec params =
         let mark () = self#add_body fundec; self#add_stmt s in
-        let eff' = File_info.get file_info fl fundec in
+        let eff' = File_info.get file_info flag fundec in
         (* first project writes *)
-        let writes = Effect.shallow_copy_writes (Flag.create ()) eff' in
+        let writes = Effect.shallow_copy_writes dummy_flag eff' in
         H_write.filter_map_inplace
           ~check:false
           (fun w reads ->
@@ -946,7 +948,7 @@ class marker fl file_info def =
              | Writes.Global r ->
                if Reads.mem Reads.Global r (Effect.depends eff) then Some reads else None
              | Writes.Result when has_some lvo ->
-               let r = Reads.create (Flag.create ()) in
+               let r = Reads.create dummy_flag in
                may (fun lv -> add_from_lval lv r) lvo;
                if Reads.intersects (Effect.depends eff) r then Some reads
                else None
@@ -966,14 +968,14 @@ class marker fl file_info def =
               | Writes.Poly _ -> assert false)
             writes;
           (* project reads and propagate them to our (caller) depends *)
-          let reads = Reads.create (Flag.create ()) in
+          let reads = Reads.create dummy_flag in
           H_write.iter (fun _ from -> Reads.import ~from reads) writes;
-          project_reads ~fundec ~params reads (Effect.depends eff);
+          project_reads ~fundec ~params ~from:reads (Effect.depends eff);
           mark ()
         end
       in
       let handle_assignment =
-        let r = Reads.create (Flag.create ()) in
+        let r = Reads.create dummy_flag in
         fun ~s ~lv ~from ->
           Reads.clear r;
           add_from_lval lv r;
@@ -1051,6 +1053,7 @@ let mark =
     (new marker)
 
 class sweeper fl file_info =
+  let dummy_flag = Flag.create "sweeper_dummy" in
   let required_bodies =
     let result = Fundec.Hashtbl.create 256 in
     Fundec.Hashtbl.iter
@@ -1066,7 +1069,7 @@ class sweeper fl file_info =
     result
   in
   object
-    val mutable eff = Effect.create (Flag.create ())
+    val mutable eff = Effect.create dummy_flag
 
     inherit frama_c_inplace
     method! vfunc f =
@@ -1106,7 +1109,7 @@ class sweeper fl file_info =
       | _ -> DoChildren
   end
 
-let sweep fl file_info = visitFramacFile (new sweeper fl file_info) @@ Ast.get ()
+let sweep file_info = visitFramacFile (new sweeper flag file_info) @@ Ast.get ()
 
 let condensate () =
   let module Cg = Callgraph.Cg in
@@ -1132,4 +1135,4 @@ let slice () =
   let fi = File_info.create () in
   collect_effects fi sccs;
   mark fi sccs;
-  sweep (Flag.create ()) fi
+  sweep fi
