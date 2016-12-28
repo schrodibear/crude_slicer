@@ -6,7 +6,7 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "-4-9-44"]
+[@@@ocaml.warning "-4-9-44-42"]
 
 open Extlib
 
@@ -147,65 +147,92 @@ module type Printable_hashed_type = sig
   val pp : formatter -> t -> unit
 end
 
-module type Reporting_hashset = sig
+module type Reporting_bithashset = sig
   type elt
   type t
   val create : Flag.t -> t
   val clear : t -> unit
-  val copy :  Flag.t -> t -> t
-  val add : t -> elt -> unit
+  val copy : Flag.t -> t -> t
+  val add : elt -> t -> unit
   val import : from:t -> t -> unit
-  val remove : t -> elt -> unit
-  val mem : t -> elt -> bool
+  val remove : elt -> t -> unit
+  val mem : elt -> t -> bool
+  val intersects : t -> t -> bool
   val iter : (elt -> unit) -> t -> unit
   val filter_inplace : (elt -> bool) -> t -> unit
   val fold : (elt -> 'b -> 'b) -> t -> 'b -> 'b
   val length : t -> int
+  val is_empty : t -> bool
   val flag : t -> Flag.t
-  val stats : t -> Hashtbl.statistics
+  val stats : unit -> Hashtbl.statistics
   val pp : formatter -> t -> unit
 end
 
-module Make_reporting_hashset (M : Printable_hashed_type) : Reporting_hashset with type elt = M.t =
+module Make_reporting_hashset (M : Printable_hashed_type) : Reporting_bithashset with type elt = M.t =
 struct
   type elt = M.t
-  module H = Hashtbl.Make(M)
-  open H
-  type nonrec t = unit t * Flag.t
-  let create f =
-    H.create 32, f
-  let clear (h, f) =
-    if H.length h > 0 then Flag.report f;
-    H.clear h
-  let copy f (h, _) = H.copy h, f
-  let add (h, f) e =
-    if not (H.mem h e) then Flag.report f;
-    H.replace h e ()
-  let import ~from:(from, _) (h, f) =
-    H.iter (fun e () -> if not (H.mem h e) then Flag.report f; H.replace h e ()) from
-  let remove (h, f) e =
-    if H.mem h e then Flag.report f;
-    H.remove h e
-  let mem (h, _) e = H.mem h e
-  let iter f (h, _) =
-    H.iter (fun k () -> f k) h
-  let filter_inplace f (h, fl) =
-    H.filter_map_inplace (fun e () -> let r = f e in if not r then (Flag.report fl; None) else Some ()) h
-  let fold f (h, _) x =
-    H.fold (fun e () x -> f e x) h x
-  let length (h, _) = H.length h
+  module H = Hashtbl.Make (M)
+  module H' = Hashtbl.Make (struct type t = int let hash = id let equal : int -> _ -> _ = (=) end)
+
+  let size = 5000
+
+  let index, elem, stats =
+    let h = H.create size and h' = H'.create size in
+    let i = ref ~-1 in
+    (fun e ->
+       try
+         H.find h e
+       with
+       | Not_found ->
+         incr i;
+         H.replace h e !i;
+         H'.replace h' !i e;
+         !i),
+    (fun i ->
+       try
+         H'.find h' i
+       with
+       | Not_found -> failwith "Reporting_bithashset.elem: Can't find element"),
+    fun () -> H.stats h
+
+  type nonrec t = Bv.t * Flag.t
+  let create f = Bv.create ~size false, f
+  let clear (v, f) =
+    if Bv.is_empty v then Flag.report f;
+    Bv.clear v
+  let copy f (v, _) = Bv.copy v, f
+  let add e (v, f) =
+    let i = index e in
+    if not (Bv.get v i) then Flag.report f;
+    Bv.set v i
+  let import ~from:(from, _) (v, f) =
+    if not (Bv.subset from v) then Flag.report f;
+    Bv.union_into ~into:v from
+  let remove e (v, f) =
+    let i = index e in
+    if Bv.get v i then Flag.report f;
+    Bv.reset v i
+  let mem e (v, _) = Bv.get v (index e)
+  let intersects (v1, _) (v2, _) = Bv.inters v1 v2
+  let iter f (v, _) = Bv.iter_true v (fun i -> f (elem i))
+  let filter_inplace f (v, fl) = Bv.filter v (fun i -> if not @@ f (elem i) then (Flag.report fl; false) else true)
+  let fold f (v, _) x =
+    let r = ref x in
+    Bv.iter_true v (fun i -> r := f (elem i) !r);
+    !r
+  let length (v, _) = Bv.cardinal v
+  let is_empty (v, _) = Bv.is_empty v
   let flag (_, f) = f
-  let stats (h, _) = H.stats h
-  let pp fmt (h, _) =
+  let pp fmt v =
     fprintf fmt "{@[%a@]}"
-      (pp_print_list ~pp_sep:(fun fmt () -> fprintf fmt ",@ ") M.pp) (H.fold (const' List.cons) h [])
+      (pp_print_list ~pp_sep:(fun fmt () -> fprintf fmt ",@ ") M.pp) (fold List.cons v [])
 end
 
 module type Set = sig
   type t
   type 'a kind
   val create : Flag.t -> t
-  val add : t -> 'a kind -> 'a -> unit
+  val add : 'a kind -> 'a -> t -> unit
   val import : from:t -> t -> unit
   val flag : t -> Flag.t
   val copy : Flag.t -> t -> t
@@ -219,17 +246,17 @@ module Make_reporting_hashmap (M_key : Printable_hashed_type) (S : Set) : sig
   type t
   val create : Flag.t -> t
   val clear : t -> unit
-  val copy :  Flag.t -> t -> t
-  val shallow_copy :  Flag.t -> t -> t
-  val add : t -> key -> 'a kind -> 'a -> unit
+  val copy : Flag.t -> t -> t
+  val shallow_copy : Flag.t -> t -> t
+  val add : key -> 'a kind -> 'a -> t -> unit
   val import : from:t -> t -> unit
   val import_values : key -> set -> t -> unit
-  val remove : t -> key -> unit
-  val mem : t -> key -> bool
+  val remove : key -> t -> unit
+  val mem : key -> t -> bool
   val iter : (key -> set -> unit) -> t -> unit
   exception Different_flag
   val filter_map_inplace : ?check:bool -> (key -> set -> set option) -> t -> unit
-  val find : t -> key -> set
+  val find : key -> t -> set
   val fold : (key -> set -> 'b -> 'b) -> t -> 'b -> 'b
   val length : t -> int
   val flag : t -> Flag.t
@@ -240,8 +267,7 @@ end = struct
   type set = S.t
   type 'a kind = 'a S.kind
   module H = Hashtbl.Make(M_key)
-  open H
-  type nonrec t = S.t t * Flag.t
+  type nonrec t = S.t H.t * Flag.t
   let create f =
     H.create 32, f
   let clear (h, f) =
@@ -252,9 +278,9 @@ end = struct
     H.filter_map_inplace (fun _ r -> Some (S.copy f r)) r;
     r, f
   let shallow_copy f (h, _) = H.copy h, f
-  let add (h, f) k kind e  =
+  let add k kind e (h, f) =
     if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f));
-    S.add (H.find h k) kind e
+    S.add kind e (H.find h k)
   let import ~from:(from, _) (h, f) =
     H.iter
       (fun k from ->
@@ -264,13 +290,13 @@ end = struct
   let import_values k from (h, f) =
     if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f));
     S.import ~from (H.find h k)
-  let remove (h, f) k =
+  let remove k (h, f) =
     if H.mem h k then Flag.report f;
     H.remove h k
-  let mem (h, _) k = H.mem h k
+  let mem k (h, _) = H.mem h k
   let iter f (h, _) =
     H.iter f h
-  let find (h, f) k =
+  let find k (h, f) =
     try H.find h k
     with Not_found ->
       let r = S.create f in
@@ -292,10 +318,10 @@ end = struct
   let flag (_, f) = f
   let stats (h, _) = H.stats h
   let pp fmt (h, _) =
-    fprintf fmt "@[[%a]@]"
+    fprintf fmt "  [@[%a@]]"
       (pp_print_list
-         ~pp_sep:(fun fmt () -> fprintf fmt ";@ ")
-         (fun fmt (k, h) -> fprintf fmt "%a@ ->@ %a" M_key.pp k S.pp h))
+         ~pp_sep:(fun fmt () -> fprintf fmt ";@;")
+         (fun fmt (k, h) -> fprintf fmt "@[%a@ ->@ @[%a@]@]" M_key.pp k S.pp h))
       (H.fold (fun k h -> List.cons (k, h)) h [])
 end
 
@@ -371,9 +397,9 @@ module Reads : sig
   val add_global : Region.t -> t -> unit
   val add_poly : Formal_var.t -> t -> unit
   val add_local : Local_var.t -> t -> unit
-  val add : t -> 'a kind -> 'a -> unit
-  val mem : t -> 'a kind -> 'a -> bool
-  val intersects : bigger:t -> smaller:t -> bool
+  val add : 'a kind -> 'a -> t -> unit
+  val mem : 'a kind -> 'a -> t -> bool
+  val intersects : t -> t -> bool
   val flag : t -> Flag.t
   val copy : Flag.t -> t -> t
 
@@ -410,27 +436,23 @@ end = struct
     H_region.import ~from:from.global r.global;
     H_formal_var.import ~from:from.poly r.poly;
     H_local_var.import ~from:from.local r.local
-  let add_global g r = H_region.add r.global g
-  let add_poly p r = H_formal_var.add r.poly p
-  let add_local l r = H_local_var.add r.local l
-  let add : type a. _ -> a kind -> a -> _ = fun r ->
-    function
-    | Global -> H_region.add r.global
-    | Poly -> H_formal_var.add r.poly
-    | Local -> H_local_var.add r.local
-  let mem : type a. _ -> a kind -> a -> _ = fun r ->
-    function
-    | Global -> H_region.mem r.global
-    | Poly -> H_formal_var.mem r.poly
-    | Local -> H_local_var.mem r.local
-  let intersects ~bigger ~smaller =
-    try
-      H_region.(iter (fun r -> if mem bigger.global r then raise Exit) smaller.global);
-      H_formal_var.(iter (fun v -> if mem bigger.poly v then raise Exit) smaller.poly);
-      H_local_var.(iter (fun v -> if mem bigger.local v then raise Exit) smaller.local);
-      false
-    with
-    | Exit -> true
+  let add_global g r = H_region.add g r.global
+  let add_poly v r = H_formal_var.add v r.poly
+  let add_local v r = H_local_var.add v r.local
+  let add : type a. a kind -> a -> _ = fun k x r ->
+    match k with
+    | Global -> H_region.add x r.global
+    | Poly -> H_formal_var.add x r.poly
+    | Local -> H_local_var.add x r.local
+  let mem : type a. a kind -> a -> _ = fun k x r ->
+    match k with
+    | Global -> H_region.mem x r.global
+    | Poly -> H_formal_var.mem x r.poly
+    | Local -> H_local_var.mem x r.local
+  let intersects r1 r2 =
+    H_region.intersects r1.global r2.global ||
+    H_formal_var.intersects r1.poly r2.poly ||
+    H_local_var.intersects r1.local r2.local
   let flag r = H_region.flag r.global
   let copy f r =
     { global = H_region.copy f r.global; poly = H_formal_var.copy f r.poly; local = H_local_var.copy f r.local }
@@ -440,7 +462,7 @@ end = struct
   let iter_local f r = H_local_var.iter f r.local
 
   let pp fmt r =
-    fprintf fmt "gl:%a,@,pol:%a@,loc:%a" H_region.pp r.global H_formal_var.pp r.poly H_local_var.pp r.local
+    fprintf fmt "  @[gl:%a,@ @,pol:%a,@ @,loc:%a@]" H_region.pp r.global H_formal_var.pp r.poly H_local_var.pp r.local
 end
 
 module Fundec = struct include Fundec let pp = pretty end
@@ -473,14 +495,14 @@ end = struct
   let import ~from r =
     H_fundec.import ~from:from.bodies r.bodies;
     H_stmt.import ~from:from.stmts r.stmts
-  let add_body f r = H_fundec.add r.bodies f
-  let add_stmt s r = H_stmt.add r.stmts s
+  let add_body f r = H_fundec.add f r.bodies
+  let add_stmt s r = H_stmt.add s r.stmts
   let copy f r = { bodies = H_fundec.copy f r.bodies; stmts = H_stmt.copy f r.stmts }
 
   let iter_bodies f r = H_fundec.iter f r.bodies
   let iter_stmts f r = H_stmt.iter f r.stmts
-  let has_body f r = H_fundec.mem r.bodies f
-  let has_stmt s r = H_stmt.mem r.stmts s
+  let has_body f r = H_fundec.mem f r.bodies
+  let has_stmt s r = H_stmt.mem s r.stmts
 end
 
 module H_write = Make_reporting_hashmap (Writes) (Reads)
@@ -489,8 +511,8 @@ module Effect : sig
   type t
 
   val create : Flag.t -> t
-  val get_reads : t -> Writes.t -> Reads.t
-  val get_depends : t -> Reads.t
+  val reads : Writes.t -> t -> Reads.t
+  val depends : t -> Reads.t
   val add_reads : Writes.t -> Reads.t -> t -> unit
   val add_writes : H_write.t -> t -> unit
   val add_global_read : Writes.t -> Region.t -> t -> unit
@@ -542,13 +564,13 @@ end = struct
       flag = f
     }
 
-  let get_reads e w = H_write.find e.writes w
-  let get_depends e = e.depends
+  let reads w e = H_write.find w e.writes
+  let depends e = e.depends
   let add_writes from e = H_write.import ~from e.writes
   let add_reads w from e = H_write.import_values w from e.writes
-  let add_global_read w r e = Reads.add_global r (get_reads e w)
-  let add_poly_read w p e = Reads.add_poly p (get_reads e w)
-  let add_local_read w l e = Reads.add_local l (get_reads e w)
+  let add_global_read w r e = Reads.add_global r (reads w e)
+  let add_poly_read w p e = Reads.add_poly p (reads w e)
+  let add_local_read w l e = Reads.add_local l (reads w e)
   let add_global_dep d e = Reads.add_global d e.depends
   let add_poly_dep d e = Reads.add_poly d e.depends
   let add_local_dep d e = Reads.add_local d e.depends
@@ -583,7 +605,7 @@ end = struct
   let flag e = e.flag
 
   let pp fmt e =
-    fprintf fmt "@[w:@;%a;@.tar:%B;@.deps:@;%a@.RD:%B@]"
+    fprintf fmt "@[w:@;@[%a@];@.tar:%B;@.deps:@;%a;@.RD:%B@]"
       H_write.pp e.writes e.is_target Reads.pp e.depends e.result_dep
 end
 
@@ -624,7 +646,7 @@ let visit_until_convergence ~order (v : _ -> _ -> _ -> _ #frama_c_collector) fi 
                  let v = v fl fi d in
                  ignore @@ visitFramacFunction (v :> frama_c_visitor) d;
                  v#finish;
-                 Console.debug "Resulting effect is:@.%a@." Effect.pp (File_info.get fi fl d)))
+                 Console.debug "Resulting effect is:@.%a@." Effect.pp @@ File_info.get fi fl d))
          fi
          scc
          fl)
@@ -767,7 +789,7 @@ let add_transitive_closure =
             (fun (_, r_to as v_to) ->
                if not (Vertex.equal v_from v_to) then
                  may
-                   (fun (Reads.Some (kind, r)) -> if Reads.mem r_to kind r then Deps.add_edge g v_from v_to)
+                   (fun (Reads.Some (kind, r)) -> if Reads.mem kind r r_to then Deps.add_edge g v_from v_to)
                    (Reads.of_writes w_from))
 
           g)
@@ -776,12 +798,15 @@ let add_transitive_closure =
     List.iter
       (fun scc ->
          let scc' = scc @ [List.hd scc] in
-         let rec round ((_, from) :: _ as h) =
+         let rec round =
            function
-           | [] -> ()
-           | (_, r_c as c) :: t ->
-             Reads.import ~from r_c;
-             round (c :: h) t
+           | [] -> assert false
+           | (_, from) :: _ as h ->
+             function
+             | [] -> ()
+             | (_, r_c as c) :: t ->
+               Reads.import ~from r_c;
+               round (c :: h) t
          in
          round [List.hd scc'] (List.tl scc');
          List.iter (fun (_, from as v) -> Deps.iter_succ (fun (_, r) -> Reads.import ~from r) g v) scc)
@@ -809,9 +834,9 @@ class effect_collector fl file_info def =
           Reads.clear h_from;
           from h_from;
           collect_reads h_from;
-          may ((|>) h_lv) lv;
           match lv with
           | Some lv ->
+            lv h_lv;
             Reads.iter_global (fun r -> Effect.add_reads (Writes.Global r) h_from eff) h_lv;
             Reads.iter_poly (fun v -> Effect.add_reads (Writes.Poly v) h_from eff) h_lv;
             Reads.iter_local (fun v -> Effect.add_reads (Writes.Local v) h_from eff) h_lv
@@ -819,19 +844,19 @@ class effect_collector fl file_info def =
       in
       let add_depends ~reach_target =
         if reach_target then Effect.set_is_target eff;
-        if Effect.is_target eff then collect_reads (Effect.get_depends eff)
+        if Effect.is_target eff then collect_reads (Effect.depends eff)
       in
       let handle_call lvo fundec params =
         let eff' = File_info.get file_info fl fundec in
         if Effect.is_target eff' then begin
           add_depends ~reach_target:true;
-          project_reads ~fundec ~params (Effect.get_depends eff') (Effect.get_depends eff)
+          project_reads ~fundec ~params (Effect.depends eff') (Effect.depends eff)
         end;
         let lvo = may_map add_from_lval lvo ~dft:(const ()) in
         let project_reads = project_reads ~fundec ~params in
         Effect.iter_writes
           (fun w from ->
-             let lv = may_map (fun (Reads.Some (k, x)) r -> Reads.add r k x) ~dft:lvo (Reads.of_writes w) in
+             let lv = may_map (fun (Reads.Some (k, x)) r -> Reads.add k x r) ~dft:lvo (Reads.of_writes w) in
              add_edges ~lv ~from:(project_reads from))
         eff'
       in
@@ -919,11 +944,11 @@ class marker fl file_info def =
           (fun w reads ->
              match w with
              | Writes.Global r ->
-               if Reads.mem (Effect.get_depends eff) Reads.Global r then Some reads else None
+               if Reads.mem Reads.Global r (Effect.depends eff) then Some reads else None
              | Writes.Result when has_some lvo ->
-               let smaller = Reads.create (Flag.create ()) in
-               may (fun lv -> add_from_lval lv smaller) lvo;
-               if Reads.intersects ~bigger:(Effect.get_depends eff) ~smaller then Some reads
+               let r = Reads.create (Flag.create ()) in
+               may (fun lv -> add_from_lval lv r) lvo;
+               if Reads.intersects (Effect.depends eff) r then Some reads
                else None
              | Writes.Local _
              | Writes.Poly _
@@ -943,17 +968,17 @@ class marker fl file_info def =
           (* project reads and propagate them to our (caller) depends *)
           let reads = Reads.create (Flag.create ()) in
           H_write.iter (fun _ from -> Reads.import ~from reads) writes;
-          project_reads ~fundec ~params reads (Effect.get_depends eff);
+          project_reads ~fundec ~params reads (Effect.depends eff);
           mark ()
         end
       in
       let handle_assignment =
-        let smaller = Reads.create (Flag.create ()) in
+        let r = Reads.create (Flag.create ()) in
         fun ~s ~lv ~from ->
-          Reads.clear smaller;
-          add_from_lval lv smaller;
-        if Reads.intersects ~bigger:(Effect.get_depends eff) ~smaller then begin
-          from (Effect.get_depends eff);
+          Reads.clear r;
+          add_from_lval lv r;
+        if Reads.intersects (Effect.depends eff) r then begin
+          from (Effect.depends eff);
           self#add_stmt s
         end;
         SkipChildren
@@ -1000,7 +1025,7 @@ class marker fl file_info def =
           SkipChildren
         | Return (eo, _) ->
           self#add_stmt s;
-          may (fun e -> if Effect.has_result_dep eff then add_from_expr e (Effect.get_depends eff)) eo;
+          may (fun e -> if Effect.has_result_dep eff then add_from_expr e (Effect.depends eff)) eo;
           SkipChildren
         | Goto _ | Break _ | Continue _ ->
           self#add_stmt s;
