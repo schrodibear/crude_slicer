@@ -658,7 +658,7 @@ let visit_until_convergence ~order (v : _ -> _ -> _ #frama_c_collector) fi sccs 
                  let v = v fi d in
                  ignore @@ visitFramacFunction (v :> frama_c_visitor) d;
                  v#finish;
-                 Console.debug "Resulting effect is:@.%a@." Effect.pp @@ File_info.get fi flag d))
+                 Console.debug ~level:3 "Resulting effect is:@.%a@." Effect.pp @@ File_info.get fi flag d))
          fi
          scc)
     sccs
@@ -1091,9 +1091,9 @@ let mark =
     ~order:`reversed
     (new marker)
 
-class sweeper fl file_info =
+class sweeper file_info =
   let dummy_flag = Flag.create "sweeper_dummy" in
-  let required_bodies =
+  let required_bodies, main_eff =
     let result = Fundec.Hashtbl.create 256 in
     Fundec.Hashtbl.iter
       (fun _ e -> Effect.iter_body_reqs (fun f -> Fundec.Hashtbl.replace result f ()) e)
@@ -1104,8 +1104,12 @@ class sweeper fl file_info =
          with Kernel_function.No_Definition -> ())
       (get_addressed_kfs ());
     let main = Globals.Functions.find_by_name @@ Kernel.MainFunction.get () in
-    if Kernel_function.is_definition main then Fundec.Hashtbl.add result (Kernel_function.get_definition main) ();
-    result
+    if Kernel_function.is_definition main then begin
+      let d = Kernel_function.get_definition main in
+      Fundec.Hashtbl.add result d ();
+      result, Some (File_info.get file_info flag d)
+    end else
+      result, None
   in
   object
     val mutable eff = Effect.create dummy_flag
@@ -1116,7 +1120,7 @@ class sweeper fl file_info =
       if Options.(Alloc_functions.mem name || Assume_functions.mem name || Target_functions.mem name) then
         SkipChildren
       else begin
-        eff <- File_info.get file_info fl f;
+        eff <- File_info.get file_info flag f;
         DoChildren
       end
     method! vstmt_aux s =
@@ -1150,10 +1154,55 @@ class sweeper fl file_info =
       function
       | GFun (f, _) when not (Fundec.Hashtbl.mem required_bodies f) ->
         ChangeTo []
+      | GVar (vi, ({ init = Some _ } as init), _)
+        when
+          not vi.vaddrof &&
+          may_map
+            ~dft:false
+            (fun main_eff ->
+               not Reads.(mem Global (Region.Variable (Global_var.of_varinfo_exn vi)) @@ Effect.depends main_eff))
+            main_eff ->
+        init.init <- None;
+        SkipChildren
+      | GVar (vi, ({ init = Some init' } as init), _) when has_some main_eff ->
+        let rec filter_init =
+          let deps = Effect.depends (the main_eff) in
+          fun region ->
+            function
+            | SingleInit _ as i ->
+              let relevant =
+                let check_type t =
+                  Reads.(mem Global @@ Region.Type_approximation (Primitive_type.of_typ_exn t)) deps
+                in
+                match region with
+                | `Type t -> check_type t
+                | `Field fi when fi.fcomp.cstruct ->
+                  Reads.(mem Global (Region.Field (Struct_field.of_fieldinfo_exn fi)) deps)
+                | `Field fi -> check_type fi.ftype
+              in
+              if relevant then Some i else None
+            | CompoundInit (ty, inits) ->
+              let inits =
+                List.(
+                  flatten @@
+                  map
+                  (fun (off, i) ->
+                     let region =
+                       match lastOffset off with
+                       | Field ({ fcomp = { cstruct = true; _ }; faddrof = false; _ } as fi, NoOffset) -> `Field fi
+                       | _ -> `Type (typeOffset ty off)
+                     in
+                     may_map ~dft:[] (fun i -> [off, i]) @@ filter_init region i)
+                  inits)
+              in
+              if inits <> [] then Some (CompoundInit (ty, inits)) else None
+        in
+        init.init <- filter_init (`Type vi.vtype) init';
+        SkipChildren
       | _ -> DoChildren
   end
 
-let sweep file_info = visitFramacFile (new sweeper flag file_info) @@ Ast.get ()
+let sweep file_info = visitFramacFile (new sweeper file_info) @@ Ast.get ()
 
 let condensate () =
   let module Cg = Callgraph.Cg in
