@@ -510,6 +510,10 @@ end
 
 module H_write = Make_reporting_hashmap (Writes) (Reads)
 
+module Void_ptr_var = Make_var (struct let is_ok vi = isVoidPtrType vi.vtype end)
+
+module H_void_ptr_var = Make_reporting_bithashset (Void_ptr_var)
+
 module Effect : sig
   type t
 
@@ -530,11 +534,13 @@ module Effect : sig
   val add_body_req : fundec -> t -> unit
   val add_stmt_req : stmt -> t -> unit
   val set_is_target : t -> unit
+  val add_tracking_var : Void_ptr_var.t -> t -> unit
   val shallow_copy_writes : Flag.t -> t -> H_write.t
   val copy : Flag.t -> t -> t
 
   val iter_writes : (Writes.t -> Reads.t -> unit) -> t -> unit
   val is_target : t -> bool
+  val is_tracking_var : Void_ptr_var.t -> t -> bool
   val iter_global_deps : (Region.t -> unit) -> t -> unit
   val iter_poly_deps : (Formal_var.t -> unit) -> t -> unit
   val iter_local_deps : (Local_var.t -> unit) -> t -> unit
@@ -550,6 +556,7 @@ end = struct
   type t =
     {
               writes     : H_write.t;
+              tracking   : H_void_ptr_var.t;
       mutable is_target  : bool;
               depends    : Reads.t;
       mutable result_dep : bool;
@@ -560,6 +567,7 @@ end = struct
   let create f =
     {
       writes = H_write.create f;
+      tracking = H_void_ptr_var.create f;
       is_target = false;
       depends = Reads.create f;
       result_dep = false;
@@ -586,10 +594,12 @@ end = struct
   let add_stmt_req s e = Requires.add_stmt s e.requires
   let has_body_req f e = Requires.has_body f e.requires
   let has_stmt_req s e = Requires.has_stmt s e.requires
+  let add_tracking_var v e = H_void_ptr_var.add v e.tracking
   let shallow_copy_writes f e = H_write.shallow_copy f e.writes
   let copy f e =
     {
       writes = H_write.copy f e.writes;
+      tracking = H_void_ptr_var.copy f e.tracking;
       is_target = e.is_target;
       depends = Reads.copy f e.depends;
       result_dep = e.result_dep;
@@ -603,13 +613,14 @@ end = struct
   let iter_poly_deps f e = Reads.iter_poly f e.depends
   let iter_local_deps f e = Reads.iter_local f e.depends
   let has_result_dep e = e.result_dep
+  let is_tracking_var v e = H_void_ptr_var.mem v e.tracking
   let iter_body_reqs f e = Requires.iter_bodies f e.requires
   let iter_stmt_reqs f e = Requires.iter_stmts f e.requires
   let flag e = e.flag
 
   let pp fmt e =
-    fprintf fmt "@[w:@;@[%a@];@.tar:%B;@.deps:@;%a;@.RD:%B@]"
-      H_write.pp e.writes e.is_target Reads.pp e.depends e.result_dep
+    fprintf fmt "@[w:@;@[%a@];@.track:%a;@.tar:%B;@.deps:@;%a;@.RD:%B@]"
+      H_write.pp e.writes H_void_ptr_var.pp e.tracking e.is_target Reads.pp e.depends e.result_dep
 end
 
 module File_info = struct
@@ -770,6 +781,7 @@ let project_reads ~fundec ~params =
     Reads.iter_poly (fun fv -> (List.assoc (fv :> varinfo) params) acc) from;
     Reads.iter_global (fun r -> Reads.add_global r acc) from
 
+(* Incomplete, but suitable for fix-point iteration approach *)
 let add_transitive_closure =
   let module Vertex = struct
     type t = Writes.t * Reads.t
@@ -812,6 +824,11 @@ let add_transitive_closure =
          List.iter (fun (_, from as v) -> Deps.iter_succ (fun (_, r) -> Reads.import ~from r) g v) scc)
       sccs
 
+let is_var_sating p e =
+  match (stripCasts e).enode with
+  | Lval (Var v, NoOffset) when p v -> true
+  | _ -> false
+
 class effect_collector file_info def =
   let eff = File_info.get file_info flag def in
   let dummy_flag = Flag.create "effect_collector_dummy" in
@@ -853,7 +870,7 @@ class effect_collector file_info def =
           add_depends ~reach_target:true;
           project_reads ~fundec ~params ~from:(Effect.depends eff') (Effect.depends eff)
         end;
-        let lvo = may_map add_from_lval lvo ~dft:(const ()) in
+        let lvo = may_map add_from_lval lvo ~dft:ignore in
         let project_reads = project_reads ~fundec ~params in
         Effect.iter_writes
           (fun w from ->
@@ -874,8 +891,16 @@ class effect_collector file_info def =
         Stack.push vs curr_reads;
         DoChildrenPost (fun s -> ignore @@ Stack.pop curr_reads; s)
       in
+      let alloc_to ~loc ~lv ~from =
+        let lv = Mem (new_exp ~loc @@ Lval lv), NoOffset in
+        add_edges ~lv:(add_from_lval lv) ~from
+      in
+      let is_tracking_var v = isVoidPtrType v.vtype && Effect.is_tracking_var (Void_ptr_var.of_varinfo_exn v) eff in
       fun s ->
         match s.skind with
+        | Instr (Set (lv, e, loc)) when is_var_sating is_tracking_var e ->
+          alloc_to ~loc ~lv ~from:(add_from_expr e);
+          SkipChildren
         | Instr (Set (lv, e, _)) ->
           add_edges ~lv:(add_from_lval lv) ~from:(add_from_expr e);
           SkipChildren
@@ -884,11 +909,15 @@ class effect_collector file_info def =
           SkipChildren
         | Instr (Call (lvo, { enode = Lval (Var vi, NoOffset) }, _, loc)) when Options.Alloc_functions.mem vi.vname ->
           begin match lvo with
-          | Some lv ->
-            let lv = Mem (new_exp ~loc @@ Lval lv), NoOffset in
-            add_edges ~lv:(add_from_lval lv) ~from:(const ())
+          | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype ->
+            add_edges ~lv:(add_from_lval lv) ~from:ignore;
+            Effect.add_tracking_var (Void_ptr_var.of_varinfo_exn v) eff
+          | Some lv -> alloc_to ~loc ~lv ~from:ignore
           | None -> ()
           end;
+          SkipChildren
+        | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, [e], _)) when Options.Assume_functions.mem vi.vname ->
+          add_edges ~lv:(add_from_expr e) ~from:ignore;
           SkipChildren
         | Instr (Call (lvo, { enode = Lval (Var vi, NoOffset) }, params, _)) when isFunctionType vi.vtype ->
           begin try
@@ -909,7 +938,7 @@ class effect_collector file_info def =
           handle_all_reads ();
           add_edges
             ?lv:None
-            ~from:(may_map add_from_expr eo ~dft:(const ()));
+            ~from:(may_map add_from_expr eo ~dft:ignore);
           SkipChildren
         | Goto _ | Break _ | Continue _ ->
           handle_all_reads ();
@@ -978,7 +1007,7 @@ class marker file_info def =
         let r = Reads.create dummy_flag in
         fun ~s ~lv ~from ->
           Reads.clear r;
-          add_from_lval lv r;
+          lv r;
         if Reads.intersects (Effect.depends eff) r then begin
           from (Effect.depends eff);
           self#add_stmt s
@@ -991,10 +1020,17 @@ class marker file_info def =
           from (Effect.depends eff)
         end
       in
+      let alloc_to ~s ~loc ~lv ~from =
+        let lv = Mem (new_exp ~loc @@ Lval lv), NoOffset in
+        handle_assignment ~s ~lv:(add_from_lval lv) ~from
+      in
+      let is_tracking_var v = isVoidPtrType v.vtype && Effect.is_tracking_var (Void_ptr_var.of_varinfo_exn v) eff in
       fun s ->
         match s.skind with
+        | Instr (Set (lv, e, loc)) when is_var_sating is_tracking_var e ->
+          alloc_to ~s ~loc ~lv ~from:(add_from_expr e)
         | Instr (Set (lv, e, _)) ->
-          handle_assignment ~s ~lv ~from:(add_from_expr e)
+          handle_assignment ~s ~lv:(add_from_lval lv) ~from:(add_from_expr e)
         | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _)) when Options.Target_functions.mem vi.vname ->
           self#add_stmt s;
           begin try
@@ -1007,11 +1043,14 @@ class marker file_info def =
           let d = Globals.Functions.find_by_name vi.vname in
           if Kernel_function.is_definition d then self#add_body (Kernel_function.get_definition d);
           begin match lvo with
-          | Some lv ->
-            let lv = Mem (new_exp ~loc @@ Lval lv), NoOffset in
-            handle_assignment ~s ~lv ~from:(const ())
+          | Some (Var v, NoOffset as lv)
+            when isVoidPtrType v.vtype && Effect.is_tracking_var (Void_ptr_var.of_varinfo_exn v) eff ->
+            handle_assignment ~s ~lv:(add_from_lval lv) ~from:ignore
+          | Some lv -> alloc_to ~s ~loc ~lv ~from:ignore
           | None -> SkipChildren
           end
+        | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, [e], _)) when Options.Assume_functions.mem vi.vname ->
+          handle_assignment ~s ~lv:(add_from_expr e) ~from:ignore
         | Instr (Call (lvo, { enode = Lval (Var vi, NoOffset) }, params, _)) when isFunctionType vi.vtype ->
           begin try
             handle_call ~s lvo (Kernel_function.get_definition (Globals.Functions.find_by_name vi.vname)) params
@@ -1073,8 +1112,13 @@ class sweeper fl file_info =
 
     inherit frama_c_inplace
     method! vfunc f =
-      eff <- File_info.get file_info fl f;
-      DoChildren
+      let name = f.svar.vname in
+      if Options.(Alloc_functions.mem name || Assume_functions.mem name || Target_functions.mem name) then
+        SkipChildren
+      else begin
+        eff <- File_info.get file_info fl f;
+        DoChildren
+      end
     method! vstmt_aux s =
       if not (Effect.has_stmt_req s eff) then
         if Options.Use_ghosts.is_set () then begin

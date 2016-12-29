@@ -34,7 +34,7 @@ module Target_functions =
       let option_name = "-target_functions"
       let help = "Specify target (error) function name for reachability analysis"
       let arg_name = ""
-      let default = Datatype.String.Set.of_list ["__VERIFIER_error"; "ldv_assume"]
+      let default = Datatype.String.Set.of_list ["__VERIFIER_error"; "ldv_assume"; "ldv_stop"]
     end)
 
 module Alloc_functions =
@@ -43,5 +43,16 @@ module Alloc_functions =
       let option_name = "-alloc_functions"
       let help = "Specify names of memory allocating functions"
       let arg_name = ""
-      let default = Datatype.String.Set.of_list ["malloc"; "kmalloc"; "kzalloc"]
+      let default =
+        Datatype.String.Set.of_list ["malloc"; "calloc"; "kmalloc"; "kzalloc";
+                                     "ldv_malloc"; "ldv_zalloc"; "ldv_init_zalloc"]
+    end)
+
+module Assume_functions =
+  Filled_string_set
+    (struct
+      let option_name = "-assume_functions"
+      let help = "Specify names of functions allowing to restrict the values of some variables"
+      let arg_name = ""
+      let default = Datatype.String.Set.of_list ["__VERIFIER_assume"]
     end)
