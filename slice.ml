@@ -1164,7 +1164,7 @@ class sweeper file_info =
             main_eff ->
         init.init <- None;
         SkipChildren
-      | GVar (vi, ({ init = Some init' } as init), _) when has_some main_eff ->
+      | GVar (vi, ({ init = Some (CompoundInit _ as init') } as init), _) when has_some main_eff ->
         let rec filter_init =
           let deps = Effect.depends (the main_eff) in
           fun region ->
