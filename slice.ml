@@ -759,6 +759,56 @@ let filter_matching_kfs params =
          List.for_all2 (fun vi e -> not @@ need_cast vi.vtype @@ typeOf e) formals params
        else false)
 
+module H_stmt_conds = struct
+  include Stmt.Hashtbl
+
+  let find_or_empty h k = try find h k with Not_found -> []
+end
+
+class break_continue_collector =
+  object
+    val heads = H_stmt_conds.create 16
+    val curr_head = Stack.create ()
+
+    inherit frama_c_inplace
+
+    method! vstmt s =
+      match s.skind with
+      | If (e, _, _, _) ->
+        begin try
+          let (_, st) = Stack.top curr_head in
+          Stack.push e st;
+          DoChildrenPost (fun s -> ignore @@ Stack.pop st; s)
+        with
+        | Stack.Empty -> DoChildren
+        end
+      | Switch _ | Loop _ ->
+        Stack.push (s, Stack.create ()) curr_head;
+        DoChildrenPost (fun s -> ignore @@ Stack.pop curr_head; s)
+      | Break _ | Continue _ ->
+        begin try
+          let (s, st) = Stack.top curr_head in
+          let l = H_stmt_conds.find_or_empty heads s in
+          H_stmt_conds.replace heads s (Stack.fold (fun l x -> x :: l) [] st @ l)
+        with
+        | Stack.Empty -> ()
+        end;
+        SkipChildren
+      | _ -> DoChildren
+
+    method heads = heads
+  end
+
+let collect_break_continue sccs =
+  let vis = new break_continue_collector in
+  List.(Kernel_function.(
+      sccs |>
+      flatten |>
+      filter is_definition |>
+      map get_definition |>
+      iter @@ ignore % visitFramacFunction (vis :> frama_c_visitor)));
+  vis#heads
+
 let take n l =
   let rec loop n dst = function
     | h :: t when n > 0 ->
@@ -829,7 +879,7 @@ let is_var_sating p e =
   | Lval (Var v, NoOffset) when p v -> true
   | _ -> false
 
-class effect_collector file_info def =
+class effect_collector break_continue_cache file_info def =
   let eff = File_info.get file_info flag def in
   let dummy_flag = Flag.create "effect_collector_dummy" in
   object
@@ -887,8 +937,10 @@ class effect_collector file_info def =
           Effect.iter_writes (fun _ r -> Reads.import ~from r) eff;
           Reads.import ~from all_reads
       in
-      let continue_under vs =
-        Stack.push vs curr_reads;
+      let continue_under f =
+        let r = Reads.create dummy_flag in
+        f r;
+        Stack.push r curr_reads;
         DoChildrenPost (fun s -> ignore @@ Stack.pop curr_reads; s)
       in
       let alloc_to ~loc ~lv ~from =
@@ -940,20 +992,30 @@ class effect_collector file_info def =
             ?lv:None
             ~from:(may_map add_from_expr eo ~dft:ignore);
           SkipChildren
-        | Goto _ | Break _ | Continue _ ->
+        | Goto _ ->
           handle_all_reads ();
           SkipChildren
-        | If (e, _, _, _) | Switch (e, _, _, _) ->
-          continue_under (let r = Reads.create dummy_flag in add_from_expr e r; r)
-        | Loop _ | Block _ | UnspecifiedSequence _ -> DoChildren
+        | Break _ | Continue _ ->
+          SkipChildren
+        | If (e, _, _, _)  ->
+          continue_under (add_from_expr e)
+        | Switch (e, _, _, _) ->
+          continue_under
+            (fun r ->
+               add_from_expr e r;
+               List.iter (fun e -> add_from_expr e r) (H_stmt_conds.find_or_empty break_continue_cache s))
+        | Loop _ ->
+          continue_under
+            (fun r -> List.iter (fun e -> add_from_expr e r) (H_stmt_conds.find_or_empty break_continue_cache s))
+        | Block _ | UnspecifiedSequence _ -> DoChildren
         | Throw _ | TryCatch _ | TryFinally _ | TryExcept _  ->
           failwith "Unsupported features: exceptions and their handling"
   end
 
-let collect_effects =
+let collect_effects break_continue_cache =
   visit_until_convergence
     ~order:`topological
-    (new effect_collector)
+    (new effect_collector break_continue_cache)
 
 class marker file_info def =
   let eff = File_info.get file_info flag def in
@@ -1226,6 +1288,6 @@ let condensate () =
 let slice () =
   let sccs = condensate () in
   let fi = File_info.create () in
-  collect_effects fi sccs;
+  collect_effects (collect_break_continue sccs) fi sccs;
   mark fi sccs;
   sweep fi
