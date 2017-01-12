@@ -36,7 +36,7 @@ module Primitive_type : sig
 end = struct
   type t = typ
 
-  let is_ok = isArithmeticOrPointerType
+  let is_ok t = (match t with TNamed _ -> false | _ -> true) && isArithmeticOrPointerType t
 
   let of_typ t =
     let t = unrollTypeDeep t in
@@ -77,7 +77,7 @@ end = struct
   let pp fmt = fprintf fmt "%a" pp_varinfo
 end
 
-module Global_var = Make_var (struct let is_ok vi = vi.vglob end)
+module Global_var = Make_var (struct let is_ok vi = isArithmeticOrPointerType vi.vtype && vi.vglob end)
 
 module Struct_field : sig
   type t = private fieldinfo
@@ -175,6 +175,7 @@ module type Reporting_bithashset = sig
   val add : elt -> t -> unit
   val import : from:t -> t -> unit
   val remove : elt -> t -> unit
+  val sub : t -> from:t -> unit
   val mem : elt -> t -> bool
   val intersects : t -> t -> bool
   val iter : (elt -> unit) -> t -> unit
@@ -231,6 +232,9 @@ struct
     let i = index e in
     if Bv.get v i then Flag.report f;
     Bv.reset v i
+  let sub (s, _) ~from:(from, f) =
+    if Bv.inters from s then Flag.report f;
+    Bv.sub_from ~from s
   let mem e (v, _) = Bv.get v (index e)
   let intersects (v1, _) (v2, _) = Bv.inters v1 v2
   let iter f (v, _) = Bv.iter_true v (fun i -> f (elem i))
@@ -346,11 +350,12 @@ end
 
 module H_region = Make_reporting_bithashset (Region)
 
-module Formal_var = Make_var (struct let is_ok vi = vi.vformal end)
+module Formal_var = Make_var (struct let is_ok vi = isArithmeticOrPointerType vi.vtype && vi.vformal end)
 
 module H_formal_var = Make_reporting_bithashset (Formal_var)
 
-module Local_var = Make_var (struct let is_ok vi = not vi.vglob && not vi.vformal end)
+module Local_var =
+  Make_var (struct let is_ok vi = isArithmeticOrPointerType vi.vtype && not vi.vglob && not vi.vformal end)
 
 module H_local_var = Make_reporting_bithashset (Local_var)
 
@@ -417,6 +422,7 @@ module Reads : sig
   val add_poly : Formal_var.t -> t -> unit
   val add_local : Local_var.t -> t -> unit
   val add : 'a kind -> 'a -> t -> unit
+  val sub : t -> from:t -> unit
   val mem : 'a kind -> 'a -> t -> bool
   val intersects : t -> t -> bool
   val flag : t -> Flag.t
@@ -467,6 +473,10 @@ end = struct
     | Global -> H_region.add x r.global
     | Poly -> H_formal_var.add x r.poly
     | Local -> H_local_var.add x r.local
+  let sub r ~from =
+    H_region.sub r.global ~from:from.global;
+    H_local_var.sub r.local ~from:from.local;
+    H_formal_var.sub r.poly ~from:from.poly
   let mem : type a. a kind -> a -> _ = fun k x r ->
     match k with
     | Global -> H_region.mem x r.global
@@ -969,41 +979,26 @@ class effect_collector break_continue_cache file_info def =
         Stack.iter (fun from -> Reads.import ~from acc) curr_reads
       in
       let add_edges =
-        let h_lv = Reads.create dummy_flag and h_from = Reads.create dummy_flag in
-        fun ?lv ~from ->
-          Reads.clear h_lv;
-          Reads.clear h_from;
-          from h_from;
-          collect_reads h_from;
+        let r_lv = Reads.create dummy_flag and r_from = Reads.create dummy_flag in
+        fun ?(struct_assign=false) ?lv ~from () ->
+          Reads.clear r_lv;
+          Reads.clear r_from;
+          from r_from;
+          collect_reads r_from;
           match lv with
           | Some lv ->
-            lv h_lv;
-            if Reads.is_singleton h_lv || (Reads.is_empty h_from || Reads.has_vars h_from) then begin
-              Reads.iter_global (fun r -> Effect.add_reads (Writes.Global r) h_from eff) h_lv;
-              Reads.iter_poly (fun v -> Effect.add_reads (Writes.Poly v) h_from eff) h_lv;
-              Reads.iter_local (fun v -> Effect.add_reads (Writes.Local v) h_from eff) h_lv
-            end else if not (Reads.is_empty h_lv) then
-              let fields_and_types_from = ref [] and fields_and_types_to = ref [] in
-              let error _ = failwith "add_edges: illegal lvalue" in
-              let add rlr =
-                function
-                | Region.Field _
-                | Region.Type_approximation _ as r ->
-                  rlr := r :: !rlr
-                | _ -> error ()
-              in
-              Reads.iter_local error h_lv;
-              Reads.iter_poly error h_lv;
-              Reads.iter_global (add fields_and_types_to) h_lv;
-              Reads.iter_local error h_from;
-              Reads.iter_poly error h_from;
-              Reads.iter_global (add fields_and_types_from) h_from;
-              let sort = List.sort Region.compare in
-              List.iter2
-                (fun r_from r_to -> Effect.add_global_read (Writes.Global r_to) r_from eff)
-                (sort !fields_and_types_to)
-                (sort !fields_and_types_from)
-          | None -> Effect.add_reads Writes.Result h_from eff
+            lv r_lv;
+            let handle r_from =
+              Reads.iter_global (fun r -> Effect.add_reads (Writes.Global r) r_from eff) r_lv;
+              Reads.iter_poly (fun v -> Effect.add_reads (Writes.Poly v) r_from eff) r_lv;
+              Reads.iter_local (fun v -> Effect.add_reads (Writes.Local v) r_from eff) r_lv
+            in
+            if not struct_assign then handle r_from
+            else if not (Reads.is_empty r_lv) then
+              let r = Reads.copy dummy_flag r_from in
+              Reads.sub ~from:r r_lv;
+              handle r
+          | None -> Effect.add_reads Writes.Result r_from eff
       in
       let add_depends ~reach_target =
         if reach_target then Effect.set_is_target eff;
@@ -1022,10 +1017,11 @@ class effect_collector break_continue_cache file_info def =
              match w with
              | Writes.Global _ | Writes.Result ->
                let lv = may_map (fun (Reads.Some (k, x)) r -> Reads.add k x r) ~dft:lv (Reads.of_writes w) in
-               add_edges ~lv ~from:(project_reads ~from)
+               let struct_assign = w = Writes.Result && may_map ~dft:false (isStructOrUnionType % typeOfLval) lvo in
+               add_edges ~struct_assign ~lv ~from:(project_reads ~from) ()
              | _ -> ())
           eff';
-        may (fun lv' -> add_edges ~lv ~from:(add_rval_from_lval lv')) lvo
+        may (fun lv' -> add_edges ~lv ~from:(add_rval_from_lval lv') ()) lvo
       in
       let handle_all_reads =
         let from = Reads.create dummy_flag in
@@ -1044,7 +1040,7 @@ class effect_collector break_continue_cache file_info def =
       in
       let alloc_to ~loc ~lv ~from =
         let lv = Mem (new_exp ~loc @@ Lval lv), NoOffset in
-        add_edges ~lv:(add_from_lval lv) ~from:(fun r -> from r; add_rval_from_lval lv r)
+        add_edges ~lv:(add_from_lval lv) ~from:(fun r -> from r; add_rval_from_lval lv r) ()
       in
       let is_tracking_var v = isVoidPtrType v.vtype && Effect.is_tracking_var (Void_ptr_var.of_varinfo_exn v) eff in
       fun s ->
@@ -1053,7 +1049,11 @@ class effect_collector break_continue_cache file_info def =
           alloc_to ~loc ~lv ~from:(add_from_rval e);
           SkipChildren
         | Instr (Set (lv, e, _)) ->
-          add_edges ~lv:(add_from_lval lv) ~from:(add_from_rval_and_lval lv e);
+          add_edges
+            ~struct_assign:(isStructOrUnionType @@ typeOfLval lv)
+            ~lv:(add_from_lval lv)
+            ~from:(add_from_rval_and_lval lv e)
+            ();
           SkipChildren
         | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _)) when Options.Target_functions.mem vi.vname ->
           add_depends ~reach_target:true;
@@ -1061,14 +1061,14 @@ class effect_collector break_continue_cache file_info def =
         | Instr (Call (lvo, { enode = Lval (Var vi, NoOffset) }, _, loc)) when Options.Alloc_functions.mem vi.vname ->
           begin match lvo with
           | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype ->
-            add_edges ~lv:(add_from_lval lv) ~from:ignore;
+            add_edges ~lv:(add_from_lval lv) ~from:ignore ();
             Effect.add_tracking_var (Void_ptr_var.of_varinfo_exn v) eff
           | Some lv -> alloc_to ~loc ~lv ~from:ignore
           | None -> ()
           end;
           SkipChildren
         | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, [e], _)) when Options.Assume_functions.mem vi.vname ->
-          add_edges ~lv:(add_from_rval e) ~from:ignore;
+          add_edges ~lv:(add_from_rval e) ~from:ignore ();
           SkipChildren
         | Instr (Call (lvo, { enode = Lval (Var vi, NoOffset) }, params, _)) when isFunctionType vi.vtype ->
           begin try
@@ -1089,7 +1089,8 @@ class effect_collector break_continue_cache file_info def =
           handle_all_reads ();
           add_edges
             ?lv:None
-            ~from:(may_map add_from_rval eo ~dft:ignore);
+            ~from:(may_map add_from_rval eo ~dft:ignore)
+            ();
           SkipChildren
         | Goto _ ->
           handle_all_reads ();
@@ -1361,6 +1362,7 @@ class sweeper file_info =
       | GVar (vi, ({ init = Some _ } as init), _)
         when
           not vi.vaddrof &&
+          isArithmeticOrPointerType vi.vtype &&
           may_map
             ~dft:false
             (fun main_eff ->
@@ -1394,14 +1396,14 @@ class sweeper file_info =
                      let region =
                        match lastOffset off with
                        | Field ({ fcomp = { cstruct = true; _ }; faddrof = false; _ } as fi, NoOffset) -> `Field fi
-                       | _ -> `Type (typeOffset ty off)
+                       | _ -> `Type (unrollType @@ typeOffset ty off)
                      in
                      may_map ~dft:[] (fun i -> [off, i]) @@ filter_init region i)
                   inits)
               in
               if inits <> [] then Some (CompoundInit (ty, inits)) else None
         in
-        init.init <- filter_init (`Type vi.vtype) init';
+        init.init <- filter_init (`Type (unrollType vi.vtype)) init';
         SkipChildren
       | _ -> DoChildren
   end

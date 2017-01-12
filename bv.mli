@@ -100,6 +100,8 @@ val union_into : into:t -> t -> unit
 val inter_into : into:t -> t -> unit
 (** [inter ~into bv] sets [into] to the intersection of itself and [bv] *)
 
+val sub_from : from:t -> t -> unit
+
 val union : t -> t -> t
 (** [union bv1 bv2] returns the union of the two sets *)
 

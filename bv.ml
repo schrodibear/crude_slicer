@@ -353,6 +353,12 @@ let inter bv1 bv2 =
   assert_equal [3;4] l;
 *)
 
+let sub_from ~from bv =
+  let n = min (length from) (length bv) in
+  for i = 0 to n - 1 do
+    from.a.(i) <- from.a.(i) land (lnot bv.a.(i))
+  done
+
 let subset bv1 bv2 =
   let n = min (length bv1) (length bv2) in
   try
