@@ -425,7 +425,10 @@ module Reads : sig
   val iter_global : (Region.t -> unit) -> t -> unit
   val iter_poly : (Formal_var.t -> unit) -> t -> unit
   val iter_local : (Local_var.t -> unit) -> t -> unit
+  val is_empty : t -> bool
   val is_singleton : t -> bool
+  val has_vars : t -> bool
+  val length : t -> int
 
   val pp : formatter -> t -> unit
 end = struct
@@ -480,10 +483,13 @@ end = struct
   let iter_global f r = H_region.iter f r.global
   let iter_poly f r = H_formal_var.iter f r.poly
   let iter_local f r = H_local_var.iter f r.local
+  let is_empty r = H_region.is_empty r.global && H_formal_var.is_empty r.poly && H_local_var.is_empty r.local
   let is_singleton r =
     H_region.length r.global = 1 && H_formal_var.is_empty r.poly && H_local_var.is_empty r.local ||
     H_formal_var.length r.poly = 1 && H_region.is_empty r.global && H_local_var.is_empty r.local ||
     H_local_var.length r.local = 1 && H_formal_var.is_empty r.poly && H_region.is_empty r.global
+  let length r = H_region.length r.global + H_formal_var.length r.poly + H_local_var.length r.local
+  let has_vars r = not (H_formal_var.is_empty r.poly && H_local_var.is_empty r.local)
 
   let pp fmt r =
     fprintf fmt "  @[gl:%a,@ @,pol:%a,@ @,loc:%a@]" H_region.pp r.global H_formal_var.pp r.poly H_local_var.pp r.local
@@ -972,11 +978,11 @@ class effect_collector break_continue_cache file_info def =
           match lv with
           | Some lv ->
             lv h_lv;
-            if Reads.is_singleton h_lv then begin
+            if Reads.is_singleton h_lv || (Reads.is_empty h_from || Reads.has_vars h_from) then begin
               Reads.iter_global (fun r -> Effect.add_reads (Writes.Global r) h_from eff) h_lv;
               Reads.iter_poly (fun v -> Effect.add_reads (Writes.Poly v) h_from eff) h_lv;
               Reads.iter_local (fun v -> Effect.add_reads (Writes.Local v) h_from eff) h_lv
-            end else
+            end else if not (Reads.is_empty h_lv) then
               let fields_and_types_from = ref [] and fields_and_types_to = ref [] in
               let error _ = failwith "add_edges: illegal lvalue" in
               let add rlr =
@@ -1134,7 +1140,7 @@ class marker file_info def =
              | Writes.Result when has_some lvo ->
                let r = Reads.create dummy_flag in
                may (fun lv -> add_from_lval lv r) lvo;
-               let reads = Reads.copy (Reads.flag reads) reads in
+               let reads = Reads.copy dummy_flag reads in
                may (fun lv -> add_rval_from_lval lv reads) lvo;
                if Reads.intersects (Effect.depends eff) r then Some reads
                else None
