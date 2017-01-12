@@ -29,19 +29,27 @@ module Primitive_type : sig
 
   val of_typ : typ -> t option
   val of_typ_exn : typ -> t
+  val compare : t -> t -> int
+  val equal : t -> t -> bool
+  val hash : t -> int
   val pp : formatter -> t -> unit
 end = struct
   type t = typ
 
+  let is_ok = isArithmeticOrPointerType
+
   let of_typ t =
     let t = unrollTypeDeep t in
-    if isArithmeticOrPointerType t then Some t
+    if is_ok t then Some t
     else None
 
   let of_typ_exn t =
-    if isArithmeticOrPointerType @@ unrollType t then t
+    if is_ok t then t
     else invalid_arg "Primitive_type.of_typ_exn"
 
+  let compare = Typ.compare
+  let equal = Typ.equal
+  let hash = Typ.hash
   let pp fmt = fprintf fmt "%a" pp_typ
 end
 
@@ -63,9 +71,9 @@ end = struct
     if C.is_ok vi then vi
     else invalid_arg "Formal_var.of_varinfo_exn"
 
-  let compare v1 v2 = Varinfo.compare (v1 :> varinfo) (v2 :> varinfo)
-  let equal v1 v2 = Varinfo.equal (v1 :> varinfo) (v2 :> varinfo)
-  let hash v = Varinfo.hash (v :> varinfo)
+  let compare = Varinfo.compare
+  let equal = Varinfo.equal
+  let hash = Varinfo.hash
   let pp fmt = fprintf fmt "%a" pp_varinfo
 end
 
@@ -76,16 +84,24 @@ module Struct_field : sig
 
   val of_fieldinfo : fieldinfo -> t option
   val of_fieldinfo_exn : fieldinfo -> t
+  val compare : t -> t -> int
+  val equal : t -> t -> bool
+  val hash : t -> int
   val pp : formatter -> t -> unit
 end = struct
   type t = fieldinfo
 
-  let of_fieldinfo fi = if fi.fcomp.cstruct then Some fi else None
+  let is_ok fi = fi.fcomp.cstruct && isArithmeticOrPointerType fi.ftype
+
+  let of_fieldinfo fi = if is_ok fi then Some fi else None
 
   let of_fieldinfo_exn fi =
-    if fi.fcomp.cstruct then fi
+    if is_ok fi then fi
     else invalid_arg "Struct_field.of_fieldinfo_exn"
 
+  let compare = Fieldinfo.compare
+  let equal = Fieldinfo.equal
+  let hash = Fieldinfo.hash
   let pp fmt fi = fprintf fmt "%s.%s" fi.fcomp.cname fi.fname
 end
 
@@ -97,28 +113,28 @@ module Region = struct
 
   let compare r1 r2 =
     match r1, r2 with
-    | Variable v1, Variable v2 -> Varinfo.compare (v1 :> varinfo) (v2 :> varinfo)
+    | Variable v1, Variable v2 -> Global_var.compare v1 v2
     | Variable _, _ -> -1
-    | Field f1, Field f2 -> Fieldinfo.compare (f1 :> fieldinfo) (f2 :> fieldinfo)
+    | Field f1, Field f2 -> Struct_field.compare f1 f2
     | Field _, Variable _ -> 1
     | Field _, _ -> -1
-    | Type_approximation t1, Type_approximation t2 -> Typ.compare (t1 :> typ) (t2 :> typ)
+    | Type_approximation t1, Type_approximation t2 -> Primitive_type.compare t1 t2
     | Type_approximation _, _ -> 1
 
   let equal r1 r2 =
     match r1, r2 with
-    | Variable v1, Variable v2 -> Varinfo.equal (v1 :> varinfo) (v2 :> varinfo)
-    | Field f1, Field f2 -> Fieldinfo.equal (f1 :> fieldinfo) (f2 :> fieldinfo)
-    | Type_approximation t1, Type_approximation t2 -> Typ.equal (t1 :> typ) (t2 :> typ)
+    | Variable v1, Variable v2 -> Global_var.equal v1 v2
+    | Field f1, Field f2 -> Struct_field.equal f1 f2
+    | Type_approximation t1, Type_approximation t2 -> Primitive_type.equal t1 t2
     | Variable _, (Field _ | Type_approximation _)
     | Field _, (Variable _ | Type_approximation _)
     | Type_approximation _, (Variable _ | Field _) -> false
 
   let hash =
     function
-    | Variable v1 -> 7 * Varinfo.hash (v1 :> varinfo)
-    | Field f -> 7 * Fieldinfo.hash (f :> fieldinfo) + 1
-    | Type_approximation t -> 7 * Typ.hash (t :> typ) + 2
+    | Variable v1 -> 7 * Global_var.hash v1
+    | Field f -> 7 * Struct_field.hash f + 1
+    | Type_approximation t -> 7 * Primitive_type.hash t + 2
 
   let pp fmttr =
     let pp fmt = fprintf fmttr fmt in
@@ -409,6 +425,7 @@ module Reads : sig
   val iter_global : (Region.t -> unit) -> t -> unit
   val iter_poly : (Formal_var.t -> unit) -> t -> unit
   val iter_local : (Local_var.t -> unit) -> t -> unit
+  val is_singleton : t -> bool
 
   val pp : formatter -> t -> unit
 end = struct
@@ -463,6 +480,10 @@ end = struct
   let iter_global f r = H_region.iter f r.global
   let iter_poly f r = H_formal_var.iter f r.poly
   let iter_local f r = H_local_var.iter f r.local
+  let is_singleton r =
+    H_region.length r.global = 1 && H_formal_var.is_empty r.poly && H_local_var.is_empty r.local ||
+    H_formal_var.length r.poly = 1 && H_region.is_empty r.global && H_local_var.is_empty r.local ||
+    H_local_var.length r.local = 1 && H_formal_var.is_empty r.poly && H_region.is_empty r.global
 
   let pp fmt r =
     fprintf fmt "  @[gl:%a,@ @,pol:%a,@ @,loc:%a@]" H_region.pp r.global H_formal_var.pp r.poly H_local_var.pp r.local
@@ -700,19 +721,65 @@ let rec add_from_lval acc =
       | TBuiltin_va_list _                                                              -> add_type voidPtrType
 
 class vertex_collector vertices =
-  object
+  object(self)
     inherit frama_c_inplace
+
+    method! vexpr e =
+      match e.enode with
+      | AddrOf (Mem e, _)
+      | StartOf (Mem e, _) ->
+        ignore @@ visitFramacExpr (self :> frama_c_visitor) e;
+        SkipChildren
+      | SizeOfE _
+      | AlignOfE _
+      | AddrOf _
+      | StartOf _ ->
+        SkipChildren
+      | _ -> DoChildren
+
     method! vlval lv =
       add_from_lval vertices lv;
       DoChildren
   end
 
-let add_from_expr acc =
-  let o = new vertex_collector acc in
-  fun e -> ignore (visitFramacExpr (o :> frama_c_visitor) e)
+class lval_vertex_collector vertices =
+  object
+    inherit vertex_collector vertices as super
 
-let add_from_lval lv acc = add_from_lval acc lv
-let add_from_expr lv acc = add_from_expr acc lv
+    method! vlval lv =
+      ignore @@ super#vlval lv;
+      match lv with
+      | Mem _, _-> SkipChildren
+      | _ -> DoChildren
+    method! voffs _ = SkipChildren
+  end
+
+class rval_in_lval_vertex_collector vertices =
+  object
+    val o = new vertex_collector vertices
+
+    inherit frama_c_inplace
+
+    method! vlval =
+      function
+      | Mem e, off ->
+        ignore @@ visitFramacExpr o e;
+        ignore @@ visitFramacOffset o off;
+        SkipChildren
+      | _ -> DoChildren
+
+    method! voffs =
+      function
+      | Index (e, _) ->
+        ignore @@ visitFramacExpr o e;
+        DoChildren
+      | _ -> DoChildren
+  end
+
+let add_from_lval lv acc = ignore @@ visitFramacLval (new lval_vertex_collector acc) lv
+let add_from_rval e acc = ignore @@ visitFramacExpr (new vertex_collector acc) e
+let add_rval_from_lval lv acc = ignore @@ visitFramacLval (new rval_in_lval_vertex_collector acc) lv
+let add_from_rval_and_lval lv e acc = add_from_rval e acc; add_rval_from_lval lv acc
 
 let get_addressed_kfs =
   let cache = ref None in
@@ -826,7 +893,7 @@ let project_reads ~fundec ~params =
     then take (List.length fundec.sformals) params
     else params
   in
-  let params = List.(combine fundec.sformals @@ map add_from_expr params) in
+  let params = List.(combine fundec.sformals @@ map add_from_rval params) in
   fun ~from acc ->
     Reads.iter_poly (fun fv -> (List.assoc (fv :> varinfo) params) acc) from;
     Reads.iter_global (fun r -> Reads.add_global r acc) from
@@ -905,9 +972,31 @@ class effect_collector break_continue_cache file_info def =
           match lv with
           | Some lv ->
             lv h_lv;
-            Reads.iter_global (fun r -> Effect.add_reads (Writes.Global r) h_from eff) h_lv;
-            Reads.iter_poly (fun v -> Effect.add_reads (Writes.Poly v) h_from eff) h_lv;
-            Reads.iter_local (fun v -> Effect.add_reads (Writes.Local v) h_from eff) h_lv
+            if Reads.is_singleton h_lv then begin
+              Reads.iter_global (fun r -> Effect.add_reads (Writes.Global r) h_from eff) h_lv;
+              Reads.iter_poly (fun v -> Effect.add_reads (Writes.Poly v) h_from eff) h_lv;
+              Reads.iter_local (fun v -> Effect.add_reads (Writes.Local v) h_from eff) h_lv
+            end else
+              let fields_and_types_from = ref [] and fields_and_types_to = ref [] in
+              let error _ = failwith "add_edges: illegal lvalue" in
+              let add rlr =
+                function
+                | Region.Field _
+                | Region.Type_approximation _ as r ->
+                  rlr := r :: !rlr
+                | _ -> error ()
+              in
+              Reads.iter_local error h_lv;
+              Reads.iter_poly error h_lv;
+              Reads.iter_global (add fields_and_types_to) h_lv;
+              Reads.iter_local error h_from;
+              Reads.iter_poly error h_from;
+              Reads.iter_global (add fields_and_types_from) h_from;
+              let sort = List.sort Region.compare in
+              List.iter2
+                (fun r_from r_to -> Effect.add_global_read (Writes.Global r_to) r_from eff)
+                (sort !fields_and_types_to)
+                (sort !fields_and_types_from)
           | None -> Effect.add_reads Writes.Result h_from eff
       in
       let add_depends ~reach_target =
@@ -920,13 +1009,17 @@ class effect_collector break_continue_cache file_info def =
           add_depends ~reach_target:true;
           project_reads ~fundec ~params ~from:(Effect.depends eff') (Effect.depends eff)
         end;
-        let lvo = may_map add_from_lval lvo ~dft:ignore in
+        let lv = may_map add_from_lval lvo ~dft:ignore in
         let project_reads = project_reads ~fundec ~params in
         Effect.iter_writes
           (fun w from ->
-             let lv = may_map (fun (Reads.Some (k, x)) r -> Reads.add k x r) ~dft:lvo (Reads.of_writes w) in
-             add_edges ~lv ~from:(project_reads ~from))
-        eff'
+             match w with
+             | Writes.Global _ | Writes.Result ->
+               let lv = may_map (fun (Reads.Some (k, x)) r -> Reads.add k x r) ~dft:lv (Reads.of_writes w) in
+               add_edges ~lv ~from:(project_reads ~from)
+             | _ -> ())
+          eff';
+        may (fun lv' -> add_edges ~lv ~from:(add_rval_from_lval lv')) lvo
       in
       let handle_all_reads =
         let from = Reads.create dummy_flag in
@@ -945,16 +1038,16 @@ class effect_collector break_continue_cache file_info def =
       in
       let alloc_to ~loc ~lv ~from =
         let lv = Mem (new_exp ~loc @@ Lval lv), NoOffset in
-        add_edges ~lv:(add_from_lval lv) ~from
+        add_edges ~lv:(add_from_lval lv) ~from:(fun r -> from r; add_rval_from_lval lv r)
       in
       let is_tracking_var v = isVoidPtrType v.vtype && Effect.is_tracking_var (Void_ptr_var.of_varinfo_exn v) eff in
       fun s ->
         match s.skind with
         | Instr (Set (lv, e, loc)) when is_var_sating is_tracking_var e ->
-          alloc_to ~loc ~lv ~from:(add_from_expr e);
+          alloc_to ~loc ~lv ~from:(add_from_rval e);
           SkipChildren
         | Instr (Set (lv, e, _)) ->
-          add_edges ~lv:(add_from_lval lv) ~from:(add_from_expr e);
+          add_edges ~lv:(add_from_lval lv) ~from:(add_from_rval_and_lval lv e);
           SkipChildren
         | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _)) when Options.Target_functions.mem vi.vname ->
           add_depends ~reach_target:true;
@@ -969,7 +1062,7 @@ class effect_collector break_continue_cache file_info def =
           end;
           SkipChildren
         | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, [e], _)) when Options.Assume_functions.mem vi.vname ->
-          add_edges ~lv:(add_from_expr e) ~from:ignore;
+          add_edges ~lv:(add_from_rval e) ~from:ignore;
           SkipChildren
         | Instr (Call (lvo, { enode = Lval (Var vi, NoOffset) }, params, _)) when isFunctionType vi.vtype ->
           begin try
@@ -990,7 +1083,7 @@ class effect_collector break_continue_cache file_info def =
           handle_all_reads ();
           add_edges
             ?lv:None
-            ~from:(may_map add_from_expr eo ~dft:ignore);
+            ~from:(may_map add_from_rval eo ~dft:ignore);
           SkipChildren
         | Goto _ ->
           handle_all_reads ();
@@ -998,15 +1091,15 @@ class effect_collector break_continue_cache file_info def =
         | Break _ | Continue _ ->
           SkipChildren
         | If (e, _, _, _)  ->
-          continue_under (add_from_expr e)
+          continue_under (add_from_rval e)
         | Switch (e, _, _, _) ->
           continue_under
             (fun r ->
-               add_from_expr e r;
-               List.iter (fun e -> add_from_expr e r) (H_stmt_conds.find_or_empty break_continue_cache s))
+               add_from_rval e r;
+               List.iter (fun e -> add_from_rval e r) (H_stmt_conds.find_or_empty break_continue_cache s))
         | Loop _ ->
           continue_under
-            (fun r -> List.iter (fun e -> add_from_expr e r) (H_stmt_conds.find_or_empty break_continue_cache s))
+            (fun r -> List.iter (fun e -> add_from_rval e r) (H_stmt_conds.find_or_empty break_continue_cache s))
         | Block _ | UnspecifiedSequence _ -> DoChildren
         | Throw _ | TryCatch _ | TryFinally _ | TryExcept _  ->
           failwith "Unsupported features: exceptions and their handling"
@@ -1041,6 +1134,8 @@ class marker file_info def =
              | Writes.Result when has_some lvo ->
                let r = Reads.create dummy_flag in
                may (fun lv -> add_from_lval lv r) lvo;
+               let reads = Reads.copy (Reads.flag reads) reads in
+               may (fun lv -> add_rval_from_lval lv reads) lvo;
                if Reads.intersects (Effect.depends eff) r then Some reads
                else None
              | Writes.Local _
@@ -1076,23 +1171,57 @@ class marker file_info def =
         end;
         SkipChildren
       in
-      let handle_stmt_list ~from ~s stmts =
-        if List.exists (fun s -> Effect.has_stmt_req s eff) stmts then begin
-          self#add_stmt s;
-          from (Effect.depends eff)
-        end
+      let handle_stmt_list ~s stmts =
+        if List.exists (fun s -> Effect.has_stmt_req s eff) stmts then
+          self#add_stmt s
+      in
+      let handle_goto_block ~s =
+        let check =
+          let checker = object
+            inherit frama_c_inplace
+            method! vstmt s =
+              match s.skind with
+              | Break _ | Continue _ -> SkipChildren
+              | _ when Effect.has_stmt_req s eff -> raise Exit
+              | _ -> DoChildren
+          end in
+          fun b ->
+          try ignore @@ visitFramacBlock checker b; false with Exit -> true
+        in
+        let mark =
+          let marker = object
+            inherit frama_c_inplace
+            method! vstmt s =
+              match s.skind with
+              | Break _ | Continue _ ->
+                self#add_stmt s;
+                SkipChildren
+              | If (_, block1, block2, _) ->
+                DoChildrenPost (fun s -> handle_stmt_list ~s @@ block1.bstmts @ block2.bstmts; s)
+              | Switch (_, block, _, _) ->
+                DoChildrenPost (fun s -> handle_stmt_list ~s block.bstmts; s)
+              | Loop (_, block, _, _, _)
+              | Block block ->
+                DoChildrenPost (fun s -> handle_stmt_list ~s block.bstmts; s)
+              | UnspecifiedSequence l ->
+                DoChildrenPost (fun s -> handle_stmt_list ~s @@ List.map (fun (s, _ ,_ ,_, _) -> s) l; s)
+              | _ -> DoChildren
+          end in
+          ignore % visitFramacBlock marker
+        in
+        fun b -> if check b then begin mark b; self#add_stmt s end
       in
       let alloc_to ~s ~loc ~lv ~from =
         let lv = Mem (new_exp ~loc @@ Lval lv), NoOffset in
-        handle_assignment ~s ~lv:(add_from_lval lv) ~from
+        handle_assignment ~s ~lv:(add_from_lval lv) ~from:(fun r -> from r; add_rval_from_lval lv r)
       in
       let is_tracking_var v = isVoidPtrType v.vtype && Effect.is_tracking_var (Void_ptr_var.of_varinfo_exn v) eff in
       fun s ->
         match s.skind with
         | Instr (Set (lv, e, loc)) when is_var_sating is_tracking_var e ->
-          alloc_to ~s ~loc ~lv ~from:(add_from_expr e)
+          alloc_to ~s ~loc ~lv ~from:(add_from_rval e)
         | Instr (Set (lv, e, _)) ->
-          handle_assignment ~s ~lv:(add_from_lval lv) ~from:(add_from_expr e)
+          handle_assignment ~s ~lv:(add_from_lval lv) ~from:(add_from_rval_and_lval lv e)
         | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _)) when Options.Target_functions.mem vi.vname ->
           self#add_stmt s;
           begin try
@@ -1112,7 +1241,7 @@ class marker file_info def =
           | None -> SkipChildren
           end
         | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, [e], _)) when Options.Assume_functions.mem vi.vname ->
-          handle_assignment ~s ~lv:(add_from_expr e) ~from:ignore
+          handle_assignment ~s ~lv:(add_from_rval e) ~from:ignore
         | Instr (Call (lvo, { enode = Lval (Var vi, NoOffset) }, params, _)) when isFunctionType vi.vtype ->
           begin try
             handle_call ~s lvo (Kernel_function.get_definition (Globals.Functions.find_by_name vi.vname)) params
@@ -1130,20 +1259,23 @@ class marker file_info def =
           SkipChildren
         | Return (eo, _) ->
           self#add_stmt s;
-          may (fun e -> if Effect.has_result_dep eff then add_from_expr e (Effect.depends eff)) eo;
+          may (fun e -> if Effect.has_result_dep eff then add_from_rval e (Effect.depends eff)) eo;
           SkipChildren
-        | Goto _ | Break _ | Continue _ ->
+        | Goto _ ->
           self#add_stmt s;
           SkipChildren
-        | If (e, block1, block2, _) ->
-          DoChildrenPost (fun s -> handle_stmt_list ~from:(add_from_expr e) ~s @@ block1.bstmts @ block2.bstmts; s)
-        | Switch (e, block, _, _) ->
-          DoChildrenPost (fun s -> handle_stmt_list ~from:(add_from_expr e) ~s block.bstmts; s)
-        | Loop (_, block, _, _, _)
+        | Break _ | Continue _ ->
+          SkipChildren
+        | If (_, block1, block2, _) ->
+          DoChildrenPost (fun s -> handle_stmt_list ~s @@ block1.bstmts @ block2.bstmts; s)
+        | Switch (_, block, _, _) ->
+          DoChildrenPost (fun s -> handle_goto_block ~s block; s)
+        | Loop (_, block, _, _, _) ->
+          DoChildrenPost (fun s -> handle_goto_block ~s block; s)
         | Block block ->
-          DoChildrenPost (fun s -> handle_stmt_list ~from:ignore ~s block.bstmts; s)
+          DoChildrenPost (fun s -> handle_stmt_list ~s block.bstmts; s)
         | UnspecifiedSequence l ->
-          DoChildrenPost (fun s -> handle_stmt_list ~from:ignore ~s @@ List.map (fun (s, _ ,_ ,_, _) -> s) l; s)
+          DoChildrenPost (fun s -> handle_stmt_list ~s @@ List.map (fun (s, _ ,_ ,_, _) -> s) l; s)
         | Throw _ | TryCatch _ | TryFinally _ | TryExcept _  ->
           failwith "Unsupported features: exceptions and their handling"
   end
