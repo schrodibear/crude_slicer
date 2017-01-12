@@ -901,7 +901,7 @@ let project_reads ~fundec ~params =
   in
   let params = List.(combine fundec.sformals @@ map add_from_rval params) in
   fun ~from acc ->
-    Reads.iter_poly (fun fv -> (List.assoc (fv :> varinfo) params) acc) from;
+    Reads.iter_poly (fun fv -> List.assoc (fv :> varinfo) params acc) from;
     Reads.iter_global (fun r -> Reads.add_global r acc) from
 
 (* Incomplete, but suitable for fix-point iteration approach *)
@@ -1140,8 +1140,6 @@ class marker file_info def =
              | Writes.Result when has_some lvo ->
                let r = Reads.create dummy_flag in
                may (fun lv -> add_from_lval lv r) lvo;
-               let reads = Reads.copy dummy_flag reads in
-               may (fun lv -> add_rval_from_lval lv reads) lvo;
                if Reads.intersects (Effect.depends eff) r then Some reads
                else None
              | Writes.Local _
@@ -1163,6 +1161,12 @@ class marker file_info def =
           let reads = Reads.create dummy_flag in
           H_write.iter (fun _ from -> Reads.import ~from reads) writes;
           project_reads ~fundec ~params ~from:reads (Effect.depends eff);
+          may
+            (fun lv ->
+               let r = Reads.create dummy_flag in
+               add_from_lval lv r;
+               if Reads.intersects (Effect.depends eff) r then add_rval_from_lval lv (Effect.depends eff))
+            lvo;
           mark ()
         end
       in
