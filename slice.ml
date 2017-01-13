@@ -1123,7 +1123,13 @@ class marker file_info def =
   object(self)
     method add_stmt s = Effect.add_stmt_req s eff
     method add_body f = Effect.add_body_req f eff
-    method finish = ()
+
+    method finish =
+      let deps = Effect.depends eff in
+      let import_reads w = Reads.import ~from:(Effect.reads w eff) deps in
+      Reads.iter_global (fun r -> import_reads @@ Writes.Global r) deps;
+      Reads.iter_poly (fun v -> import_reads @@ Writes.Poly v) deps;
+      Reads.iter_local (fun v -> import_reads @@ Writes.Local v) deps
 
     inherit frama_c_inplace
     method! vstmt =
