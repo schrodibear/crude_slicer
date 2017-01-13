@@ -2,7 +2,7 @@
 (*                                                                        *)
 (*  Crude slicer for preprocessing reachability verification tasks        *)
 (*                                                                        *)
-(*  Copyright (C) 2016                                                    *)
+(*  Copyright (C) 2016-2017 Mikhail Mandrykin, ISP RAS                    *)
 (*                                                                        *)
 (**************************************************************************)
 
