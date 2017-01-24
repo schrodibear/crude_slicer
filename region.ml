@@ -145,5 +145,106 @@ module Representant = struct
     { name = "(" ^ r.name ^ ", " ^ name ^ ".void)"; typ; kind = r.kind }
 
   let pp fmttr r =
-    Format.fprintf fmttr "{%s : %a (%a)}" r.name Typ.pretty r.typ Kind.pp r.kind
+    Format.fprintf fmttr "{ %s : %a (%a) }" r.name Typ.pretty r.typ Kind.pp r.kind
 end
+
+module type Representant = sig
+  module Kind : sig type t end
+  type t
+  val equal : t -> t -> bool
+  val hash : t -> int
+  val choose : t -> t -> [> `First | `Second | `Any ]
+end
+
+module Make_unifiable (R : Representant) : sig
+  type t
+  type repr = R.t
+  val of_repr : R.t -> t
+  val unify : t -> t -> unit
+  val repr : t -> R.t
+end = struct
+  type t = R.t
+  type repr = R.t
+  let of_repr = Extlib.id
+
+  module H = Hashtbl.Make (R)
+
+  let reprs = H.create 2048
+  let ranks = H.create 2048
+
+  let rec repr r =
+    match repr (H.find reprs r) with
+    | r' ->
+      H.replace reprs r r';
+      r'
+    | exception Not_found -> r
+
+  let rank r = try H.find ranks r with Not_found -> 0
+
+  let unify r1 r2 =
+    let r1, r2 = repr r1, repr r2 in
+    if R.equal r1 r2 then ()
+    else
+      let k1, k2 = rank r1, rank r2 in
+      match R.choose r1 r2 with
+      | `First ->
+        H.replace reprs r2 r1;
+        if k1 <= k2 then H.replace ranks r1 (k2 + 1)
+      | `Second ->
+        H.replace reprs r1 r2;
+        if k2 <= k1 then H.replace ranks r2 (k1 + 1)
+      | `Any when k1 < k2 ->
+        H.replace reprs r1 r2
+      | `Any when k2 < k1 ->
+        H.replace reprs r2 r1
+      | `Any ->
+        H.replace reprs r1 r2;
+        H.replace ranks r2 (k1 + 1)
+end
+
+module type Unifiable = sig type t type repr val repr : t -> repr end
+
+module Make_hashmap (R : Representant) (U : Unifiable with type repr = R.t) : sig
+  type t
+  val create : unit -> t
+  val add : U.t -> U.t -> t -> unit
+  val find : U.t -> t -> U.t
+end = struct
+  module H = Hashtbl.Make (R)
+  type t = U.t H.t
+  let create () = H.create 4096
+  let add r v h = H.add h (U.repr r) v
+  let find r h = H.find h (U.repr r)
+end
+
+module Make_pair_hashmap (R : Representant) (U : Unifiable with type repr = R.t) (K : Hashtbl.HashedType) : sig
+  type t
+  val create : unit -> t
+  val add : U.t -> K.t -> U.t -> t -> unit
+  val find : U.t -> K.t -> t -> U.t
+end = struct
+  module H = Hashtbl.Make (struct
+      type t = R.t * K.t
+      let equal (r1, k1) (r2, k2) = R.equal r1 r2 && K.equal k1 k2
+      let hash (r, k) = 199 * R.hash r + K.hash k
+    end)
+
+  type t = U.t H.t
+  let create () = H.create 4096
+  let add r k v h = H.add h (U.repr r, k) v
+  let find r k h = H.find h (U.repr r, k)
+end
+
+module Unifiable = Make_unifiable (Representant)
+
+module H_map = Make_hashmap (Representant) (Unifiable)
+module H = Make_pair_hashmap (Representant) (Unifiable) (Fieldinfo)
+
+module R = Representant
+module U = Unifiable
+
+let global = R.global
+let poly = R.poly
+let local = R.local
+
+let 
