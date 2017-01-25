@@ -100,6 +100,11 @@ module Representant = struct
       Console.fatal "Representant.arrow: not a pointer field: %s.%s : %a" fi.fname fi.fcomp.cname Typ.pretty fi.ftype;
     { name = r.name ^ "->" ^ fi.fname; typ = typeOf_pointed fi.ftype; kind = r.kind }
 
+  let deref r =
+    if not (isPointerType r.typ) then
+      Console.fatal "Representant.deref: not a pointer region: %s : %a" r.name Typ.pretty r.typ;
+    { name = "*(" ^ r.name ^ ")"; typ = typeOf_pointed r.typ; kind = r.kind }
+
   let check_detached f fi =
     if not (isStructOrUnionType fi.ftype || isArrayType fi.ftype || fi.faddrof) then
       Console.fatal
@@ -156,13 +161,15 @@ module type Representant = sig
   val choose : t -> t -> [> `First | `Second | `Any ]
 end
 
-module Make_unifiable (R : Representant) : sig
+module type Unifiable = sig
   type t
-  type repr = R.t
-  val of_repr : R.t -> t
+  type repr
+  val of_repr : repr -> t
   val unify : t -> t -> unit
-  val repr : t -> R.t
-end = struct
+  val repr : t -> repr
+end
+
+module Make_unifiable (R : Representant) : Unifiable with type repr = R.t = struct
   type t = R.t
   type repr = R.t
   let of_repr = Extlib.id
@@ -202,26 +209,38 @@ end = struct
         H.replace ranks r2 (k1 + 1)
 end
 
-module type Unifiable = sig type t type repr val repr : t -> repr end
-
 module Make_hashmap (R : Representant) (U : Unifiable with type repr = R.t) : sig
   type t
   val create : unit -> t
   val add : U.t -> U.t -> t -> unit
+  val add' : t -> U.t -> U.t -> unit
   val find : U.t -> t -> U.t
+  val find_or_call : create:(R.t -> R.t) -> call:(U.t -> U.t -> unit) -> t -> U.t -> U.t
 end = struct
   module H = Hashtbl.Make (R)
   type t = U.t H.t
   let create () = H.create 4096
-  let add r v h = H.add h (U.repr r) v
-  let find r h = H.find h (U.repr r)
+  let add u v h = H.add h (U.repr u) v
+  let add' h u v = add u v h
+  let find u h = H.find h (U.repr u)
+  let find_or_call ~create ~call h u =
+    try
+      find u h
+    with
+    | Not_found ->
+      let u' = U.of_repr @@ create (U.repr u) in
+      add u u' h;
+      call u' u;
+      u'
 end
 
 module Make_pair_hashmap (R : Representant) (U : Unifiable with type repr = R.t) (K : Hashtbl.HashedType) : sig
   type t
   val create : unit -> t
   val add : U.t -> K.t -> U.t -> t -> unit
+  val add' : t -> U.t -> K.t -> U.t -> unit
   val find : U.t -> K.t -> t -> U.t
+  val find_or_call : create:(R.t -> K.t -> R.t) -> call:(U.t -> K.t -> U.t -> unit) -> t -> U.t -> K.t -> U.t
 end = struct
   module H = Hashtbl.Make (struct
       type t = R.t * K.t
@@ -231,14 +250,25 @@ end = struct
 
   type t = U.t H.t
   let create () = H.create 4096
-  let add r k v h = H.add h (U.repr r, k) v
-  let find r k h = H.find h (U.repr r, k)
+  let add u k v h = H.add h (U.repr u, k) v
+  let add' h u k v = add u k v h
+  let find u k h = H.find h (U.repr u, k)
+  let find_or_call ~create ~call h u k =
+    try
+      find u k h
+    with
+    | Not_found ->
+      let u' = U.of_repr @@ create (U.repr u) k in
+      add u k u' h;
+      call u' k u;
+      u'
 end
 
 module Unifiable = Make_unifiable (Representant)
 
-module H_map = Make_hashmap (Representant) (Unifiable)
-module H = Make_pair_hashmap (Representant) (Unifiable) (Fieldinfo)
+module H_f = Make_pair_hashmap (Representant) (Unifiable) (Fieldinfo)
+module H_t = Make_pair_hashmap (Representant) (Unifiable) (Typ)
+module H' = Make_hashmap (Representant) (Unifiable)
 
 module R = Representant
 module U = Unifiable
@@ -247,4 +277,24 @@ let global = R.global
 let poly = R.poly
 let local = R.local
 
-let 
+module Separation : sig
+end = struct
+  let h_arrow = H_f.create ()
+  let h_deref = H'.create ()
+  let h_dot = H_f.create ()
+  let h_dot_void = H'.create ()
+  let h_container = H_f.create ()
+  let h_container_of_void = H_t.create ()
+
+  let arrow = H_f.find_or_call ~create:R.arrow ~call:(fun _ _ _ -> ()) h_arrow
+  let deref = H'.find_or_call ~create:R.deref ~call:(fun _ _ -> ()) h_deref
+  let dot = H_f.find_or_call ~create:R.dot ~call:(H_f.add' h_container) h_dot
+  let dot_void =
+    H'.find_or_call
+      ~create:R.dot_void
+      ~call:(fun u u' -> H_t.add u (U.repr u).R.typ u' h_container_of_void)
+      h_dot_void
+  let container = H_f.find_or_call ~create:R.container ~call:(H_f.add' h_dot) h_container
+  let container_of_void =
+    H_t.find_or_call ~create:R.container_of_void ~call:(fun u _ u' -> H'.add u u' h_dot_void) h_container_of_void
+end
