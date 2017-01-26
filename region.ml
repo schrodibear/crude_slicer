@@ -10,7 +10,7 @@ open Cil
 open Cil_types
 open Cil_datatype
 
-module Console = Options
+open Common
 
 module Representant = struct
   module Kind = struct
@@ -216,11 +216,12 @@ module Make_hashmap (R : Representant) (U : Unifiable with type repr = R.t) : si
   val add' : t -> U.t -> U.t -> unit
   val find : U.t -> t -> U.t
   val find_or_call : create:(R.t -> R.t) -> call:(U.t -> U.t -> unit) -> t -> U.t -> U.t
+  val iter : (U.t -> unit) -> U.t -> t -> unit
 end = struct
   module H = Hashtbl.Make (R)
   type t = U.t H.t
   let create () = H.create 4096
-  let add u v h = H.add h (U.repr u) v
+  let add u v h = H.replace h (U.repr u) v
   let add' h u v = add u v h
   let find u h = H.find h (U.repr u)
   let find_or_call ~create ~call h u =
@@ -232,6 +233,7 @@ end = struct
       add u u' h;
       call u' u;
       u'
+  let iter f u h = try f (H.find h (U.repr u)) with Not_found -> ()
 end
 
 module Make_pair_hashmap (R : Representant) (U : Unifiable with type repr = R.t) (K : Hashtbl.HashedType) : sig
@@ -241,18 +243,25 @@ module Make_pair_hashmap (R : Representant) (U : Unifiable with type repr = R.t)
   val add' : t -> U.t -> K.t -> U.t -> unit
   val find : U.t -> K.t -> t -> U.t
   val find_or_call : create:(R.t -> K.t -> R.t) -> call:(U.t -> K.t -> U.t -> unit) -> t -> U.t -> K.t -> U.t
+  val iter: (K.t -> U.t -> unit) -> U.t -> t -> unit
 end = struct
-  module H = Hashtbl.Make (struct
-      type t = R.t * K.t
-      let equal (r1, k1) (r2, k2) = R.equal r1 r2 && K.equal k1 k2
-      let hash (r, k) = 199 * R.hash r + K.hash k
-    end)
+  module H =
+    Hashtbl.Make
+      (struct
+        type t = R.t * K.t
+        let equal (r1, k1) (r2, k2) = R.equal r1 r2 && K.equal k1 k2
+        let hash (r, k) = 199 * R.hash r + K.hash k
+      end)
+  module H_k = Hashtbl.Make (R)
 
-  type t = U.t H.t
-  let create () = H.create 4096
-  let add u k v h = H.add h (U.repr u, k) v
+  type t = U.t H.t * K.t H_k.t
+  let create () = H.create 4096, H_k.create 256
+  let add u k v (h, ks) =
+    let r = U.repr u in
+    H.replace h (r, k) v;
+    H_k.add ks r k
   let add' h u k v = add u k v h
-  let find u k h = H.find h (U.repr u, k)
+  let find u k (h, _) = H.find h (U.repr u, k)
   let find_or_call ~create ~call h u k =
     try
       find u k h
@@ -262,6 +271,9 @@ end = struct
       add u k u' h;
       call u' k u;
       u'
+  let iter f u (h, ks) =
+    let r = U.repr u in
+    List.iter (fun k -> f k @@ H.find h (r, k)) (H_k.find_all ks r)
 end
 
 module Unifiable = Make_unifiable (Representant)
@@ -297,4 +309,60 @@ end = struct
   let container = H_f.find_or_call ~create:R.container ~call:(H_f.add' h_dot) h_container
   let container_of_void =
     H_t.find_or_call ~create:R.container_of_void ~call:(fun u _ u' -> H'.add u u' h_dot_void) h_container_of_void
+
+  let rec unify =
+    let module T = Typ.Hashtbl in
+    let module H =
+      Hashtbl.Make
+        (struct
+          type t = U.t * U.t
+          let equal (u1, u2) (u3, u4) =
+            let r1, r2, r3, r4 = U.(repr u1, repr u2, repr u3, repr u4) in
+            R.equal r1 r2 && R.equal r3 r4
+          let hash (u1, u2) =
+            let r1, r2 = U.(repr u1, repr u2) in
+            997 * R.hash r1 + R.hash r2
+        end)
+    in
+    let h = H.create 256 in
+    let handle1, handle2 =
+      let add h u u' = if not (H.mem h (u, u') || H.mem h (u', u)) then H.replace h (u, u') () in
+      (fun f u u' -> add h (f u) u'), fun f u k u' -> add h (f u k) u'
+    in
+    let cache = Typ.Hashtbl.create 128 in
+    fun ?(max_count=3) ?(retain_cache=Typ.Hashtbl.clear cache) u1 u2 ->
+      let r1 = U.repr u1 and r2 = U.repr u2 in
+      if not (R.equal r1 r2) then
+        let t1 = unrollType r1.R.typ and t2 = unrollType r2.R.typ in
+        if need_cast t1 t2 then
+          Console.fatal
+            "Can't unify regions of different types: %s : %a, %s : %a"
+            r1.R.name Typ.pretty r1.R.typ r2.R.name Typ.pretty r2.R.typ;
+        H.clear h;
+        H_f.iter (handle2 arrow u2) u1 h_arrow;
+        H_f.iter (handle2 arrow u1) u2 h_arrow;
+        H'.iter (handle1 deref u2) u1 h_deref;
+        H'.iter (handle1 deref u1) u2 h_deref;
+        H_f.iter (handle2 dot u2) u1 h_dot;
+        H_f.iter (handle2 dot u1) u2 h_dot;
+        H'.iter (handle1 dot_void u2) u1 h_dot_void;
+        H'.iter (handle1 dot_void u1) u2 h_dot_void;
+        H_f.iter (handle2 container u2) u1 h_container;
+        H_f.iter (handle2 container u1) u2 h_container;
+        H_t.iter (handle2 container_of_void u2) u1 h_container_of_void;
+        H_t.iter (handle2 container_of_void u1) u1 h_container_of_void;
+        U.unify u1 u2;
+        let clone =
+          let self count = T.replace cache t1 (u1, count + 1); u1 in
+          match T.find cache t1 with
+          | _, count when count < max_count -> self count
+          | clone, _ -> clone
+          | exception Not_found -> self 0
+        in
+        H.iter (fun (u, u') () -> unify ~max_count ~retain_cache u u') h;
+        unify ~max_count ~retain_cache u1 clone
+
+  let unify = unify ~max_count:(Options.Region_depth.get ()) ?retain_cache:None
+
+  
 end

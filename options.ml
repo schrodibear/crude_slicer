@@ -56,3 +56,12 @@ module Assume_functions =
       let arg_name = ""
       let default = Datatype.String.Set.of_list ["__VERIFIER_assume"]
     end)
+
+module Region_depth =
+  Int
+    (struct
+      let option_name = "-region_depth"
+      let help = "Specify how many regions of the same type can should be retained if a region cycle is detected"
+      let arg_name = ""
+      let default = 3
+    end)
