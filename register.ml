@@ -8,6 +8,8 @@
 
 module Console = Options
 
+let () = if Options.Analysis.get () then Kernel.Constfold.off ()
+
 let run () =
   Cil_printer.state.Printer_api.line_directive_style <- Some Printer_api.Line_preprocessor_output;
   Console.debug ~level:2 "Crude slicer enabled!";

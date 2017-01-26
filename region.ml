@@ -10,7 +10,9 @@ open Cil
 open Cil_types
 open Cil_datatype
 
+open Extlib
 open Common
+open Cil_printer
 
 module Representant = struct
   module Kind = struct
@@ -80,36 +82,38 @@ module Representant = struct
   let poly fname name typ = { name = fname ^ "::" ^ name; typ; kind = Kind.Poly fname }
   let local fname name typ = { name = fname ^ ":::" ^ name; typ; kind = Kind.Local fname }
   let dummy name typ = { name; typ; kind = Kind.Dummy }
-  let template { name; typ; kind } =
-    let open Kind in
-    match kind with
-    | Poly _ -> { name; typ; kind = Dummy }
-    | Global | Local _ | Dummy ->
-      Console.fatal "Representant.template: can only templatify polymorphic regions, but %s is %a" name pp kind
+  let template =
+    let counter = ref ~-1 in
+    fun { name; typ; kind } ->
+      let open Kind in
+      match kind with
+      | Poly _ -> incr counter; dummy ("dummy" ^ string_of_int !counter) typ
+      | Global | Local _ | Dummy ->
+        Console.fatal "Representant.template: can only templatify polymorphic regions, but %s is %a" name pp kind
 
   let check_field f r fi =
     match unrollType r.typ with
     | TComp (ci, _, _)
       when ci.cstruct && Compinfo.equal ci fi.fcomp -> ()
     | ty ->
-      Console.fatal "%s: not a struct with field %s.%s: %a" f fi.fname fi.fcomp.cname Typ.pretty ty
+      Console.fatal "%s: not a struct with field %s.%s: %a" f fi.fname fi.fcomp.cname pp_typ ty
 
   let arrow r fi =
     check_field "Representant.arrow" r fi;
     if not (isPointerType fi.ftype) then
-      Console.fatal "Representant.arrow: not a pointer field: %s.%s : %a" fi.fname fi.fcomp.cname Typ.pretty fi.ftype;
-    { name = r.name ^ "->" ^ fi.fname; typ = typeOf_pointed fi.ftype; kind = r.kind }
+      Console.fatal "Representant.arrow: not a pointer field: %s.%s : %a" fi.fname fi.fcomp.cname pp_typ fi.ftype;
+    { name = r.name ^ "->" ^ fi.fname; typ = Ast_info.pointed_type fi.ftype; kind = r.kind }
 
   let deref r =
     if not (isPointerType r.typ) then
-      Console.fatal "Representant.deref: not a pointer region: %s : %a" r.name Typ.pretty r.typ;
-    { name = "*(" ^ r.name ^ ")"; typ = typeOf_pointed r.typ; kind = r.kind }
+      Console.fatal "Representant.deref: not a pointer region: %s : %a" r.name pp_typ r.typ;
+    { name = "*(" ^ r.name ^ ")"; typ = Ast_info.pointed_type r.typ; kind = r.kind }
 
   let check_detached f fi =
     if not (isStructOrUnionType fi.ftype || isArrayType fi.ftype || fi.faddrof) then
       Console.fatal
         "%s: not a struct/union, array or addressed field: %s.%s : %a (&: %B)"
-        f fi.fname fi.fcomp.cname Typ.pretty fi.ftype fi.faddrof
+        f fi.fname fi.fcomp.cname pp_typ fi.ftype fi.faddrof
 
   let dot r fi =
     check_field "Representant.dot" r fi;
@@ -121,7 +125,7 @@ module Representant = struct
     if not (Typ.equal fi.ftype r.typ) then
       Console.fatal
         "Representant.container: illegal use of `container_of': %s.%s : %a vs. %s : %a"
-        fi.fname fi.fcomp.cname Typ.pretty fi.ftype r.name Typ.pretty r.typ;
+        fi.fname fi.fcomp.cname pp_typ fi.ftype r.name pp_typ r.typ;
     if not fi.fcomp.cstruct then
       Console.fatal "Representant.container: container should be a structure: %s" fi.fcomp.cname;
     { name = "(" ^ r.name ^ ", " ^ fi.fcomp.cname ^ "." ^ fi.fname ^ ")";
@@ -135,9 +139,9 @@ module Representant = struct
     let name =
       match unrollType typ with
       | TComp (ci, _, _) when ci.cstruct -> ci.cname
-      | TComp (ci, _, _) -> Console.fatal "Representant: container_of_void: shouldn't be union: %a" Typ.pretty typ
-      | TVoid _ -> Console.fatal "Representant: container_of_void: shouldn't be void: %a" Typ.pretty typ
-      | ty -> Format.asprintf "`%a'" Typ.pretty ty
+      | TComp (ci, _, _) -> Console.fatal "Representant: container_of_void: shouldn't be union: %a" pp_typ typ
+      | TVoid _ -> Console.fatal "Representant: container_of_void: shouldn't be void: %a" pp_typ typ
+      | ty -> Format.asprintf "`%a'" pp_typ ty
     in
     begin match unrollType r.typ with
     | TVoid _ -> ()
@@ -145,12 +149,12 @@ module Representant = struct
     | ty ->
       Console.fatal
         "Representant.container_of_void: can only take (_, %s.void) from void or union region: %s : %a"
-        name r.name Typ.pretty ty
+        name r.name pp_typ ty
     end;
     { name = "(" ^ r.name ^ ", " ^ name ^ ".void)"; typ; kind = r.kind }
 
   let pp fmttr r =
-    Format.fprintf fmttr "{ %s : %a (%a) }" r.name Typ.pretty r.typ Kind.pp r.kind
+    Format.fprintf fmttr "{ %s : %a (%a) }" r.name pp_typ r.typ Kind.pp r.kind
 end
 
 module type Representant = sig
@@ -172,7 +176,7 @@ end
 module Make_unifiable (R : Representant) : Unifiable with type repr = R.t = struct
   type t = R.t
   type repr = R.t
-  let of_repr = Extlib.id
+  let of_repr = id
 
   module H = Hashtbl.Make (R)
 
@@ -217,6 +221,7 @@ module Make_hashmap (R : Representant) (U : Unifiable with type repr = R.t) : si
   val find : U.t -> t -> U.t
   val find_or_call : create:(R.t -> R.t) -> call:(U.t -> U.t -> unit) -> t -> U.t -> U.t
   val iter : (U.t -> unit) -> U.t -> t -> unit
+  val clear : t -> unit
 end = struct
   module H = Hashtbl.Make (R)
   type t = U.t H.t
@@ -234,6 +239,7 @@ end = struct
       call u' u;
       u'
   let iter f u h = try f (H.find h (U.repr u)) with Not_found -> ()
+  let clear h = H.clear h
 end
 
 module Make_pair_hashmap (R : Representant) (U : Unifiable with type repr = R.t) (K : Hashtbl.HashedType) : sig
@@ -243,7 +249,8 @@ module Make_pair_hashmap (R : Representant) (U : Unifiable with type repr = R.t)
   val add' : t -> U.t -> K.t -> U.t -> unit
   val find : U.t -> K.t -> t -> U.t
   val find_or_call : create:(R.t -> K.t -> R.t) -> call:(U.t -> K.t -> U.t -> unit) -> t -> U.t -> K.t -> U.t
-  val iter: (K.t -> U.t -> unit) -> U.t -> t -> unit
+  val iter : (K.t -> U.t -> unit) -> U.t -> t -> unit
+  val clear : t -> unit
 end = struct
   module H =
     Hashtbl.Make
@@ -274,6 +281,8 @@ end = struct
   let iter f u (h, ks) =
     let r = U.repr u in
     List.iter (fun k -> f k @@ H.find h (r, k)) (H_k.find_all ks r)
+
+  let clear (h, ks) = H.clear h; H_k.clear ks
 end
 
 module Unifiable = Make_unifiable (Representant)
@@ -290,6 +299,15 @@ let poly = R.poly
 let local = R.local
 
 module Separation : sig
+  val arrow : U.t -> fieldinfo -> U.t
+  val deref : U.t -> U.t
+  val dot : U.t -> fieldinfo -> U.t
+  val dot_void : U.t -> U.t
+  val container : U.t -> fieldinfo -> U.t
+  val container_of_void : U.t -> typ -> U.t
+  val unify : U.t -> U.t -> unit
+  val duplicate : map:H'.t -> ?clone:U.t -> U.t -> Unifiable.t
+  val replay : map:H'.t -> U.t list -> on:U.t list -> unit
 end = struct
   let h_arrow = H_f.create ()
   let h_deref = H'.create ()
@@ -310,6 +328,17 @@ end = struct
   let container_of_void =
     H_t.find_or_call ~create:R.container_of_void ~call:(fun u _ u' -> H'.add u u' h_dot_void) h_container_of_void
 
+  type 'k handler2 = (U.t -> 'k -> U.t) -> U.t -> 'k -> U.t -> unit
+
+  let handle_all ~handle1 ~(handle2:< f : 'k. 'k handler2; ..>) u1 u2 =
+    let handle2 f u k u' = handle2#f f u k u' in
+    H_f.iter (handle2 arrow u2) u1 h_arrow;
+    H'.iter (handle1 deref u2) u1 h_deref;
+    H_f.iter (handle2 dot u2) u1 h_dot;
+    H'.iter (handle1 dot_void u2) u1 h_dot_void;
+    H_f.iter (handle2 container u2) u1 h_container;
+    H_t.iter (handle2 container_of_void u2) u1 h_container_of_void
+
   let rec unify =
     let module T = Typ.Hashtbl in
     let module H =
@@ -327,7 +356,10 @@ end = struct
     let h = H.create 256 in
     let handle1, handle2 =
       let add h u u' = if not (H.mem h (u, u') || H.mem h (u', u)) then H.replace h (u, u') () in
-      (fun f u u' -> add h (f u) u'), fun f u k u' -> add h (f u k) u'
+      (fun f u u' -> add h (f u) u'),
+      object
+        method f : 'k. 'k handler2 = fun f u k u' -> add h (f u k) u'
+      end
     in
     let cache = Typ.Hashtbl.create 128 in
     fun ?(max_count=3) ?(retain_cache=Typ.Hashtbl.clear cache) u1 u2 ->
@@ -337,32 +369,121 @@ end = struct
         if need_cast t1 t2 then
           Console.fatal
             "Can't unify regions of different types: %s : %a, %s : %a"
-            r1.R.name Typ.pretty r1.R.typ r2.R.name Typ.pretty r2.R.typ;
+            r1.R.name pp_typ r1.R.typ r2.R.name pp_typ r2.R.typ;
         H.clear h;
-        H_f.iter (handle2 arrow u2) u1 h_arrow;
-        H_f.iter (handle2 arrow u1) u2 h_arrow;
-        H'.iter (handle1 deref u2) u1 h_deref;
-        H'.iter (handle1 deref u1) u2 h_deref;
-        H_f.iter (handle2 dot u2) u1 h_dot;
-        H_f.iter (handle2 dot u1) u2 h_dot;
-        H'.iter (handle1 dot_void u2) u1 h_dot_void;
-        H'.iter (handle1 dot_void u1) u2 h_dot_void;
-        H_f.iter (handle2 container u2) u1 h_container;
-        H_f.iter (handle2 container u1) u2 h_container;
-        H_t.iter (handle2 container_of_void u2) u1 h_container_of_void;
-        H_t.iter (handle2 container_of_void u1) u1 h_container_of_void;
+        handle_all handle1 handle2 u1 u2;
+        handle_all handle1 handle2 u2 u1;
         U.unify u1 u2;
+        let u = U.of_repr (U.repr u1) in
         let clone =
-          let self count = T.replace cache t1 (u1, count + 1); u1 in
+          let self count = T.replace cache t1 (u, count + 1); u in
           match T.find cache t1 with
           | _, count when count < max_count -> self count
           | clone, _ -> clone
           | exception Not_found -> self 0
         in
         H.iter (fun (u, u') () -> unify ~max_count ~retain_cache u u') h;
-        unify ~max_count ~retain_cache u1 clone
+        unify ~max_count ~retain_cache u clone
 
   let unify = unify ~max_count:(Options.Region_depth.get ()) ?retain_cache:None
 
-  
+  let rec duplicate ~map ?clone u =
+    let handle1 f u u' = ignore @@ duplicate ~map ~clone:(f u) u'
+    and handle2 = object
+      method f : 'k. 'k handler2 = fun f u k u' -> ignore @@ duplicate ~map ~clone:(f u k) u'
+    end in
+    try
+      H'.find u map
+    with
+    | Not_found ->
+      let u' = may_map id ~dft:(U.of_repr @@ R.template (U.repr u)) clone in
+      H'.add u u' map;
+      handle_all ~handle1 ~handle2 u u';
+      u'
+
+  let replay ~map regs ~on =
+    H'.clear map;
+    List.iter2 unify on (List.map (duplicate ~map) regs)
 end
+
+module Analysis : sig
+end = struct
+  module H_v = Varinfo.Hashtbl
+  module H_l = Lval.Hashtbl
+  module H_e = Exp.Hashtbl
+
+  let h_var = H_v.create 4096
+  let h_lval = H_l.create 4096
+  let h_expr = H_e.create 4096
+
+  open Separation
+
+  let rec of_var ?f v =
+    let resolve u =
+      if isStructOrUnionType v.vtype || isArrayType v.vtype || v.vaddrof then
+        `Location (u, if v.vaddrof then fun () -> deref u else fun () -> u)
+      else
+        `Value u
+    in
+    match H_v.find h_var v with
+    | u -> resolve u
+    | exception Not_found ->
+      if not (isStructOrUnionType v.vtype || isArrayType v.vtype || v.vaddrof || isPointerType v.vtype) then
+        `None
+      else
+        let u =
+          let typ =
+            if v.vaddrof || isStructOrUnionType v.vtype then v.vtype
+            else Ast_info.pointed_type v.vtype
+          in
+          U.of_repr @@
+          match unrollType v.vtype, f with
+          | TFun (rt, _ ,_ ,_), _ when not (isStructOrUnionType rt) -> R.poly v.vname v.vname typ
+          | TFun _, _ -> R.local v.vname v.vname typ
+          | _, Some f when v.vformal && not (isStructOrUnionType v.vtype) -> R.poly f v.vname typ
+          | _, Some f when v.vformal -> R.local f v.vname typ
+          | _, _ when v.vglob -> R.global v.vname typ
+          | _, Some f -> R.local f v.vname typ
+          | _ ->
+            Console.fatal "Region.of_var: a local o formal variable should be supplied with function name: %s" v.vname
+        in
+        H_v.replace h_var v u;
+        resolve u
+  and value =
+    function
+    | `Location (_, get) -> get ()
+    | `Value u -> u
+    | `None -> Console.fatal "Region.value: broken invariant: can't evaluate region"
+  and of_lval ?f lv =
+    let of_lval = of_lval ?f in
+    let lv', off = removeOffsetLval lv in
+    match off with
+    | NoOffset ->
+      begin match fst lv' with
+      | Var v -> of_var v
+      | Mem e ->
+        let u = value (of_expr ~f e) in
+        `Location (u, fun () -> deref u)
+      end
+    | Field (fi, NoOffset) when fi.fcomp.cstruct ->
+      let u = value (of_lval lv') in
+      if fi.faddrof || isStructOrUnionType fi.ftype || isArrayType fi.ftype then
+        let u = dot u fi in
+        `Location (u, if fi.faddrof then fun () -> deref u else fun () -> u)
+      else
+        `Location (u, fun () -> arrow u fi)
+    | Field (fi, NoOffset) ->
+      let u = container_of_void (value (of_lval lv')) (typeDeepDropAllAttributes @@ unrollType fi.ftype) in
+      `Location (u, if isStructOrUnionType fi.ftype || isArrayType fi.ftype then fun () -> u else fun () -> deref u)
+    | Index (_, NoOffset) ->
+      let u = of_lval lv' in
+      if isArrayType (typeOfLval lv) then u
+      else
+        let v = value u in
+        `Location (v, fun () -> deref v)
+    | _ -> Console.fatal "Region.of_lval: broken invariant: remaining offset after removeOffsetLval"
+  and of_expr ?f e =
+    
+end
+
+
