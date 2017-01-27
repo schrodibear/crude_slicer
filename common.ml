@@ -6,6 +6,38 @@
 (*                                                                        *)
 (**************************************************************************)
 
+open Format
+
+module type Hashed = Hashtbl.HashedType
+
+module type Ordered = Map.OrderedType
+
+module type Printable = sig
+  type t
+  val pp : formatter -> t -> unit
+end
+
+module type Hashed_ordered = sig
+  include Hashed
+  include Ordered with type t := t
+end
+
+module type Hashed_printable = sig
+  include Hashed
+  include Printable with type t := t
+end
+
+module type Ordered_printable = sig
+  include Ordered
+  include Printable with type t := t
+end
+
+module type Hashed_ordered_printable = sig
+  include Hashed
+  include Ordered with type t := t
+  include Printable with type t := t
+end
+
 module Console = Options
 
 let (%) f g x = f (g x)
