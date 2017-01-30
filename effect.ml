@@ -546,7 +546,7 @@ module Make_effect (W : Writes) : sig
   val has_stmt_req : stmt -> (_, _) t -> bool
   val flag : (_, _) t -> Flag.t
 
-  val pp : formatter -> (_, _) t -> unit
+  val pp : formatter -> some -> unit
 end = struct
 
   module K = Make_reads_kind (W)
@@ -587,17 +587,8 @@ end = struct
         flag = f
       }}
 
-(*  let reads w e = H_write.find w e.writes
+  let assigns e = e.assigns
   let depends e = e.depends
-  let add_writes from e = H_write.import ~from e.writes
-  let add_reads w from e = H_write.import_values w from e.writes
-  let add_global_read w r e = Reads.add_global r (reads w e)
-  let add_poly_read w p e = Reads.add_poly p (reads w e)
-  let add_local_read w l e = Reads.add_local l (reads w e)
-  let add_global_dep d e = Reads.add_global d e.depends
-  let add_poly_dep d e = Reads.add_poly d e.depends
-  let add_local_dep d e = Reads.add_local d e.depends
-  let add_depends d e = Reads.import ~from:d e.depends
   let add_result_dep e = if not e.result_dep then Flag.report e.flag; e.result_dep <- true
   let add_requires d e = Requires.import ~from:d e.requires
   let set_is_target e = if not e.is_target then Flag.report e.flag; e.is_target <- true
@@ -607,30 +598,69 @@ end = struct
   let has_body_req f e = Requires.has_body f e.requires
   let has_stmt_req s e = Requires.has_stmt s e.requires
   let add_tracking_var v e = H_void_ptr_var.add v e.tracking
-  let shallow_copy_writes f e = H_write.shallow_copy f e.writes
-  let copy f e =
-    {
-      writes = H_write.copy f e.writes;
-      tracking = H_void_ptr_var.copy f e.tracking;
-      is_target = e.is_target;
-      depends = Reads.copy f e.depends;
-      result_dep = e.result_dep;
-      requires = Requires.copy f e.requires;
-      flag = f
-    }
+  let copy f (Some { reads = (module R) as reads; assigns = (module A) as assigns; eff = e }) =
+    Some {
+      reads;
+      assigns;
+      eff = {
+        assigns = A.copy f e.assigns;
+        tracking = H_void_ptr_var.copy f e.tracking;
+        is_target = e.is_target;
+        depends = R.copy f e.depends;
+        result_dep = e.result_dep;
+        requires = Requires.copy f e.requires;
+        flag = f }}
 
-  let iter_writes f e = H_write.iter f e.writes
   let is_target e = e.is_target
-  let iter_global_deps f e = Reads.iter_global f e.depends
-  let iter_poly_deps f e = Reads.iter_poly f e.depends
-  let iter_local_deps f e = Reads.iter_local f e.depends
   let has_result_dep e = e.result_dep
   let is_tracking_var v e = H_void_ptr_var.mem v e.tracking
   let iter_body_reqs f e = Requires.iter_bodies f e.requires
   let iter_stmt_reqs f e = Requires.iter_stmts f e.requires
   let flag e = e.flag
 
-  let pp fmt e =
+  let pp fmt (Some { reads = (module R); assigns = (module A); eff = e }) =
     fprintf fmt "@[w:@;@[%a@];@.track:%a;@.tar:%B;@.deps:@;%a;@.RD:%B@]"
-      H_write.pp e.writes H_void_ptr_var.pp e.tracking e.is_target Reads.pp e.depends e.result_dep*)
+      A.pp e.assigns H_void_ptr_var.pp e.tracking e.is_target R.pp e.depends e.result_dep
+end
+
+module Make (R : Representant) (U : Unifiable with type repr = R.t) () = struct
+  module M = Make_memories (R) (U) ()
+  module W = Make_writes (M)
+  module E = Make_effect (W)
+
+  module F = struct
+    module H_fundec = Fundec.Hashtbl
+    module H_stmt = Stmt.Hashtbl
+    module H_stmt_conds = struct
+      include Stmt.Hashtbl
+
+      let find_or_empty h k = try find h k with Not_found -> []
+    end
+    module Field_key =
+      Datatype.Triple_with_collections (Compinfo) (Typ) (Datatype.Integer) (struct let module_name = "field key" end)
+    module H_field = Field_key.Hashtbl
+    type t =
+      {
+        block_id_of_stmt : int H_stmt.t;
+        conds_of_loop    : exp list H_stmt_conds.t;
+        fields_of_key    : fieldinfo list H_field.t;
+        effects          : E.some H_fundec.t
+      }
+
+    let create () =
+      {
+        block_id_of_stmt = H_stmt.create 128;
+        conds_of_loop = H_stmt_conds.create 32;
+        fields_of_key = H_field.create 64;
+        effects = H_fundec.create 1024
+      }
+    let get fi fl f =
+      try
+        H_fundec.find fi.effects f
+      with
+      | Not_found ->
+        let r = E.create fl in
+        H_fundec.replace fi.effects f r;
+        r
+  end
 end
