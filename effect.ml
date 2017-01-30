@@ -125,7 +125,7 @@ module Make_memory (R : Representant) (U : Unifiable with type repr = R.t) (C : 
           "Memory.mk: fields can't be specified for primitive regions: %s.%s for %s"
           fi.fcomp.cname fi.fname (R.name @@ U.repr u)
     else
-      match unrollTypeDeep (R.typ r), fi with
+      match[@warning "-4"] unrollTypeDeep (R.typ r), fi with
       | TComp (ci, _ ,_), Some fi when Compinfo.equal ci fi.fcomp ->
         r, Some (Memory_field.of_fieldinfo_exn fi)
       | _, None ->
@@ -225,7 +225,7 @@ module Make_writes (M : Memories) : Writes with module Memories = M = struct
     | Result, _ -> 1
 
   let equal w1 w2 =
-    match w1, w2 with
+    match[@warning "-4"] w1, w2 with
     | Global_var v1, Global_var v2 -> Global_var.equal v1 v2
     | Poly_var v1, Poly_var v2 -> Formal_var.equal v1 v2
     | Local_var v1, Local_var v2 -> Local_var.equal v1 v2
@@ -272,7 +272,8 @@ module type Reads_kind = sig
 end
 
 module Make_reads_kind (W : Writes) : Reads_kind with module W = W = struct
-  module rec M : Reads_kind with module W = W = M
+  module W = W
+  module rec M : Reads_kind with module W := W = M
   include M
 end
 
@@ -296,7 +297,7 @@ module type Reads = sig
   val import : from:t -> t -> unit
   val add_global_var : Global_var.t -> t -> unit
   val add_poly_var : Formal_var.t -> t -> unit
-  val add_local_mem : Local_var.t -> t -> unit
+  val add_local_var : Local_var.t -> t -> unit
   val add_global_mem : Global_mem.t -> t -> unit
   val add_poly_mem : Poly_mem.t -> t -> unit
   val add_local_mem : Local_mem.t -> t -> unit
@@ -322,7 +323,6 @@ end
 
 module Make_reads (W : Writes) (K : Reads_kind with module W = W) () :
   Reads with module W = W and module K = K = struct
-  module W = W
 
   open W.Memories
 
@@ -332,12 +332,13 @@ module Make_reads (W : Writes) (K : Reads_kind with module W = W) () :
   module H_local_mem = H_local_mem ()
 
   module K = K
+  module W = K.W
 
   type 'a kind = 'a K.t
 
   type some = Some : 'a K.t * 'a -> some
 
-  open K
+  open! K
 
   type t =
     {
@@ -350,7 +351,7 @@ module Make_reads (W : Writes) (K : Reads_kind with module W = W) () :
     }
 
   let of_writes : _ -> some option =
-    function
+    function[@warning "-42"]
     | W.Global_var v -> Some (Some (Global_var, v))
     | W.Local_var v -> Some (Some (Local_var, v))
     | W.Poly_var v -> Some (Some (Poly_var, v))
@@ -571,7 +572,7 @@ end = struct
         { reads : (module Reads with type t = 'r);
           assigns : (module Assigns with type set = 'r and type t = 'a);
           eff : ('a, 'r) t } -> some
-  let create f =
+  let create f : some =
     let module R = Reads () in
     let module A = Assigns (R) in
     Some {
@@ -598,7 +599,7 @@ end = struct
   let has_body_req f e = Requires.has_body f e.requires
   let has_stmt_req s e = Requires.has_stmt s e.requires
   let add_tracking_var v e = H_void_ptr_var.add v e.tracking
-  let copy f (Some { reads = (module R) as reads; assigns = (module A) as assigns; eff = e }) =
+  let copy f (Some { reads = (module R) as reads; assigns = (module A) as assigns; eff = e } : some) : some =
     Some {
       reads;
       assigns;
@@ -618,7 +619,7 @@ end = struct
   let iter_stmt_reqs f e = Requires.iter_stmts f e.requires
   let flag e = e.flag
 
-  let pp fmt (Some { reads = (module R); assigns = (module A); eff = e }) =
+  let pp fmt (Some { reads = (module R); assigns = (module A); eff = e } : some) =
     fprintf fmt "@[w:@;@[%a@];@.track:%a;@.tar:%B;@.deps:@;%a;@.RD:%B@]"
       A.pp e.assigns H_void_ptr_var.pp e.tracking e.is_target R.pp e.depends e.result_dep
 end
