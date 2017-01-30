@@ -45,3 +45,14 @@ let (%%) f g x y = f (g x y)
 let (%>) f g x = g (f x)
 let const f _x = f
 let const' f x _y = f x
+
+module List = struct
+  include List
+  let take n l =
+    let rec loop n dst = function
+      | h :: t when n > 0 ->
+        loop (n - 1) (h :: dst) t
+      | _ -> List.rev dst
+    in
+    loop n [] l
+end
