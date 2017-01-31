@@ -56,3 +56,19 @@ module List = struct
     in
     loop n [] l
 end
+
+module String =
+struct
+  include String
+
+  let explode s =
+    let rec next acc i =
+      if i >= 0 then next (s.[i] :: acc) (i - 1) else acc
+    in
+    next [] (String.length s - 1)
+
+  let implode ls =
+    let s = Bytes.create (List.length ls) in
+    List.iteri (Bytes.set s) ls;
+    Bytes.to_string s
+end

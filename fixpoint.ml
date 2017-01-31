@@ -22,15 +22,15 @@ module type Info = sig
   type t
 
   val get : t -> Flag.t -> fundec -> E.t
+  val flag : Flag.t
 end
 
 module Make (I : Info) = struct
-  let flag = Flag.create "convergence"
 
   let rec until_convergence f fi scc =
-    Flag.clear flag;
+    Flag.clear I.flag;
     f fi scc;
-    if not (Flag.reported flag) then ()
+    if not (Flag.reported I.flag) then ()
     else until_convergence f fi scc
 
   class type ['a] frama_c_collector = object inherit frama_c_inplace method finish : 'a end
@@ -52,7 +52,7 @@ module Make (I : Info) = struct
                    let v = v fi d in
                    ignore @@ visitFramacFunction (v :> frama_c_visitor) d;
                    v#finish;
-                   Console.debug ~level:3 "Resulting effect is:@.%a@." I.E.pp @@ I.get fi flag d))
+                   Console.debug ~level:3 "Resulting effect is:@.%a@." I.E.pp @@ I.get fi I.flag d))
            fi
            scc)
       sccs

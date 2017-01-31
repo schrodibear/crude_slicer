@@ -8,63 +8,59 @@
 
 open Cil
 open Cil_types
+open Cil_printer
 open Cil_datatype
 
 open Extlib
 open Common
-open Cil_printer
 
 module Representant = struct
   module Kind = struct
-    type t =
-      | Global
-      | Poly of string
-      | Local of string
-      | Dummy
+    type t = [ `Global | `Poly of string  | `Local of string | `Dummy ]
 
     let equal k1 k2 =
       match k1, k2 with
-      | Global,  Global                      -> true
-      | Poly f1, Poly f2
-      | Local f1, Local f2
-        when String.equal f1 f2              -> true
-      | Dummy, Dummy                         -> true
-      | (Global | Poly _ | Local _ | Dummy),
-        (Global | Poly _ | Local _ | Dummy)  -> false
+      | `Global,  `Global                        -> true
+      | `Poly f1, `Poly f2
+      | `Local f1, `Local f2
+        when String.equal f1 f2                  -> true
+      | `Dummy, `Dummy                           -> true
+      | (`Global | `Poly _ | `Local _ | `Dummy),
+        (`Global | `Poly _ | `Local _ | `Dummy)  -> false
 
     let choose k1 k2 =
       begin match k1, k2 with
-      | (Poly f1 | Local f1),
-        (Poly f2 | Local f2)
-        when not (String.equal f1 f2)        ->
+      | (`Poly f1 | `Local f1),
+        (`Poly f2 | `Local f2)
+        when not (String.equal f1 f2)            ->
         Console.fatal
           "Representant.Kind.choose: broken invariant: should not try unifying regions from diff. functions: %s and %s"
           f1 f2
-      | Dummy, Dummy                         ->
+      | `Dummy, `Dummy                           ->
         Console.fatal
           "Representant.Kind.choose: broken invariant: dummy regions should be immediately unified with non-dummy ones"
-      | (Global | Poly _ | Local _ | Dummy),
-        (Global | Poly _ | Local _ | Dummy)  -> ()
+      | (`Global | `Poly _ | `Local _ | `Dummy),
+        (`Global | `Poly _ | `Local _ | `Dummy)  -> ()
       end;
       match k1, k2 with
-      | Global, Global                       -> `Any
-      | Global, (Poly _ | Local _ | Dummy)   -> `First
-      | Poly _, Global                       -> `Second
-      | Poly _, Poly _                       -> `Any
-      | Poly _, (Local _ | Dummy)            -> `First
-      | Local _, (Global | Poly _)           -> `Second
-      | Local _, Local _                     -> `Any
-      | Local _, Dummy                       -> `First
-      | Dummy, (Global | Poly _ | Local _)   -> `Second
-      | Dummy, Dummy                         -> `Any
+      | `Global, `Global                         -> `Any
+      | `Global, (`Poly _ | `Local _ | `Dummy)   -> `First
+      | `Poly _, `Global                         -> `Second
+      | `Poly _, `Poly _                         -> `Any
+      | `Poly _, (`Local _ | `Dummy)             -> `First
+      | `Local _, (`Global | `Poly _)            -> `Second
+      | `Local _, `Local _                       -> `Any
+      | `Local _, `Dummy                         -> `First
+      | `Dummy, (`Global | `Poly _ | `Local _)   -> `Second
+      | `Dummy, `Dummy                           -> `Any
 
     let pp fmttr =
       let pp fmt = Format.fprintf fmttr fmt in
       function
-      | Global -> pp "global"
-      | Poly s -> pp "poly(%s)" s
-      | Local s -> pp "local(%s)" s
-      | Dummy -> pp "dummy"
+      | `Global  -> pp "global"
+      | `Poly s  -> pp "poly(%s)" s
+      | `Local s -> pp "local(%s)" s
+      | `Dummy   -> pp "dummy"
   end
 
   type t =
@@ -74,21 +70,28 @@ module Representant = struct
       kind : Kind.t
     }
 
+  let name r = r.name
+  let typ r = r.typ
+  let kind r = r.kind
+
   let equal r1 r2 = String.equal r1.name r2.name
   let hash r = Hashtbl.hash r.name
+  let compare r1 r2 = String.compare r1.name r2.name
   let choose r1 r2 = Kind.choose r1.kind r2.kind
 
-  let global name typ = { name; typ; kind = Kind.Global }
-  let poly fname name typ = { name = fname ^ "::" ^ name; typ; kind = Kind.Poly fname }
-  let local fname name typ = { name = fname ^ ":::" ^ name; typ; kind = Kind.Local fname }
-  let dummy name typ = { name; typ; kind = Kind.Dummy }
+  let flag = Flag.create "convergence"
+
+  let global name typ = { name; typ; kind = `Global }
+  let poly fname name typ = { name = fname ^ "::" ^ name; typ; kind = `Poly fname }
+  let local fname name typ = { name = fname ^ ":::" ^ name; typ; kind = `Local fname }
+  let dummy name typ = { name; typ; kind = `Dummy }
   let template =
     let counter = ref ~-1 in
     fun { name; typ; kind } ->
       let open Kind in
       match kind with
-      | Poly _ -> incr counter; dummy ("dummy" ^ string_of_int !counter) typ
-      | Global | Local _ | Dummy ->
+      | `Poly _ -> incr counter; dummy ("dummy" ^ string_of_int !counter) typ
+      | `Global | `Local _ | `Dummy ->
         Console.fatal "Representant.template: can only templatify polymorphic regions, but %s is %a" name pp kind
 
   let check_field f r fi =
@@ -406,13 +409,31 @@ end = struct
     List.iter2 unify on (List.map (duplicate ~map) regs)
 end
 
-module Analysis : sig
+module Info = Info.Make (R) (U) ()
+
+module H_field = Info.H_field
+
+module Analysis (I : sig val fields_of_key : fieldinfo list H_field.t end) : sig
 end = struct
   module H_v = Varinfo.Hashtbl
+  module H_s =
+    Hashtbl.Make
+      (struct
+        module Int64_list = Datatype.List (Datatype.Int64)
+        type t = [`S of string | `WS of int64 list]
+        let equal s1 s2 =
+          match s1, s2 with
+          | `S s1, `S s2     -> String.equal s1 s2
+          | `WS ws1, `WS ws2 -> Int64_list.equal ws1 ws2
+          | `S _, `WS _
+          | `WS _, `S _      -> false
+        let hash = function `S s -> Datatype.String.hash s | `WS ws -> 7 * Int64_list.hash ws + 3
+      end)
   module H_l = Lval.Hashtbl
   module H_e = Exp.Hashtbl
 
   let h_var = H_v.create 4096
+  let h_str = H_s.create 256
   let h_lval = H_l.create 4096
   let h_expr = H_e.create 4096
 
@@ -425,9 +446,10 @@ end = struct
       else
         `Value u
     in
-    match H_v.find h_var v with
-    | u -> resolve u
-    | exception Not_found ->
+    try
+      resolve @@ H_v.find h_var v
+    with
+    | Not_found ->
       if not (isStructOrUnionType v.vtype || isArrayType v.vtype || v.vaddrof || isPointerType v.vtype) then
         `None
       else
@@ -449,6 +471,31 @@ end = struct
         in
         H_v.replace h_var v u;
         resolve u
+  and of_string s =
+    let resolve u = `Location (u, fun () -> deref u)
+    try
+      resolve @@ H_s.find h_str s
+    with
+    | Not_found ->
+      let u =
+        let s' =
+          match s with
+          | `S s -> s
+          | `WS s ->
+            String.concat "" @@
+            List.map
+              (fun wc ->
+                 String.init
+                   8
+                   (fun i ->
+                      let sh = 56 - 8 * i in
+                      Char.chr Int64.(to_int @@ shift_right_logical (logand wc @@ shift_left 0xFFL sh) sh)))
+              s
+        in
+        U.of_repr @@ R.global ("\"" ^ s' ^ "\"") (match s with `S _ -> charType | `WS _ -> theMachine.wcharType)
+      in
+      H_s.replace h_str s u;
+      resolve u
   and value =
     function
     | `Location (_, get) -> get ()
@@ -462,7 +509,7 @@ end = struct
       begin match fst lv' with
       | Var v -> of_var v
       | Mem e ->
-        let u = value (of_expr ~f e) in
+        let u = value (of_expr ?f e) in
         `Location (u, fun () -> deref u)
       end
     | Field (fi, NoOffset) when fi.fcomp.cstruct ->
@@ -482,8 +529,63 @@ end = struct
         let v = value u in
         `Location (v, fun () -> deref v)
     | _ -> Console.fatal "Region.of_lval: broken invariant: remaining offset after removeOffsetLval"
-  and of_expr ?f e =
-    
+  and of_expr =
+    let match_container_of1 =
+      let rec match_offset ?(acc=[]) =
+        function
+        | NoOffset when acc <> [] -> Some acc
+        | NoOffset -> None
+        | Field (fi, off) -> match_offset ~acc:(fi :: acc) off
+        | Index _ -> None
+      in
+      function
+      | CastE (pstr,
+               { enode = BinOp (MinusPI,
+                                { enode = CastE (chrptr, mptr) },
+                                { enode =
+                                    CastE (size_t,
+                                           { enode = AddrOf (Mem { enode = CastE (pstr', zero) }, off) }) },
+                                _) })
+        when
+          isPointerType pstr && isPointerType pstr' && isCharPtrType chrptr && isPointerType (typeOf mptr) &&
+          not (need_cast theMachine.typeOfSizeOf size_t) && isZero zero &&
+          let str = Ast_info.pointed_type pstr and str' = Ast_info.pointed_type pstr' in
+          match unrollType str, unrollType str' with
+          | TComp (ci, _ ,_), TComp (ci', _, _)
+            when ci.cstruct && ci'.cstruct && Compinfo.equal ci ci' -> true
+          | _ -> false
+        ->
+        opt_map (fun off -> mptr, off) @@ match_offset off
+      | _ -> None
+    in
+    let match_container_of2 =
+      function
+      | BinOp ((PlusPI | IndexPI), { enode  = CastE (pstr, e) }, { enode = Const (CInt64 (c, IULongLong, _)) }, _) ->
+        begin match unrollType pstr, unrollType (typeOf e) with
+        | TComp (ci, _, _), (TPtr _ | TArray _ as ty) when ci.cstruct ->
+          begin try
+            Some (e, H_field.find I.fields_of_key (ci, ty, c))
+          with
+          | Not_found -> None
+          end
+        | _ -> None
+        end
+      | _ -> None
+    in
+    fun ?f e ->
+      let of_lval = of_lval ?f in
+      let of_expr = of_expr ?f in
+      match match_container_of1 e.enode, match_container_of2 e.enode with
+      | Some (e, fis), _
+      | _, Some (e, fis) ->
+        let u = List.fold_left container (value (of_expr e)) fis in
+        `Location (u, fun () -> u)
+      | None, None ->
+        match e.enode with
+        | Const (CStr s) -> of_string (`S s)
+        | Const (CWStr ws) -> of_string (`WS ws)
+        | Lval lv -> of_lval lv
+        | 
 end
 
 

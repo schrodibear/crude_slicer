@@ -92,6 +92,8 @@ module type Representant = sig
   val typ  : t -> typ
   val kind : t -> Kind.t
 
+  val flag : Flag.t
+
   include Hashed_ordered_printable with type t := t
 end
 
@@ -629,39 +631,39 @@ module Make (R : Representant) (U : Unifiable with type repr = R.t) () = struct
   module W = Make_writes (M)
   module E = Make_effect (W)
 
-  module F = struct
-    module H_fundec = Fundec.Hashtbl
-    module H_stmt = Stmt.Hashtbl
-    module H_stmt_conds = struct
-      include Stmt.Hashtbl
+  module H_fundec = Fundec.Hashtbl
+  module H_stmt = Stmt.Hashtbl
+  module H_stmt_conds = struct
+    include Stmt.Hashtbl
 
-      let find_or_empty h k = try find h k with Not_found -> []
-    end
-    module Field_key =
-      Datatype.Triple_with_collections (Compinfo) (Typ) (Datatype.Integer) (struct let module_name = "field key" end)
-    module H_field = Field_key.Hashtbl
-    type t =
-      {
-        block_id_of_stmt : int H_stmt.t;
-        conds_of_loop    : exp list H_stmt_conds.t;
-        fields_of_key    : fieldinfo list H_field.t;
-        effects          : E.some H_fundec.t
-      }
-
-    let create () =
-      {
-        block_id_of_stmt = H_stmt.create 128;
-        conds_of_loop = H_stmt_conds.create 32;
-        fields_of_key = H_field.create 64;
-        effects = H_fundec.create 1024
-      }
-    let get fi fl f =
-      try
-        H_fundec.find fi.effects f
-      with
-      | Not_found ->
-        let r = E.create fl in
-        H_fundec.replace fi.effects f r;
-        r
+    let find_or_empty h k = try find h k with Not_found -> []
   end
+  module Field_key =
+    Datatype.Triple_with_collections (Compinfo) (Typ) (Datatype.Integer) (struct let module_name = "field key" end)
+  module H_field = Field_key.Hashtbl
+  type t =
+    {
+      block_id_of_stmt : int H_stmt.t;
+      conds_of_loop    : exp list H_stmt_conds.t;
+      fields_of_key    : fieldinfo list H_field.t;
+      effects          : E.some H_fundec.t
+    }
+
+  let create () =
+    {
+      block_id_of_stmt = H_stmt.create 128;
+      conds_of_loop = H_stmt_conds.create 32;
+      fields_of_key = H_field.create 64;
+      effects = H_fundec.create 1024
+    }
+  let get fi fl f =
+    try
+      H_fundec.find fi.effects f
+    with
+    | Not_found ->
+      let r = E.create fl in
+      H_fundec.replace fi.effects f r;
+      r
+
+  let flag = R.flag
 end
