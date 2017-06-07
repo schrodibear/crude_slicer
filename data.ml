@@ -167,8 +167,10 @@ module Make_reporting_hashmap (K : Hashed_printable) (S : Set) :
   let iter f (h, _) =
     H.iter f h
   let find k (h, f) =
-    try H.find h k
-    with Not_found ->
+    try
+      H.find h k
+    with
+    | Not_found ->
       let r = S.create f in
       Flag.report f;
       H.replace h k r;
@@ -179,7 +181,7 @@ module Make_reporting_hashmap (K : Hashed_printable) (S : Set) :
       (fun e set ->
          let r = f e set in
          match r with
-         | None -> Flag.report fl; None
+         | None   -> Flag.report fl; None
          | Some s -> if check && S.flag s != fl then raise Different_flag else (if s != set then Flag.report fl; r))
       h
   let fold f (h, _) x =

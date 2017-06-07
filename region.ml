@@ -20,39 +20,50 @@ module Representant = struct
 
     let equal k1 k2 =
       match k1, k2 with
-      | `Global,  `Global                        -> true
-      | `Poly f1, `Poly f2
+      | `Global,   `Global                       -> true
+      | `Poly f1,  `Poly f2
       | `Local f1, `Local f2
         when String.equal f1 f2                  -> true
-      | `Dummy, `Dummy                           -> true
-      | (`Global | `Poly _ | `Local _ | `Dummy),
-        (`Global | `Poly _ | `Local _ | `Dummy)  -> false
+      | `Dummy,    `Dummy                        -> true
+      | (`Global
+        | `Poly _
+        | `Local _
+        | `Dummy), (`Global
+                   | `Poly _
+                   | `Local _
+                   | `Dummy)                     -> false
 
     let choose k1 k2 =
       begin match k1, k2 with
-      | (`Poly f1 | `Local f1),
-        (`Poly f2 | `Local f2)
-        when not (String.equal f1 f2)            ->
-        Console.fatal
-          "Representant.Kind.choose: broken invariant: should not try unifying regions from diff. functions: %s and %s"
-          f1 f2
-      | `Dummy, `Dummy                           ->
-        Console.fatal
-          "Representant.Kind.choose: broken invariant: dummy regions should be immediately unified with non-dummy ones"
-      | (`Global | `Poly _ | `Local _ | `Dummy),
-        (`Global | `Poly _ | `Local _ | `Dummy)  -> ()
+      | (`Poly f1
+        | `Local f1),  (`Poly f2
+                       | `Local f2)
+        when not (String.equal f1 f2)            -> Console.fatal
+                                                      "Representant.Kind.choose: broken invariant: \
+                                                       should not try unifying regions from diff. functions: %s and %s"
+                                                      f1 f2
+      | `Dummy, `Dummy                           ->  Console.fatal
+                                                       "Representant.Kind.choose: broken invariant: \
+                                                        dummy regions should be immediately unified with non-dummy ones"
+      | (`Global
+        | `Poly _
+        | `Local _
+        | `Dummy),     (`Global
+                       | `Poly _
+                       | `Local _
+                       | `Dummy)                 -> ()
       end;
       match k1, k2 with
-      | `Global, `Global                         -> `Any
-      | `Global, (`Poly _ | `Local _ | `Dummy)   -> `First
-      | `Poly _, `Global                         -> `Second
-      | `Poly _, `Poly _                         -> `Any
-      | `Poly _, (`Local _ | `Dummy)             -> `First
-      | `Local _, (`Global | `Poly _)            -> `Second
-      | `Local _, `Local _                       -> `Any
-      | `Local _, `Dummy                         -> `First
-      | `Dummy, (`Global | `Poly _ | `Local _)   -> `Second
-      | `Dummy, `Dummy                           -> `Any
+      | `Global,  `Global                         -> `Any
+      | `Global,  (`Poly _ | `Local _ | `Dummy)   -> `First
+      | `Poly _,  `Global                         -> `Second
+      | `Poly _,  `Poly _                         -> `Any
+      | `Poly _,  (`Local _ | `Dummy)             -> `First
+      | `Local _, (`Global | `Poly _)             -> `Second
+      | `Local _, `Local _                        -> `Any
+      | `Local _, `Dummy                          -> `First
+      | `Dummy,   (`Global | `Poly _ | `Local _)  -> `Second
+      | `Dummy,   `Dummy                          -> `Any
 
     let pp fmttr =
       let pp fmt = Format.fprintf fmttr fmt in
@@ -81,35 +92,39 @@ module Representant = struct
 
   let flag = Flag.create "convergence"
 
-  let global name typ = { name; typ; kind = `Global }
-  let poly fname name typ = { name = fname ^ "::" ^ name; typ; kind = `Poly fname }
-  let local fname name typ = { name = fname ^ ":::" ^ name; typ; kind = `Local fname }
+  let global name typ = Flag.report flag; { name; typ; kind = `Global }
+  let poly fname name typ = Flag.report flag; { name = fname ^ "::" ^ name; typ; kind = `Poly fname }
+  let local fname name typ = Flag.report flag; { name = fname ^ ":::" ^ name; typ; kind = `Local fname }
   let dummy name typ = { name; typ; kind = `Dummy }
   let template =
     let counter = ref ~-1 in
     fun { name; typ; kind } ->
       let open Kind in
       match kind with
-      | `Poly _ -> incr counter; dummy ("dummy" ^ string_of_int !counter) typ
-      | `Global | `Local _ | `Dummy ->
-        Console.fatal "Representant.template: can only templatify polymorphic regions, but %s is %a" name pp kind
+      | `Poly _                     -> incr counter; dummy ("dummy" ^ string_of_int !counter) typ
+      | `Global | `Local _ | `Dummy -> Console.fatal
+                                         "Representant.template: can only templatify polymorphic regions, but %s is %a"
+                                         name pp kind
 
   let check_field f r fi =
     match unrollType r.typ with
     | TComp (ci, _, _)
       when ci.cstruct && Compinfo.equal ci fi.fcomp -> ()
-    | ty ->
-      Console.fatal "%s: not a struct with field %s.%s: %a" f fi.fname fi.fcomp.cname pp_typ ty
+    | ty                                            -> Console.fatal
+                                                         "%s: not a struct with field %s.%s: %a"
+                                                         f fi.fname fi.fcomp.cname pp_typ ty
 
   let arrow r fi =
     check_field "Representant.arrow" r fi;
     if not (isPointerType fi.ftype) then
       Console.fatal "Representant.arrow: not a pointer field: %s.%s : %a" fi.fname fi.fcomp.cname pp_typ fi.ftype;
+    Flag.report flag;
     { name = r.name ^ "->" ^ fi.fname; typ = Ast_info.pointed_type fi.ftype; kind = r.kind }
 
   let deref r =
     if not (isPointerType r.typ) then
       Console.fatal "Representant.deref: not a pointer region: %s : %a" r.name pp_typ r.typ;
+    Flag.report flag;
     { name = "*(" ^ r.name ^ ")"; typ = Ast_info.pointed_type r.typ; kind = r.kind }
 
   let check_detached f fi =
@@ -121,6 +136,7 @@ module Representant = struct
   let dot r fi =
     check_field "Representant.dot" r fi;
     check_detached "Representant.dot" fi;
+    Flag.report flag;
     { name = r.name ^ "." ^ fi.fname; typ = fi.ftype; kind = r.kind }
 
   let container r fi =
@@ -131,29 +147,34 @@ module Representant = struct
         fi.fname fi.fcomp.cname pp_typ fi.ftype r.name pp_typ r.typ;
     if not fi.fcomp.cstruct then
       Console.fatal "Representant.container: container should be a structure: %s" fi.fcomp.cname;
+    Flag.report flag;
     { name = "(" ^ r.name ^ ", " ^ fi.fcomp.cname ^ "." ^ fi.fname ^ ")";
       typ = TComp (fi.fcomp, empty_size_cache (), []);
       kind = r.kind }
 
-  let dot_void r =
-    { name = r.name ^ ".void"; typ = voidType; kind = r.kind }
+  let dot_void r = Flag.report flag; { name = r.name ^ ".void"; typ = voidType; kind = r.kind }
 
   let container_of_void r typ =
     let name =
       match unrollType typ with
       | TComp (ci, _, _) when ci.cstruct -> ci.cname
-      | TComp (ci, _, _) -> Console.fatal "Representant: container_of_void: shouldn't be union: %a" pp_typ typ
-      | TVoid _ -> Console.fatal "Representant: container_of_void: shouldn't be void: %a" pp_typ typ
-      | ty -> Format.asprintf "`%a'" pp_typ ty
+      | TComp (ci, _, _)                 -> Console.fatal
+                                              "Representant: container_of_void: shouldn't be union: %a"
+                                              pp_typ typ
+      | TVoid _                          -> Console.fatal
+                                              "Representant: container_of_void: shouldn't be void: %a"
+                                              pp_typ typ
+      | ty                               -> Format.asprintf "`%a'" pp_typ ty
     in
     begin match unrollType r.typ with
-    | TVoid _ -> ()
+    | TVoid _                              -> ()
     | TComp (ci, _, _) when not ci.cstruct -> ()
-    | ty ->
-      Console.fatal
-        "Representant.container_of_void: can only take (_, %s.void) from void or union region: %s : %a"
-        name r.name pp_typ ty
+    | ty                                   -> Console.fatal
+                                                "Representant.container_of_void: can only take (_, %s.void) \
+                                                 from void or union region: %s : %a"
+                                                name r.name pp_typ ty
     end;
+    Flag.report flag;
     { name = "(" ^ r.name ^ ", " ^ name ^ ".void)"; typ; kind = r.kind }
 
   let pp fmttr r =

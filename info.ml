@@ -121,21 +121,22 @@ module Make_memory (R : Representant) (U : Unifiable with type repr = R.t) (C : 
       Console.fatal "Memory.mk: wrong region (not OK): %s : %a vs. %a" (R.name r) pp_typ (R.typ r) R.Kind.pp (R.kind r);
     if isArithmeticOrPointerType (R.typ r) then
       match fi with
-      | None -> r, None
-      | Some fi ->
-        Console.fatal
-          "Memory.mk: fields can't be specified for primitive regions: %s.%s for %s"
-          fi.fcomp.cname fi.fname (R.name @@ U.repr u)
+      | None    -> r, None
+      | Some fi -> Console.fatal
+                     "Memory.mk: fields can't be specified for primitive regions: %s.%s for %s"
+                     fi.fcomp.cname fi.fname (R.name @@ U.repr u)
     else
       match[@warning "-4"] unrollTypeDeep (R.typ r), fi with
-      | TComp (ci, _ ,_), Some fi when Compinfo.equal ci fi.fcomp ->
-        r, Some (Memory_field.of_fieldinfo_exn fi)
-      | _, None ->
-        Console.fatal "Memory.mk: improper region (with no field): %s : %a" (R.name r) pp_typ (R.typ r)
-      | _, Some fi ->
-        Console.fatal
-          "Memory.mk: improper combination of region and field: %s : %a and %s.%s : %a"
-          (R.name r) pp_typ (R.typ r) (compFullName fi.fcomp) fi.fname pp_typ fi.ftype
+      | TComp (ci, _ ,_), Some fi
+        when Compinfo.equal ci fi.fcomp -> r, Some (Memory_field.of_fieldinfo_exn fi)
+      | _,                None          -> Console.fatal
+                                             "Memory.mk: improper region (with no field): %s : %a"
+                                             (R.name r) pp_typ (R.typ r)
+      | _,                Some fi       -> Console.fatal
+                                             "Memory.mk: improper combination of region and field: \
+                                              %s : %a and %s.%s : %a"
+                                             (R.name r) pp_typ
+                                             (R.typ r) (compFullName fi.fcomp) fi.fname pp_typ fi.ftype
 
   let equal (r1, fo1) (r2, fo2) = R.equal r1 r2 && opt_equal Memory_field.equal fo1 fo2
 
@@ -206,57 +207,67 @@ module Make_writes (M : Memories) : Writes with module Memories = M = struct
 
   let compare w1 w2 =
     match w1, w2 with
-    | Global_var v1, Global_var v2 -> Global_var.compare v1 v2
-    | Global_var _, _ -> -1
-    | Poly_var _, Global_var _ -> 1
-    | Poly_var v1, Poly_var v2 -> Formal_var.compare v1 v2
-    | Poly_var _, _ -> -1
-    | Local_var _, (Global_var _ | Poly_var _) -> 1
-    | Local_var v1, Local_var v2 -> Local_var.compare v1 v2
-    | Local_var _, _ -> -1
-    | Global_mem _, (Global_var _ | Poly_var _ | Local_var _) -> 1
-    | Global_mem m1, Global_mem m2 -> Global_mem.compare m1 m2
-    | Global_mem _, _ -> -1
-    | Poly_mem _, (Global_var _ | Poly_var _ | Local_var _ | Global_mem _) -> 1
-    | Poly_mem m1, Poly_mem m2 -> Poly_mem.compare m1 m2
-    | Poly_mem _, _ -> -1
-    | Local_mem _, (Global_var _ | Poly_var _ | Local_var _ | Global_mem _ | Poly_mem _) -> 1
-    | Local_mem m1, Local_mem m2 -> Local_mem.compare m1 m2
-    | Local_mem _, _ -> -1
-    | Result, Result -> 0
-    | Result, _ -> 1
+    | Global_var v1, Global_var v2   -> Global_var.compare v1 v2
+    | Global_var _,  _               -> -1
+    | Poly_var _,    Global_var _    -> 1
+    | Poly_var v1,   Poly_var v2     -> Formal_var.compare v1 v2
+    | Poly_var _,    _               -> -1
+    | Local_var _,   (Global_var _
+                     | Poly_var _)   -> 1
+    | Local_var v1,  Local_var v2    -> Local_var.compare v1 v2
+    | Local_var _,   _               -> -1
+    | Global_mem _,  (Global_var _
+                     | Poly_var _
+                     | Local_var _)  -> 1
+    | Global_mem m1, Global_mem m2   -> Global_mem.compare m1 m2
+    | Global_mem _,  _               -> -1
+    | Poly_mem _,    (Global_var _
+                     | Poly_var _
+                     | Local_var _
+                     | Global_mem _) -> 1
+    | Poly_mem m1,   Poly_mem m2     -> Poly_mem.compare m1 m2
+    | Poly_mem _,    _               -> -1
+    | Local_mem _,   (Global_var _
+                     | Poly_var _
+                     | Local_var _
+                     | Global_mem _
+                     | Poly_mem _)   -> 1
+    | Local_mem m1,  Local_mem m2    -> Local_mem.compare m1 m2
+    | Local_mem _,   _               -> -1
+    | Result,        Result          -> 0
+    | Result,        _               -> 1
 
   let equal w1 w2 =
     match[@warning "-4"] w1, w2 with
     | Global_var v1, Global_var v2 -> Global_var.equal v1 v2
-    | Poly_var v1, Poly_var v2 -> Formal_var.equal v1 v2
-    | Local_var v1, Local_var v2 -> Local_var.equal v1 v2
+    | Poly_var v1,   Poly_var v2   -> Formal_var.equal v1 v2
+    | Local_var v1,  Local_var v2  -> Local_var.equal v1 v2
     | Global_mem m1, Global_mem m2 -> Global_mem.equal m1 m2
-    | Poly_mem m1, Poly_mem m2 -> Poly_mem.equal m1 m2
-    | Local_mem m1, Local_mem m2 -> Local_mem.equal m1 m2
-    | Result, Result -> true
-    | _ -> false
+    | Poly_mem m1,   Poly_mem m2   -> Poly_mem.equal m1 m2
+    | Local_mem m1,  Local_mem m2  -> Local_mem.equal m1 m2
+    | Result,        Result        -> true
+    | _                            -> false
 
   let hash =
     function
     | Global_var v -> 7 * Global_var.hash v
-    | Poly_var v -> 7 * Formal_var.hash v + 1
-    | Local_var v -> 7 * Local_var.hash v + 2
+    | Poly_var v   -> 7 * Formal_var.hash v + 1
+    | Local_var v  -> 7 * Local_var.hash v + 2
     | Global_mem m -> 7 * Global_mem.hash m + 3
-    | Poly_mem m -> 7 * Poly_mem.hash m + 4
-    | Local_mem m -> 7 * Local_mem.hash m + 5
-    | Result -> 6
+    | Poly_mem m   -> 7 * Poly_mem.hash m + 4
+    | Local_mem m  -> 7 * Local_mem.hash m + 5
+    | Result       -> 6
 
   let pp fmttr =
     let pp fmt = fprintf fmttr fmt in
     function
     | Global_var v -> pp "%a" Global_var.pp v
-    | Poly_var v -> pp "'%a" Formal_var.pp v
-    | Local_var v -> pp "~%a" Local_var.pp v
+    | Poly_var v   -> pp "'%a" Formal_var.pp v
+    | Local_var v  -> pp "~%a" Local_var.pp v
     | Global_mem m -> pp "%a" Global_mem.pp m
-    | Poly_mem m -> pp "'%a" Poly_mem.pp m
-    | Local_mem m -> pp "~%a" Local_mem.pp m
-    | Result -> pp "!R!"
+    | Poly_mem m   -> pp "'%a" Poly_mem.pp m
+    | Local_mem m  -> pp "~%a" Local_mem.pp m
+    | Result       -> pp "!R!"
 end
 
 module type Reads_kind = sig
@@ -355,12 +366,12 @@ module Make_reads (W : Writes) (K : Reads_kind with module W = W) () :
   let of_writes : _ -> some option =
     function[@warning "-42"]
     | W.Global_var v -> Some (Some (Global_var, v))
-    | W.Local_var v -> Some (Some (Local_var, v))
-    | W.Poly_var v -> Some (Some (Poly_var, v))
+    | W.Local_var v  -> Some (Some (Local_var, v))
+    | W.Poly_var v   -> Some (Some (Poly_var, v))
     | W.Global_mem m -> Some (Some (Global_mem, m))
-    | W.Local_mem m -> Some (Some (Local_mem, m))
-    | W.Poly_mem m -> Some (Some (Poly_mem, m))
-    | W.Result -> None
+    | W.Local_mem m  -> Some (Some (Local_mem, m))
+    | W.Poly_mem m   -> Some (Some (Poly_mem, m))
+    | W.Result       -> None
 
   let create f =
     { global_vars = H_global_var.create f;
@@ -396,11 +407,11 @@ module Make_reads (W : Writes) (K : Reads_kind with module W = W) () :
   let add : type a. a K.t -> a -> _ = fun k x r ->
     match k with
     | Global_var -> H_global_var.add x r.global_vars
-    | Poly_var -> H_formal_var.add x r.poly_vars
-    | Local_var -> H_local_var.add x r.local_vars
+    | Poly_var   -> H_formal_var.add x r.poly_vars
+    | Local_var  -> H_local_var.add x r.local_vars
     | Global_mem -> H_global_mem.add x r.global_mems
-    | Poly_mem -> H_poly_mem.add x r.poly_mems
-    | Local_mem -> H_local_mem.add x r.local_mems
+    | Poly_mem   -> H_poly_mem.add x r.poly_mems
+    | Local_mem  -> H_local_mem.add x r.local_mems
 
   let sub r ~from =
     H_global_var.sub r.global_vars ~from:from.global_vars;
@@ -413,11 +424,11 @@ module Make_reads (W : Writes) (K : Reads_kind with module W = W) () :
   let mem : type a. a K.t -> a -> _ = fun k x r ->
     match k with
     | Global_var -> H_global_var.mem x r.global_vars
-    | Poly_var -> H_formal_var.mem x r.poly_vars
-    | Local_var -> H_local_var.mem x r.local_vars
+    | Poly_var   -> H_formal_var.mem x r.poly_vars
+    | Local_var  -> H_local_var.mem x r.local_vars
     | Global_mem -> H_global_mem.mem x r.global_mems
-    | Poly_mem -> H_poly_mem.mem x r.poly_mems
-    | Local_mem -> H_local_mem.mem x r.local_mems
+    | Poly_mem   -> H_poly_mem.mem x r.poly_mems
+    | Local_mem  -> H_local_mem.mem x r.local_mems
 
   let intersects r1 r2 =
     H_global_var.intersects r1.global_vars r2.global_vars ||
@@ -578,16 +589,16 @@ end = struct
     let module R = Reads () in
     let module A = Assigns (R) in
     Some {
-      reads = (module R);
+      reads   = (module R);
       assigns = (module A);
       eff = {
-        assigns = A.create f;
-        tracking = H_void_ptr_var.create f;
-        is_target = false;
-        depends = R.create f;
+        assigns    = A.create f;
+        tracking   = H_void_ptr_var.create f;
+        is_target  = false;
+        depends    = R.create f;
         result_dep = false;
-        requires = Requires.create f;
-        flag = f
+        requires   = Requires.create f;
+        flag       = f
       }}
 
   let assigns e = e.assigns
@@ -606,13 +617,13 @@ end = struct
       reads;
       assigns;
       eff = {
-        assigns = A.copy f e.assigns;
-        tracking = H_void_ptr_var.copy f e.tracking;
-        is_target = e.is_target;
-        depends = R.copy f e.depends;
+        assigns    = A.copy f e.assigns;
+        tracking   = H_void_ptr_var.copy f e.tracking;
+        is_target  = e.is_target;
+        depends    = R.copy f e.depends;
         result_dep = e.result_dep;
-        requires = Requires.copy f e.requires;
-        flag = f }}
+        requires   = Requires.copy f e.requires;
+        flag       = f }}
 
   let is_target e = e.is_target
   let has_result_dep e = e.result_dep
