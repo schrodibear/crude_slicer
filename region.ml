@@ -20,38 +20,38 @@ module Representant = struct
 
     let equal k1 k2 =
       match k1, k2 with
-      | `Global,   `Global                       -> true
+      | `Global,   `Global      -> true
       | `Poly f1,  `Poly f2
       | `Local f1, `Local f2
-        when String.equal f1 f2                  -> true
-      | `Dummy,    `Dummy                        -> true
+        when String.equal f1 f2 -> true
+      | `Dummy,    `Dummy       -> true
       | (`Global
         | `Poly _
         | `Local _
         | `Dummy), (`Global
                    | `Poly _
                    | `Local _
-                   | `Dummy)                     -> false
+                   | `Dummy)    -> false
 
     let choose k1 k2 =
       begin match k1, k2 with
       | (`Poly f1
         | `Local f1),  (`Poly f2
                        | `Local f2)
-        when not (String.equal f1 f2)            -> Console.fatal
-                                                      "Representant.Kind.choose: broken invariant: \
-                                                       should not try unifying regions from diff. functions: %s and %s"
-                                                      f1 f2
-      | `Dummy, `Dummy                           ->  Console.fatal
-                                                       "Representant.Kind.choose: broken invariant: \
-                                                        dummy regions should be immediately unified with non-dummy ones"
+        when not (String.equal f1 f2) -> Console.fatal
+                                           "Representant.Kind.choose: broken invariant: \
+                                            should not try unifying regions from diff. functions: %s and %s"
+                                           f1 f2
+      | `Dummy, `Dummy                ->  Console.fatal
+                                            "Representant.Kind.choose: broken invariant: \
+                                             dummy regions should be immediately unified with non-dummy ones"
       | (`Global
         | `Poly _
         | `Local _
         | `Dummy),     (`Global
                        | `Poly _
                        | `Local _
-                       | `Dummy)                 -> ()
+                       | `Dummy)      -> ()
       end;
       match k1, k2 with
       | `Global,  `Global                         -> `Any
@@ -92,16 +92,50 @@ module Representant = struct
 
   let flag = Flag.create "convergence"
 
-  let global name typ = Flag.report flag; { name; typ; kind = `Global }
-  let poly fname name typ = Flag.report flag; { name = fname ^ "::" ^ name; typ; kind = `Poly fname }
-  let local fname name typ = Flag.report flag; { name = fname ^ ":::" ^ name; typ; kind = `Local fname }
-  let dummy name typ = { name; typ; kind = `Dummy }
+  module H = Hashtbl.Make (struct type nonrec t = t let equal, hash = equal, hash end)
+
+  let h_void_xs = H.create 512
+
+  let mk ~name ~typ ~kind =
+    let r = { name; typ; kind } in
+    if kind <> `Dummy then begin
+      Flag.report flag;
+      let ty, n = Ty.deref typ in
+      if isVoidType ty then H.replace h_void_xs r n
+    end;
+    r
+
+  let report r1 ~is_repr_of:r2 =
+    if isVoidType @@ fst @@ Ty.deref r2.typ then H.remove h_void_xs r2;
+    if r1.kind = `Dummy then
+      Console.fatal "Representant.report: trying to set dummy region as representant: %s of %s" r1.name r2.name;
+    if r2.kind <> `Dummy then Flag.report flag
+
+  let all_void_xs =
+    H.fold
+      (fun r n ->
+         let rec insert r n l =
+           let open List in
+           function
+           | []                           -> rev_append l [n, [r]]
+           | (n', rs) :: es when n' = n   -> rev_append l @@ (n', r :: rs) :: es
+           | n', _ as e :: es when n' < n -> insert r n (e :: l) es
+           | _ :: _ as es                 -> rev_append l @@ (n, [r]) :: es
+         in
+         insert r n [])
+      h_void_xs
+      []
+
+  let global name typ = mk ~name ~typ ~kind:`Global
+  let poly fname name typ = mk ~name:(fname ^ "::" ^ name) ~typ ~kind:(`Poly fname)
+  let local fname name typ = mk ~name:(fname ^ ":::" ^ name) ~typ ~kind:(`Local fname)
+  let dummy name typ = mk ~name ~typ ~kind:`Dummy
   let template =
     let counter = ref ~-1 in
     fun { name; typ; kind } ->
       let open Kind in
       match kind with
-      | `Poly _                     -> incr counter; dummy ("dummy" ^ string_of_int !counter) typ
+      | `Poly _                     -> incr counter; dummy ("dummy#" ^ string_of_int !counter) typ
       | `Global | `Local _ | `Dummy -> Console.fatal
                                          "Representant.template: can only templatify polymorphic regions, but %s is %a"
                                          name pp kind
@@ -118,14 +152,12 @@ module Representant = struct
     check_field "Representant.arrow" r fi;
     if not (isPointerType fi.ftype) then
       Console.fatal "Representant.arrow: not a pointer field: %s.%s : %a" fi.fname fi.fcomp.cname pp_typ fi.ftype;
-    Flag.report flag;
-    { name = r.name ^ "->" ^ fi.fname; typ = Ast_info.pointed_type fi.ftype; kind = r.kind }
+    mk ~name:(r.name ^ "->" ^ fi.fname) ~typ:(Ast_info.pointed_type fi.ftype) ~kind:r.kind
 
   let deref r =
     if not (isPointerType r.typ) then
       Console.fatal "Representant.deref: not a pointer region: %s : %a" r.name pp_typ r.typ;
-    Flag.report flag;
-    { name = "*(" ^ r.name ^ ")"; typ = Ast_info.pointed_type r.typ; kind = r.kind }
+    mk ~name:("*(" ^ r.name ^ ")") ~typ:(Ast_info.pointed_type r.typ) ~kind:r.kind
 
   let check_detached f fi =
     if not (isStructOrUnionType fi.ftype || isArrayType fi.ftype || fi.faddrof) then
@@ -136,23 +168,23 @@ module Representant = struct
   let dot r fi =
     check_field "Representant.dot" r fi;
     check_detached "Representant.dot" fi;
-    Flag.report flag;
-    { name = r.name ^ "." ^ fi.fname; typ = fi.ftype; kind = r.kind }
+    let typ = let typ = fi.ftype in if isArrayType typ then Ast_info.pointed_type typ else typ in
+    mk ~name:(r.name ^ "." ^ fi.fname) ~typ ~kind:r.kind
 
   let container r fi =
     check_detached "Representant.container" fi;
-    if not (Typ.equal fi.ftype r.typ) then
+    if need_cast (typeDeepDropAllAttributes fi.ftype) @@ typeDeepDropAllAttributes r.typ then
       Console.fatal
         "Representant.container: illegal use of `container_of': %s.%s : %a vs. %s : %a"
         fi.fname fi.fcomp.cname pp_typ fi.ftype r.name pp_typ r.typ;
     if not fi.fcomp.cstruct then
       Console.fatal "Representant.container: container should be a structure: %s" fi.fcomp.cname;
-    Flag.report flag;
-    { name = "(" ^ r.name ^ ", " ^ fi.fcomp.cname ^ "." ^ fi.fname ^ ")";
-      typ = TComp (fi.fcomp, empty_size_cache (), []);
-      kind = r.kind }
+    mk
+      ~name:("(" ^ r.name ^ ", " ^ fi.fcomp.cname ^ "." ^ fi.fname ^ ")")
+      ~typ:(TComp (fi.fcomp, empty_size_cache (), []))
+      ~kind:r.kind
 
-  let dot_void r = Flag.report flag; { name = r.name ^ ".void"; typ = voidType; kind = r.kind }
+  let dot_void r = mk ~name:(r.name ^ ".void") ~typ:voidType ~kind:r.kind
 
   let container_of_void r typ =
     let name =
@@ -174,8 +206,7 @@ module Representant = struct
                                                  from void or union region: %s : %a"
                                                 name r.name pp_typ ty
     end;
-    Flag.report flag;
-    { name = "(" ^ r.name ^ ", " ^ name ^ ".void)"; typ; kind = r.kind }
+    mk ~name:("(" ^ r.name ^ ", " ^ name ^ ".void)") ~typ ~kind:r.kind
 
   let pp fmttr r =
     Format.fprintf fmttr "{ %s : %a (%a) }" r.name pp_typ r.typ Kind.pp r.kind
@@ -187,6 +218,11 @@ module type Representant = sig
   val equal : t -> t -> bool
   val hash : t -> int
   val choose : t -> t -> [> `First | `Second | `Any ]
+
+  val name : t -> string
+  val report : t -> is_repr_of:t -> unit
+
+  val flag : Flag.t
 end
 
 module type Unifiable = sig
@@ -209,9 +245,7 @@ module Make_unifiable (R : Representant) : Unifiable with type repr = R.t = stru
 
   let rec repr r =
     match repr (H.find reprs r) with
-    | r' ->
-      H.replace reprs r r';
-      r'
+    | r'                  -> H.replace reprs r r'; r'
     | exception Not_found -> r
 
   let rank r = try H.find ranks r with Not_found -> 0
@@ -220,21 +254,25 @@ module Make_unifiable (R : Representant) : Unifiable with type repr = R.t = stru
     let r1, r2 = repr r1, repr r2 in
     if R.equal r1 r2 then ()
     else
-      let k1, k2 = rank r1, rank r2 in
-      match R.choose r1 r2 with
-      | `First ->
+      let set r1 ~as_repr_of:r2 =
+        let k1, k2 = rank r1, rank r2 in
         H.replace reprs r2 r1;
+        R.report r1 ~is_repr_of:r2;
         if k1 <= k2 then H.replace ranks r1 (k2 + 1)
-      | `Second ->
-        H.replace reprs r1 r2;
-        if k2 <= k1 then H.replace ranks r2 (k1 + 1)
-      | `Any when k1 < k2 ->
-        H.replace reprs r1 r2
-      | `Any when k2 < k1 ->
-        H.replace reprs r2 r1
-      | `Any ->
-        H.replace reprs r1 r2;
-        H.replace ranks r2 (k1 + 1)
+      in
+      let choice =
+        match R.choose r1 r2 with
+        | `First | `Second as c -> c
+        | `Any                  ->
+          let k1, k2 = rank r1, rank r2 in
+          if      k1 > k2                                            then `First
+          else if k2 > k1                                            then `Second
+          else if String.(length @@ R.name r1 < length @@ R.name r2) then `First
+          else                                                            `Second
+      in
+      match choice with
+      | `First  -> set r1 ~as_repr_of:r2
+      | `Second -> set r2 ~as_repr_of:r1
 end
 
 module Make_hashmap (R : Representant) (U : Unifiable with type repr = R.t) : sig
@@ -460,40 +498,54 @@ end = struct
 
   open Separation
 
+  (* Notice about handling integers used as pointers: they don't have regions, i.e. it's unsound(!),
+     we just create a fresh region each time we cast an integer to a pointer, but this is done
+     separately for each case below *)
+  let deref u = if isPointerType (U.repr u).R.typ then `Value (deref u) else `None
+
+  let resolve_addressible addrof typ u () =
+    if addrof && not @@ isArrayType typ then deref u
+    else if isArrayType typ             then `Value u
+    else                                     `None
+
+  (* Also used to retrieve return regions, only use from the inside(!) *)
   let rec of_var ?f v =
     let resolve u =
-      if isStructOrUnionType v.vtype || isArrayType v.vtype || v.vaddrof then
-        `Location (u, if v.vaddrof then fun () -> deref u else fun () -> u)
-      else
-        `Value u
+      if isStructOrUnionType v.vtype || isArrayType v.vtype || v.vaddrof
+      then `Location (u, resolve_addressible v.vaddrof v.vtype u)
+      else `Value u
     in
     try
       resolve @@ H_v.find h_var v
     with
     | Not_found ->
-      if not (isStructOrUnionType v.vtype || isArrayType v.vtype || v.vaddrof || isPointerType v.vtype) then
-        `None
+      if not (isStructOrUnionType v.vtype || isArrayType v.vtype || v.vaddrof || isPointerType v.vtype)
+      then `None
       else
         let u =
           let typ =
-            if v.vaddrof || isStructOrUnionType v.vtype then v.vtype
-            else Ast_info.pointed_type v.vtype
+            if (v.vaddrof && not @@ isArrayType v.vtype) || isStructOrUnionType v.vtype
+            then v.vtype
+            else Ty.deref_once v.vtype
           in
           U.of_repr @@
           match unrollType v.vtype, f with
-          | TFun (rt, _ ,_ ,_), _ when not (isStructOrUnionType rt) -> R.poly v.vname v.vname typ
-          | TFun _, _ -> R.local v.vname v.vname typ
-          | _, Some f when v.vformal && not (isStructOrUnionType v.vtype) -> R.poly f v.vname typ
-          | _, Some f when v.vformal -> R.local f v.vname typ
-          | _, _ when v.vglob -> R.global v.vname typ
-          | _, Some f -> R.local f v.vname typ
-          | _ ->
-            Console.fatal "Region.of_var: a local o formal variable should be supplied with function name: %s" v.vname
+          | TFun (rt, _ ,_ ,_), _
+            when not (isStructOrUnionType rt)                    -> R.poly ("!" ^ v.vname ^ "!") v.vname typ
+          | TFun _, _                                            -> R.local ("!" ^ v.vname ^ "!") v.vname typ
+          | _, Some f
+            when v.vformal
+              && not (isStructOrUnionType v.vtype || v.vaddrof)  -> R.poly f v.vname typ
+          | _, Some f when v.vformal                             -> R.local f v.vname typ
+          | _, _ when v.vglob                                    -> R.global v.vname typ
+          | _, Some f                                            -> R.local f v.vname typ
+          | _                                                    ->
+            Console.fatal "Region.of_var: a local or formal variable should be supplied with function name: %s" v.vname
         in
         H_v.replace h_var v u;
         resolve u
   and of_string s =
-    let resolve u = `Location (u, fun () -> deref u)
+    let resolve u = `Location (u, fun () -> `Value u) in
     try
       resolve @@ H_s.find h_str s
     with
@@ -518,38 +570,73 @@ end = struct
       H_s.replace h_str s u;
       resolve u
   and value =
+    let counter = ref ~-1 in
+    fun ?f ty ->
+      let fresh () =
+        incr counter;
+        let name = "fresh#" ^ string_of_int !counter in
+        let ty = Ty.deref_once ty in
+        U.of_repr @@
+        match f with
+        | Some f -> R.local f name ty
+        | None   -> R.global name ty
+      in
+      function
+      | `Location (_, get) ->
+        begin match get () with
+        | `Value u         -> u
+        | `None            -> fresh ()
+        end
+      | `Value u           -> u
+      | `None              -> fresh ()
+  and location =
     function
-    | `Location (_, get) -> get ()
-    | `Value u -> u
-    | `None -> Console.fatal "Region.value: broken invariant: can't evaluate region"
+    | `Location (u, _)     -> u
+    | `Value _ | `None     -> Console.fatal "Analysis.location: got value where memory location is needed"
   and of_lval ?f lv =
     let of_lval = of_lval ?f in
     let lv', off = removeOffsetLval lv in
-    match off with
-    | NoOffset ->
-      begin match fst lv' with
+    let no_offset () =
+      match fst lv' with
       | Var v -> of_var v
-      | Mem e ->
-        let u = value (of_expr ?f e) in
-        `Location (u, fun () -> deref u)
-      end
-    | Field (fi, NoOffset) when fi.fcomp.cstruct ->
-      let u = value (of_lval lv') in
-      if fi.faddrof || isStructOrUnionType fi.ftype || isArrayType fi.ftype then
-        let u = dot u fi in
-        `Location (u, if fi.faddrof then fun () -> deref u else fun () -> u)
-      else
-        `Location (u, fun () -> arrow u fi)
-    | Field (fi, NoOffset) ->
-      let u = container_of_void (value (of_lval lv')) (typeDeepDropAllAttributes @@ unrollType fi.ftype) in
-      `Location (u, if isStructOrUnionType fi.ftype || isArrayType fi.ftype then fun () -> u else fun () -> deref u)
-    | Index (_, NoOffset) ->
+      | Mem e -> let u = value ?f (typeOf e) (of_expr ?f e) in `Location (u, fun () -> deref u)
+    in
+    let struct_field fi =
+      let u = location (of_lval lv') in
+      if fi.faddrof || isStructOrUnionType fi.ftype || isArrayType fi.ftype
+      then let u = dot u fi in `Location (u, resolve_addressible fi.faddrof fi.ftype u)
+      else `Location (u, fun () -> if isPointerType fi.ftype then `Value (arrow u fi) else `None)
+    in
+    let subunion () =
+      let u = location (of_lval lv') in
+      `Location (u, fun () -> `None)
+    in
+    let union_field fi =
+      let u =
+        container_of_void
+          (location (of_lval lv'))
+          (typeDeepDropAllAttributes @@ unrollTypeDeep fi.ftype)
+      in
+      `Location (u,
+                 if isArrayType fi.ftype        then fun () -> `Value u
+                 else if isPointerType fi.ftype then fun () -> deref u
+                 else                                fun () -> `None)
+    in
+    let index () =
       let u = of_lval lv' in
-      if isArrayType (typeOfLval lv) then u
-      else
-        let v = value u in
-        `Location (v, fun () -> deref v)
-    | _ -> Console.fatal "Region.of_lval: broken invariant: remaining offset after removeOffsetLval"
+      let ty = typeOfLval lv in
+      if isArrayType ty
+      then u
+      else let v = value ?f ty u in `Location (v, fun () -> deref v)
+    in
+    match off with
+    | NoOffset                                       -> no_offset ()
+    | Field (fi, NoOffset) when fi.fcomp.cstruct     -> struct_field fi
+    | Field (fi, NoOffset) when Ty.is_union fi.ftype -> subunion ()
+    | Field (fi, NoOffset)                           -> union_field fi
+    | Index (_, NoOffset)                            -> index ()
+    | _                                              -> Console.fatal "Region.of_lval: broken invariant: \
+                                                                       remaining offset after removeOffsetLval"
   and of_expr =
     let match_container_of1 =
       let rec match_offset ?(acc=[]) =
@@ -560,12 +647,12 @@ end = struct
         | Index _ -> None
       in
       function
-      | CastE (pstr,
+      | CastE (pstr, _,
                { enode = BinOp (MinusPI,
-                                { enode = CastE (chrptr, mptr) },
+                                { enode = CastE (chrptr, _, mptr) },
                                 { enode =
-                                    CastE (size_t,
-                                           { enode = AddrOf (Mem { enode = CastE (pstr', zero) }, off) }) },
+                                    CastE (size_t, _,
+                                           { enode = AddrOf (Mem { enode = CastE (pstr', _, zero) }, off) }) },
                                 _) })
         when
           isPointerType pstr && isPointerType pstr' && isCharPtrType chrptr && isPointerType (typeOf mptr) &&
@@ -581,7 +668,9 @@ end = struct
     in
     let match_container_of2 =
       function
-      | BinOp ((PlusPI | IndexPI), { enode  = CastE (pstr, e) }, { enode = Const (CInt64 (c, IULongLong, _)) }, _) ->
+      | BinOp ((PlusPI | IndexPI),
+               { enode  = CastE (pstr, _, e) },
+               { enode = Const (CInt64 (c, IULongLong, _)) }, _) ->
         begin match unrollType pstr, unrollType (typeOf e) with
         | TComp (ci, _, _), (TPtr _ | TArray _ as ty) when ci.cstruct ->
           begin try

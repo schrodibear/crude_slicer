@@ -107,17 +107,59 @@ open Cil
 open Extlib
 
 module Ty = struct
+  let is_union ty =
+    match unrollType ty with
+    | TComp ({ cstruct = false; _ }, _, _) -> true
+    | _                                    -> false
+
   let rec no_cast ty1 ty2 =
+    let open Ast_info in
     not (need_cast ty1 ty2) ||
     match unrollType ty1, unrollType ty2 with
-    | (TPtr _ as tptr1), (TPtr _  as tptr2)
-      when Ast_info.(no_cast (pointed_type tptr1) (pointed_type tptr2)) -> true
+    | (TPtr _ as tptr1),   (TPtr _  as tptr2)
+      when no_cast (pointed_type tptr1) (pointed_type tptr2) -> true
     | (TArray _ as tarr1), (TArray _ as tarr2)
-      when Ast_info.(no_cast (element_type tarr1) (element_type tarr2)) -> true
-    | (TArray _ as tarr), (TPtr _ as tptr)
-    | (TPtr _ as tptr), (TArray _ as tarr)
-      when Ast_info.(no_cast (element_type tarr) (pointed_type tptr))   -> true
-    | _                                                                 -> false
+      when no_cast (element_type tarr1) (element_type tarr2) -> true
+    | (TArray _ as tarr),  (TPtr _ as tptr)
+    | (TPtr _ as tptr),    (TArray _ as tarr)
+      when no_cast (element_type tarr) (pointed_type tptr)   -> true
+    | _                                                      -> false
+
+  let deref_once ty =
+    let open Ast_info in
+    match unrollType ty with
+    | TPtr _ as ty             -> pointed_type ty
+    | TArray _                 -> element_type ty
+    | TVoid _
+    | TInt _
+    | TFloat _
+    | TFun _
+    | TComp _
+    | TEnum _
+    | TBuiltin_va_list _ as ty -> ty
+    | TNamed _                 -> assert false
+
+  let deref =
+    let rec aux n ty =
+      let open Ast_info in
+      match unrollType ty with
+      | TVoid _
+      | TInt _
+      | TFloat _
+      | TFun _
+      | TComp _
+      | TEnum _
+      | TBuiltin_va_list _ as ty  -> ty, n
+      | TNamed _                  -> assert false
+      | TPtr _ as ty              -> aux (n + 1) (pointed_type ty)
+      | TArray _ as ty when n = 0 -> aux 1 (element_type ty)
+      | TArray _ as ty            -> aux n (element_type ty)
+    in
+    aux 0
+
+  let rec ref ty n =
+    if n <= 0 then ty
+    else           ref (TPtr (ty, [])) (n - 1)
 end
 
 module Ci = struct
