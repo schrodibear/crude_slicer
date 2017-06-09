@@ -114,7 +114,7 @@ module Ty = struct
 
   let rec no_cast ty1 ty2 =
     let open Ast_info in
-    not (need_cast ty1 ty2) ||
+    not @@ need_cast (typeDeepDropAllAttributes ty1) (typeDeepDropAllAttributes ty2) ||
     match unrollType ty1, unrollType ty2 with
     | (TPtr _ as tptr1),   (TPtr _  as tptr2)
       when no_cast (pointed_type tptr1) (pointed_type tptr2) -> true
@@ -156,6 +156,17 @@ module Ty = struct
       | TArray _ as ty            -> aux n (element_type ty)
     in
     aux 0
+
+  let compatible ty1 ty2 =
+    let (ty1, n1), (ty2, n2) = deref ty1, deref ty2 in
+    no_cast ty1 ty2 ||
+    n1 = n2 &&
+    match unrollType ty1, unrollType ty2 with
+    | TVoid _,                             TComp ({ cstruct = false; _}, _, _)
+    | TComp ({ cstruct = false; _}, _, _), TVoid _
+    | TVoid _,                             TVoid _
+    | TComp ({ cstruct = false; _}, _, _), TComp ({ cstruct = false; _}, _, _) -> true
+    | _                                                                        -> false
 
   let rec ref ty n =
     if n <= 0 then ty
