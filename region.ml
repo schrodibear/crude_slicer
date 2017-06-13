@@ -97,6 +97,7 @@ module Representant = struct
   let h_void_xs = H.create 512
 
   let mk ~name ~typ ~kind =
+    let typ = Ty.normalize typ in
     let r = { name; typ; kind } in
     if kind <> `Dummy then begin
       Flag.report flag;
@@ -168,7 +169,7 @@ module Representant = struct
   let dot r fi =
     check_field "Representant.dot" r fi;
     check_detached "Representant.dot" fi;
-    let typ = let typ = fi.ftype in if isArrayType typ then Ast_info.pointed_type typ else typ in
+    let typ = let typ = fi.ftype in if isArrayType typ then Ast_info.element_type typ else typ in
     mk ~name:(r.name ^ "." ^ fi.fname) ~typ ~kind:r.kind
 
   let container r fi =
@@ -368,7 +369,8 @@ module Separation : sig
   val container : U.t -> fieldinfo -> U.t
   val container_of_void : U.t -> typ -> U.t
   val unify : U.t -> U.t -> unit
-  val duplicate : map:H'.t -> ?clone:U.t -> U.t -> Unifiable.t
+  val duplicate : map:H'.t -> U.t -> Unifiable.t
+  val accomodate : U.t list -> on:U.t list -> unit
   val replay : map:H'.t -> U.t list -> on:U.t list -> unit
 end = struct
   let h_arrow = H_f.create ()
@@ -387,8 +389,9 @@ end = struct
       ~call:(fun u u' -> H_t.add u (U.repr u).R.typ u' h_container_of_void)
       h_dot_void
   let container = H_f.find_or_call ~create:R.container ~call:(H_f.add' h_dot) h_container
-  let container_of_void =
-    H_t.find_or_call ~create:R.container_of_void ~call:(fun u _ u' -> H'.add u u' h_dot_void) h_container_of_void
+  let container_of_void u ty =
+    let ty = Ty.normalize ty in
+    H_t.find_or_call ~create:R.container_of_void ~call:(fun u _ u' -> H'.add u u' h_dot_void) h_container_of_void u ty
 
   type 'k handler2 = (U.t -> 'k -> U.t) -> U.t -> 'k -> U.t -> unit
 
@@ -427,7 +430,7 @@ end = struct
     fun ?(max_count=3) ?(retain_cache=Typ.Hashtbl.clear cache) u1 u2 ->
       let r1 = U.repr u1 and r2 = U.repr u2 in
       if not (R.equal r1 r2) then
-        let t1 = unrollType r1.R.typ and t2 = unrollType r2.R.typ in
+        let t1, t2 = map_pair Ty.normalize (r1.R.typ, r2.R.typ) in
         if Ty.compatible t1 t2 then
           Console.fatal
             "Can't unify regions of different types: %s : %a, %s : %a"
@@ -447,7 +450,7 @@ end = struct
         H.iter (fun (u, u') () -> unify ~max_count ~retain_cache u u') h;
         unify ~max_count ~retain_cache u clone
 
-  let unify = unify ~max_count:(Options.Region_depth.get ()) ?retain_cache:None
+  let unify u1 u2 = unify ~max_count:(Options.Region_depth.get ()) u1 u2
 
   let rec duplicate ~map ?clone u =
     let handle1 f u u' = ignore @@ duplicate ~map ~clone:(f u) u'
@@ -462,6 +465,14 @@ end = struct
       H'.add u u' map;
       handle_all ~handle1 ~handle2 u u';
       u'
+
+  let accomodate =
+    let map = H'.create () in
+    fun regs ~on ->
+      H'.clear map;
+      List.iter2 (fun clone -> ignore % duplicate ~map ~clone) on regs
+
+  let duplicate ~map u = duplicate ~map u
 
   let replay ~map regs ~on =
     H'.clear map;
@@ -508,7 +519,22 @@ end = struct
     else if isArrayType typ             then `Value u
     else                                     `None
 
-  let container_of_void u = container_of_void u % typeDeepDropAllAttributes % unrollTypeDeep
+  let rec take path u =
+    match path with
+    | []                            -> u
+    | `Field fi ::             path -> take path @@ dot u fi
+    | `Container fi ::         path -> take path @@ container u fi
+    | `Container_of_void ty :: path -> take path @@ container_of_void u ty
+
+  let rec inv =
+    let rec loop acc =
+      function
+      | []                            -> acc
+      | `Container fi ::         path -> loop (`Field fi :: acc) path
+      | `Field fi ::             path -> loop (`Container fi :: acc) path
+      | `Container_of_void ty :: path -> loop (`Container_of_void ty :: acc) path
+    in
+    loop []
 
   let memoize ~find ~replace h fn ?f x =
     try find h x
@@ -529,14 +555,14 @@ end = struct
       let u =
         let typ =
           if (v.vaddrof && not @@ isArrayType v.vtype) || isStructOrUnionType v.vtype
-          then v.vtype
+          then Ty.normalize v.vtype
           else Ty.deref_once v.vtype
         in
         U.of_repr @@
         match unrollType v.vtype, f with
-        | TFun (rt, _ ,_ ,_), _
+        | TPtr (TFun (rt, _ ,_ ,_), _) , _
           when not (isStructOrUnionType rt)                    -> R.poly ("!" ^ v.vname ^ "!") v.vname typ
-        | TFun _, _                                            -> R.local ("!" ^ v.vname ^ "!") v.vname typ
+        | TPtr (TFun _, _), _                                  -> R.local ("!" ^ v.vname ^ "!") v.vname typ
         | _, Some f
           when v.vformal
             && not (isStructOrUnionType v.vtype || v.vaddrof)  -> R.poly f v.vname typ
@@ -730,7 +756,11 @@ end = struct
           match unrollType ty, unrollType ty' with
           | (TVoid _ | TComp ({ cstruct = false; _ }, _, _)), _  -> `Value (dot_void r)
           | ty, (TVoid _ | TComp ({ cstruct = false; _ }, _, _)) -> `Value (container_of_void r @@ Ty.deref_once ty)
-          | ty, _                                                -> `Value (container_of_void
+          | ty, ty' ->
+            match Ci.(match_deep_first_subfield_of ty ty', match_deep_first_subfield_of ty' ty) with
+            | Some path, _                                       -> `Value (take path r)
+            | _,         Some path                               -> `Value (take (inv path) r)
+            | _                                                  -> `Value (container_of_void
                                                                               (dot_void r)
                                                                               (Ty.deref_once ty))
 
