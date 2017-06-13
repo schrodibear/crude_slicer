@@ -1,6 +1,6 @@
 S .
 B .
-B /home/schrodi/.opam/4.04.0/lib/frama-c/plugins/
+B /home/schrodi/.opam/4.04.0-Jessie/lib/frama-c/plugins/
 S frama-c/src/
 B frama-c/src/
 S frama-c/src/kernel_services

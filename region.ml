@@ -6,6 +6,8 @@
 (*                                                                        *)
 (**************************************************************************)
 
+[@@@ocaml.warning "-4-6"]
+
 open Cil
 open Cil_types
 open Cil_printer
@@ -191,7 +193,7 @@ module Representant = struct
     let name =
       match unrollType typ with
       | TComp (ci, _, _) when ci.cstruct -> ci.cname
-      | TComp (ci, _, _)                 -> Console.fatal
+      | TComp _                          -> Console.fatal
                                               "Representant: container_of_void: shouldn't be union: %a"
                                               pp_typ typ
       | TVoid _                          -> Console.fatal
@@ -404,7 +406,7 @@ end = struct
     H_f.iter (handle2 container u2) u1 h_container;
     H_t.iter (handle2 container_of_void u2) u1 h_container_of_void
 
-  let rec unify =
+  let unify u1 u2 =
     let module T = Typ.Hashtbl in
     let module H =
       Hashtbl.Make
@@ -427,7 +429,7 @@ end = struct
       end
     in
     let cache = Typ.Hashtbl.create 128 in
-    fun ?(max_count=3) ?(retain_cache=Typ.Hashtbl.clear cache) u1 u2 ->
+    let rec unify ?(max_count=3) ?(retain_cache=Typ.Hashtbl.clear cache) u1 u2 =
       let r1 = U.repr u1 and r2 = U.repr u2 in
       if not (R.equal r1 r2) then
         let t1, t2 = map_pair Ty.normalize (r1.R.typ, r2.R.typ) in
@@ -449,8 +451,8 @@ end = struct
         in
         H.iter (fun (u, u') () -> unify ~max_count ~retain_cache u u') h;
         unify ~max_count ~retain_cache u clone
-
-  let unify u1 u2 = unify ~max_count:(Options.Region_depth.get ()) u1 u2
+    in
+    unify ~max_count:(Options.Region_depth.get ()) u1 u2
 
   let rec duplicate ~map ?clone u =
     let handle1 f u u' = ignore @@ duplicate ~map ~clone:(f u) u'
@@ -526,7 +528,7 @@ end = struct
     | `Container fi ::         path -> take path @@ container u fi
     | `Container_of_void ty :: path -> take path @@ container_of_void u ty
 
-  let rec inv =
+  let inv =
     let rec loop acc =
       function
       | []                            -> acc
@@ -545,58 +547,64 @@ end = struct
       r
 
   (* Also used to retrieve return regions, only use from the inside(!) *)
-  let rec of_var =
-    let open H_v in
-    memoize ~find ~replace h_var @@
-    fun ?f v ->
-    if not (isStructOrUnionType v.vtype || isArrayType v.vtype || v.vaddrof || isPointerType v.vtype)
-    then `None
-    else
-      let u =
-        let typ =
-          if (v.vaddrof && not @@ isArrayType v.vtype) || isStructOrUnionType v.vtype
-          then Ty.normalize v.vtype
-          else Ty.deref_once v.vtype
+  let rec of_var ?f x =
+    let of_var =
+      let open! H_v in
+      memoize ~find ~replace h_var @@
+      fun ?f v ->
+      if not (isStructOrUnionType v.vtype || isArrayType v.vtype || v.vaddrof || isPointerType v.vtype)
+      then `None
+      else
+        let u =
+          let typ =
+            if (v.vaddrof && not @@ isArrayType v.vtype) || isStructOrUnionType v.vtype
+            then Ty.normalize v.vtype
+            else Ty.deref_once v.vtype
+          in
+          U.of_repr @@
+          match unrollType v.vtype, f with
+          | TPtr (TFun (rt, _ ,_ ,_), _) , _
+            when not (isStructOrUnionType rt)                    -> R.poly ("!" ^ v.vname ^ "!") v.vname typ
+          | TPtr (TFun _, _), _                                  -> R.local ("!" ^ v.vname ^ "!") v.vname typ
+          | _, Some f
+            when v.vformal
+              && not (isStructOrUnionType v.vtype || v.vaddrof)  -> R.poly f v.vname typ
+          | _, Some f when v.vformal                             -> R.local f v.vname typ
+          | _, _ when v.vglob                                    -> R.global v.vname typ
+          | _, Some f                                            -> R.local f v.vname typ
+          | _                                                    ->
+            Console.fatal "Region.of_var: a local or formal variable should be supplied with function name: %s" v.vname
         in
-        U.of_repr @@
-        match unrollType v.vtype, f with
-        | TPtr (TFun (rt, _ ,_ ,_), _) , _
-          when not (isStructOrUnionType rt)                    -> R.poly ("!" ^ v.vname ^ "!") v.vname typ
-        | TPtr (TFun _, _), _                                  -> R.local ("!" ^ v.vname ^ "!") v.vname typ
-        | _, Some f
-          when v.vformal
-            && not (isStructOrUnionType v.vtype || v.vaddrof)  -> R.poly f v.vname typ
-        | _, Some f when v.vformal                             -> R.local f v.vname typ
-        | _, _ when v.vglob                                    -> R.global v.vname typ
-        | _, Some f                                            -> R.local f v.vname typ
-        | _                                                    ->
-          Console.fatal "Region.of_var: a local or formal variable should be supplied with function name: %s" v.vname
-      in
-      if isStructOrUnionType v.vtype || isArrayType v.vtype || v.vaddrof
-      then `Location (u, resolve_addressible v.vaddrof v.vtype u)
-      else `Value u
-  and of_string =
-    let open H_s in
-    memoize ~find ~replace h_str @@
-    fun ?f s ->
-    let u =
-      let s' =
-        match s with
-        | `S s -> s
-        | `WS s ->
-          String.concat "" @@
-          List.map
-            (fun wc ->
-               String.init
-                 8
-                 (fun i ->
-                    let sh = 56 - 8 * i in
-                    Char.chr Int64.(to_int @@ shift_right_logical (logand wc @@ shift_left 0xFFL sh) sh)))
-            s
-      in
-      U.of_repr @@ R.global ("\"" ^ s' ^ "\"") (match s with `S _ -> charType | `WS _ -> theMachine.wcharType)
+        if isStructOrUnionType v.vtype || isArrayType v.vtype || v.vaddrof
+        then `Location (u, resolve_addressible v.vaddrof v.vtype u)
+        else `Value u
     in
-    `Location (u, fun () -> `Value u)
+    of_var ?f x
+  and of_string x =
+    let of_string =
+      let open! H_s in
+      memoize ~find ~replace h_str @@
+      fun ?f:_ s ->
+      let u =
+        let s' =
+          match s with
+          | `S s -> s
+          | `WS s ->
+            String.concat "" @@
+            List.map
+              (fun wc ->
+                 String.init
+                   8
+                   (fun i ->
+                      let sh = 56 - 8 * i in
+                      Char.chr Int64.(to_int @@ shift_right_logical (logand wc @@ shift_left 0xFFL sh) sh)))
+              s
+        in
+        U.of_repr @@ R.global ("\"" ^ s' ^ "\"") (match s with `S _ -> charType | `WS _ -> theMachine.wcharType)
+      in
+      `Location (u, fun () -> `Value u)
+    in
+    of_string x
   and value =
     let counter = ref ~-1 in
     fun ?f ty ->
@@ -621,183 +629,190 @@ end = struct
     function
     | `Location (u, _)     -> u
     | `Value _ | `None     -> Console.fatal "Analysis.location: got value where memory location is needed"
-  and of_lval =
-    let open H_l in
-    memoize ~find ~replace h_lval @@
-    fun ?f lv ->
-    let of_lval = of_lval ?f in
-    let of_expr = of_expr ?f in
-    let value = value ?f in
-    let lv', off = removeOffsetLval lv in
-    let no_offset () =
-      match fst lv' with
-      | Var v -> of_var v
-      | Mem e -> let u = value (typeOf e) (of_expr e) in `Location (u, fun () -> deref u)
+  and of_lval ?f x =
+    let of_lval =
+      let open! H_l in
+      memoize ~find ~replace h_lval @@
+      fun ?f lv ->
+      let of_lval = of_lval ?f in
+      let of_expr = of_expr ?f in
+      let value = value ?f in
+      let lv', off = removeOffsetLval lv in
+      let no_offset () =
+        match fst lv' with
+        | Var v -> of_var v
+        | Mem e -> let u = value (typeOf e) (of_expr e) in `Location (u, fun () -> deref u)
+      in
+      let struct_field fi =
+        let u = location (of_lval lv') in
+        if fi.faddrof || isStructOrUnionType fi.ftype || isArrayType fi.ftype
+        then let u = dot u fi in `Location (u, resolve_addressible fi.faddrof fi.ftype u)
+        else `Location (u, fun () -> if isPointerType fi.ftype then `Value (arrow u fi) else `None)
+      in
+      let subunion () =
+        let u = location (of_lval lv') in
+        `Location (u, fun () -> `None)
+      in
+      let union_field fi =
+        let u = container_of_void (location (of_lval lv')) fi.ftype in
+        `Location (u,
+                   if isArrayType fi.ftype        then fun () -> `Value u
+                   else if isPointerType fi.ftype then fun () -> deref u
+                   else                                fun () -> `None)
+      in
+      let index () =
+        let u = of_lval lv' in
+        let ty = typeOfLval lv in
+        if isArrayType ty
+        then u
+        else let v = value ty u in `Location (v, fun () -> deref v)
+      in
+      match off with
+      | NoOffset                                       -> no_offset ()
+      | Field (fi, NoOffset) when fi.fcomp.cstruct     -> struct_field fi
+      | Field (fi, NoOffset) when Ty.is_union fi.ftype -> subunion ()
+      | Field (fi, NoOffset)                           -> union_field fi
+      | Index (_, NoOffset)                            -> index ()
+      | _                                              -> Console.fatal "Region.of_lval: broken invariant: \
+                                                                         remaining offset after removeOffsetLval"
     in
-    let struct_field fi =
-      let u = location (of_lval lv') in
-      if fi.faddrof || isStructOrUnionType fi.ftype || isArrayType fi.ftype
-      then let u = dot u fi in `Location (u, resolve_addressible fi.faddrof fi.ftype u)
-      else `Location (u, fun () -> if isPointerType fi.ftype then `Value (arrow u fi) else `None)
-    in
-    let subunion () =
-      let u = location (of_lval lv') in
-      `Location (u, fun () -> `None)
-    in
-    let union_field fi =
-      let u = container_of_void (location (of_lval lv')) fi.ftype in
-      `Location (u,
-                 if isArrayType fi.ftype        then fun () -> `Value u
-                 else if isPointerType fi.ftype then fun () -> deref u
-                 else                                fun () -> `None)
-    in
-    let index () =
-      let u = of_lval lv' in
-      let ty = typeOfLval lv in
-      if isArrayType ty
-      then u
-      else let v = value ty u in `Location (v, fun () -> deref v)
-    in
-    match off with
-    | NoOffset                                       -> no_offset ()
-    | Field (fi, NoOffset) when fi.fcomp.cstruct     -> struct_field fi
-    | Field (fi, NoOffset) when Ty.is_union fi.ftype -> subunion ()
-    | Field (fi, NoOffset)                           -> union_field fi
-    | Index (_, NoOffset)                            -> index ()
-    | _                                              -> Console.fatal "Region.of_lval: broken invariant: \
-                                                                       remaining offset after removeOffsetLval"
-  and of_expr =
-    let match_container_of1 =
-      let rec match_offset ?(acc=[]) =
+    of_lval ?f x
+  and of_expr ?f x =
+    let of_expr =
+      let match_container_of1 =
+        let rec match_offset ?(acc=[]) =
+          function
+          | NoOffset when acc <> [] -> Some acc
+          | NoOffset -> None
+          | Field (fi, off) -> match_offset ~acc:(fi :: acc) off
+          | Index _ -> None
+        in
         function
-        | NoOffset when acc <> [] -> Some acc
-        | NoOffset -> None
-        | Field (fi, off) -> match_offset ~acc:(fi :: acc) off
-        | Index _ -> None
+        | CastE (pstr, _,
+                 { enode = BinOp (MinusPI,
+                                  { enode = CastE (chrptr, _, mptr); _ },
+                                  { enode =
+                                      CastE (size_t, _,
+                                             { enode = AddrOf (Mem { enode = CastE (pstr', _, zero); _ }, off); _ });
+                                    _ }, _); _ })
+          when
+            isPointerType pstr && isPointerType pstr' && isCharPtrType chrptr && isPointerType (typeOf mptr) &&
+            not (need_cast theMachine.typeOfSizeOf size_t) && isZero zero &&
+            let str = Ast_info.pointed_type pstr and str' = Ast_info.pointed_type pstr' in
+            match unrollType str, unrollType str' with
+            | TComp (ci, _ ,_), TComp (ci', _, _)
+              when ci.cstruct && ci'.cstruct && Compinfo.equal ci ci' -> true
+            | _ -> false
+          ->
+          opt_map (fun off -> mptr, off) @@ match_offset off
+        | _ -> None
       in
-      function
-      | CastE (pstr, _,
-               { enode = BinOp (MinusPI,
-                                { enode = CastE (chrptr, _, mptr) },
-                                { enode =
-                                    CastE (size_t, _,
-                                           { enode = AddrOf (Mem { enode = CastE (pstr', _, zero) }, off) }) },
-                                _) })
-        when
-          isPointerType pstr && isPointerType pstr' && isCharPtrType chrptr && isPointerType (typeOf mptr) &&
-          not (need_cast theMachine.typeOfSizeOf size_t) && isZero zero &&
-          let str = Ast_info.pointed_type pstr and str' = Ast_info.pointed_type pstr' in
-          match unrollType str, unrollType str' with
-          | TComp (ci, _ ,_), TComp (ci', _, _)
-            when ci.cstruct && ci'.cstruct && Compinfo.equal ci ci' -> true
-          | _ -> false
-        ->
-        opt_map (fun off -> mptr, off) @@ match_offset off
-      | _ -> None
-    in
-    let match_container_of2 =
-      function
-      | BinOp ((PlusPI | IndexPI),
-               { enode  = CastE (pstr, _, e) },
-               { enode = Const (CInt64 (c, IULongLong, _)) }, _) ->
-        begin match unrollType pstr, unrollType (typeOf e) with
-        | TComp (ci, _, _), (TPtr _ | TArray _ as ty) when ci.cstruct ->
-          begin try
-            Some (e, H_field.find I.fields_of_key (ci, ty, c))
-          with
-          | Not_found -> None
+      let match_container_of2 =
+        function
+        | BinOp ((PlusPI | IndexPI),
+                 { enode  = CastE (pstr, _, e); _ },
+                 { enode = Const (CInt64 (c, IULongLong, _)); _ }, _) ->
+          begin match unrollType pstr, unrollType (typeOf e) with
+          | TComp (ci, _, _), (TPtr _ | TArray _ as ty) when ci.cstruct ->
+            begin try
+              Some (e, H_field.find I.fields_of_key (ci, ty, c))
+            with
+            | Not_found -> None
+            end
+          | _ -> None
           end
         | _ -> None
-        end
-      | _ -> None
-    in
-    let match_dot =
-      function
-      | BinOp ((PlusPI | IndexPI),
-               { enode = CastE (chrptr, _, e) },
-               { enode = Const (CInt64 (c, IULongLong, _)) }, _)
-        when isCharPtrType chrptr && isPointerType (typeOf e) ->
-        let ty = Ast_info.pointed_type (typeOf e) in
-        begin match unrollType ty with
-        | TComp (ci, _ ,_) ->
-          begin try
-            Some (e, H_field.find I.fields_of_key (ci, uintType, c))
-          with
-          | Not_found -> None
+      in
+      let match_dot =
+        function
+        | BinOp ((PlusPI | IndexPI),
+                 { enode = CastE (chrptr, _, e); _ },
+                 { enode = Const (CInt64 (c, IULongLong, _)); _ }, _)
+          when isCharPtrType chrptr && isPointerType (typeOf e) ->
+          let ty = Ast_info.pointed_type (typeOf e) in
+          begin match unrollType ty with
+          | TComp (ci, _ ,_) ->
+            begin try
+              Some (e, H_field.find I.fields_of_key (ci, uintType, c))
+            with
+            | Not_found -> None
+            end
+          | _ -> None
           end
         | _ -> None
-        end
-      | _ -> None
 
+      in
+      let open! H_e in
+      memoize ~find ~replace h_expr @@
+      fun ?f e ->
+      let of_lval = of_lval ?f in
+      let of_expr = of_expr ?f in
+      let value = value ?f in
+      if not @@ isPointerType @@ typeOf e
+      then `None
+      else
+        let container_of e fis =
+          let u = List.fold_left container (value (typeOf e) (of_expr e)) fis in
+          `Value u
+        in
+        let dot e fis =
+          let u = List.fold_left dot (value (typeOf e) (of_expr e)) fis in
+          `Value u
+        in
+        let cast ty e =
+          let ty' = typeOf e in
+          let r = of_expr e in
+          if Ty.compatible ty ty' then r
+          else (* Both can't be void */union since they are compatible! *)
+            let r = value ty' r in
+            match unrollType ty, unrollType ty' with
+            | (TVoid _ | TComp ({ cstruct = false; _ }, _, _)), _  -> `Value (dot_void r)
+            | ty, (TVoid _ | TComp ({ cstruct = false; _ }, _, _)) -> `Value (container_of_void r @@ Ty.deref_once ty)
+            | ty, ty' ->
+              match Ci.(match_deep_first_subfield_of ty ty', match_deep_first_subfield_of ty' ty) with
+              | Some path, _                                       -> `Value (take path r)
+              | _,         Some path                               -> `Value (take (inv path) r)
+              | _                                                  -> `Value (container_of_void
+                                                                                (dot_void r)
+                                                                                (Ty.deref_once ty))
+
+        in
+        match match_container_of1 e.enode, match_container_of2 e.enode, match_dot e.enode with
+        | Some (e, fis), _, _
+        | _, Some (e, fis), _               -> container_of e fis
+        | _, _, Some (e, fis)               -> dot e fis
+        | None, None, None                  ->
+          match e.enode with
+          | Const (CStr s)                  -> of_string (`S s)
+          | Const (CWStr ws)                -> of_string (`WS ws)
+          | Const (CInt64 _ | CEnum _
+                  | CChr _ | CReal _ )      -> assert false
+          | Lval lv                         -> `Value (location @@ of_lval lv)
+          | SizeOf _
+          | SizeOfE _
+          | SizeOfStr _
+          | AlignOf _
+          | AlignOfE _
+          | UnOp _                          -> assert false
+          | BinOp ((PlusPI | IndexPI
+                   | MinusPI), e, _, _)     -> `Value (value (typeOf e) (of_expr e))
+          | BinOp ((PlusA _ |MinusA _
+                   | MinusPP
+                   | Mult _ | Div _
+                   | Mod _
+                   | Shiftlt _ | Shiftrt
+                   | Lt | Gt | Le | Ge
+                   | Eq | Ne
+                   | BAnd | BXor | BOr
+                   | LAnd | LOr ), _, _, _) -> assert false
+
+          | AddrOf lv
+          | StartOf lv                      -> `Value (location @@ of_lval lv)
+          | Info (e, _)                     -> of_expr e
+          | CastE (ty, _, e)                -> cast ty e
     in
-    let open H_e in
-    memoize ~find ~replace h_expr @@
-    fun ?f e ->
-    let of_lval = of_lval ?f in
-    let of_expr = of_expr ?f in
-    let value = value ?f in
-    if not @@ isPointerType @@ typeOf e
-    then `None
-    else
-      let container_of e fis =
-        let u = List.fold_left container (value (typeOf e) (of_expr e)) fis in
-        `Value u
-      in
-      let dot e fis =
-        let u = List.fold_left dot (value (typeOf e) (of_expr e)) fis in
-        `Value u
-      in
-      let cast ty e =
-        let ty' = typeOf e in
-        let r = of_expr e in
-        if Ty.compatible ty ty' then r
-        else (* Both can't be void */union since they are compatible! *)
-          let r = value ty' r in
-          match unrollType ty, unrollType ty' with
-          | (TVoid _ | TComp ({ cstruct = false; _ }, _, _)), _  -> `Value (dot_void r)
-          | ty, (TVoid _ | TComp ({ cstruct = false; _ }, _, _)) -> `Value (container_of_void r @@ Ty.deref_once ty)
-          | ty, ty' ->
-            match Ci.(match_deep_first_subfield_of ty ty', match_deep_first_subfield_of ty' ty) with
-            | Some path, _                                       -> `Value (take path r)
-            | _,         Some path                               -> `Value (take (inv path) r)
-            | _                                                  -> `Value (container_of_void
-                                                                              (dot_void r)
-                                                                              (Ty.deref_once ty))
+    of_expr ?f x
 
-      in
-      match match_container_of1 e.enode, match_container_of2 e.enode, match_dot e.enode with
-      | Some (e, fis), _, _
-      | _, Some (e, fis), _               -> container_of e fis
-      | _, _, Some (e, fis)               -> dot e fis
-      | None, None, None                  ->
-        match e.enode with
-        | Const (CStr s)                  -> of_string (`S s)
-        | Const (CWStr ws)                -> of_string (`WS ws)
-        | Const (CInt64 _ | CEnum _
-                | CChr _ | CReal _ )      -> assert false
-        | Lval lv                         -> `Value (location @@ of_lval lv)
-        | SizeOf _
-        | SizeOfE _
-        | SizeOfStr _
-        | AlignOf _
-        | AlignOfE _
-        | UnOp _                          -> assert false
-        | BinOp ((PlusPI | IndexPI
-                 | MinusPI), e, _, _)     -> `Value (value (typeOf e) (of_expr e))
-        | BinOp ((PlusA _ |MinusA _
-                 | MinusPP
-                 | Mult _ | Div _
-                 | Mod _
-                 | Shiftlt _ | Shiftrt
-                 | Lt | Gt | Le | Ge
-                 | Eq | Ne
-                 | BAnd | BXor | BOr
-                 | LAnd | LOr ), _, _, _) -> assert false
-
-        | AddrOf lv
-        | StartOf lv                      -> `Value (location @@ of_lval lv)
-        | Info (e, _)                     -> of_expr e
-        | CastE (ty, _, e)                -> cast ty e
 end
 
 

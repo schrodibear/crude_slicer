@@ -112,7 +112,7 @@ open Extlib
 
 module Ty = struct
   let is_union ty =
-    match unrollType ty with
+    match[@warning "-4"] unrollType ty with
     | TComp ({ cstruct = false; _ }, _, _) -> true
     | _                                    -> false
 
@@ -195,11 +195,11 @@ module Ci = struct
       if Ty.compatible typ typ' then Some (List.rev acc)
       else
         let union fields = List.find_map (fun fi -> loop (`Container_of_void fi.ftype :: acc) fi.ftype) fields in
-        match unrollType typ with
-        | TComp ({ cstruct = true; cfields = fi :: _ }, _, _) -> loop (`Field fi :: acc) fi.ftype
-        | TComp ({ cstruct = true; cfields = [] }, _, _)      -> None
-        | TComp ({ cstruct = false; cfields }, _, _)          -> union cfields
-        | _                                                   -> None
+        match[@warning "-4"] unrollType typ with
+        | TComp ({ cstruct = true; cfields = fi :: _; _ }, _, _) -> loop (`Field fi :: acc) fi.ftype
+        | TComp ({ cstruct = true; cfields = []; _ }, _, _)      -> None
+        | TComp ({ cstruct = false; cfields; _ }, _, _)          -> union cfields
+        | _                                                      -> None
     in
     loop [] %>
     opt_map
@@ -215,7 +215,7 @@ module Ci = struct
     let rec do_struct path ci =
       concat_map
         (fun fi ->
-           match unrollType fi.ftype with
+           match[@warning "-4"] unrollType fi.ftype with
            | TComp (ci, _, _)  -> do_ci (`Field fi :: path) ci
            | _ when fi.faddrof -> [`Field fi :: path, None]
            | _                 -> [path, Some fi])
@@ -224,7 +224,7 @@ module Ci = struct
       concat_map
         (fun fi ->
            let container_of_void ty = `Container_of_void ty in
-           match unrollType fi.ftype with
+           match[@warning "-4"] unrollType fi.ftype with
            | TComp (ci, _, _) as ty -> do_ci (container_of_void ty :: path) ci
            | ty                     -> [container_of_void ty :: path, None])
         ci.cfields
@@ -245,4 +245,11 @@ module Ci = struct
             | _                                              -> false)
            path1 path2) |>
     map (fst % hd)
+end
+
+module Kf = struct
+  let mem vi =
+    try
+      ignore @@ Globals.Functions.get vi; true
+    with Not_found ->                     false
 end
