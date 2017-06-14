@@ -114,7 +114,7 @@ module Representant = struct
       Console.fatal "Representant.report: trying to set dummy region as representant: %s of %s" r1.name r2.name;
     if r2.kind <> `Dummy then Flag.report flag
 
-  let all_void_xs =
+  let all_void_xs () =
     H.fold
       (fun r n ->
          let rec insert r n l =
@@ -838,7 +838,7 @@ end = struct
           ignore @@ H'.find u' h
         with
         | Not_found ->
-          let open Separation in
+          let open! Separation in
           arrows (fun fi u' -> unify (arrow u fi) u') u';
           derefs (fun u' -> unify (deref u) u') u';
           H'.add u u h;
@@ -891,6 +891,51 @@ end = struct
                                             pp_exp e
            | _                         -> [])
       exprs
+
+  let unify_exprs ?f e1 e2 =
+    let unify_comps ci lv1 lv2 =
+      let u1, u2 = map_pair (location % of_lval ?f) (lv1, lv2) in
+      List.iter (fun path -> uncurry unify @@ map_pair (take path) (u1, u2)) (Ci.all_regions ci)
+    in
+    match e1.enode, e2.enode, unrollType (typeOf e1) with
+    | Lval lv1, Lval lv2, TComp (ci, _, _)    -> unify_comps ci lv1 lv2
+    | _                                       ->
+      match of_expr ?f e1, of_expr ?f e2 with
+      | `Value u1, `Value u2                  -> unify u1 u2
+      | _                                     -> ()
+
+  let unify_voids =
+    let open List in
+    let containers_of_void = reify containers_of_void (fun add _ u -> add u) in
+    let first_substruct fi = reify arrows (fun add fi' u -> if Fieldinfo.equal fi fi' then add u) in
+    let derefs = reify derefs (@@) in
+    let dot_voids = reify dot_voids (@@) in
+    fun f ->
+      List.iter
+        (fun (n, rs) ->
+           let unify u =
+             ignore @@
+             if n = 0 then
+               containers_of_void u >>= fun u' ->
+               begin match unrollType (U.repr u').R.typ with
+               | TComp ({ cfields = fi :: _; cstruct = true; _ }, _ ,_)  -> first_substruct fi u'
+               | TComp ({ cfields = fi :: _; cstruct = false; _ }, _ ,_) -> assert false
+               | _                                                       -> []
+               end >>= fun u' ->
+               dot_voids u' >>= fun u' ->
+               [unify u u']
+             else
+               containers_of_void u >>= fun u' ->
+               let ty', n' = Ty.deref (U.repr u').R.typ in
+               (if n' = n then [u'] else []) >>= fun u' ->
+               derefs u' >>= fun u' ->
+               derefs u >>= fun u ->
+               containers_of_void u >>= fun u ->
+               let ty'', n'' = Ty.deref (U.repr u).R.typ in
+               if n'' = n' - 1 && Ty.compatible ty' ty'' then [unify u u'] else []
+           in
+           List.iter (unify % U.of_repr) rs)
+        (R.all_void_xs ())
 end
 
 

@@ -87,6 +87,13 @@ module List = struct
       | hd :: tl -> aux (rev_append (f hd) acc) tl
     in
     aux []
+
+  let (>>=) l f = concat_map f l
+
+  let reify iter f u =
+    let r = ref [] in
+    iter (f @@ fun u -> r := u :: !r) u;
+    !r
 end
 
 module String = struct
