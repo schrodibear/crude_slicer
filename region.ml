@@ -370,9 +370,15 @@ module Separation : sig
   val dot_void : U.t -> U.t
   val container : U.t -> fieldinfo -> U.t
   val container_of_void : U.t -> typ -> U.t
+  val arrows : (fieldinfo -> U.t -> unit) -> U.t -> unit
+  val derefs : (U.t -> unit) -> U.t -> unit
+  val dots : (fieldinfo -> U.t -> unit) -> U.t -> unit
+  val dot_voids : (U.t -> unit) -> U.t -> unit
+  val containers : (fieldinfo -> U.t -> unit) -> U.t -> unit
+  val containers_of_void : (typ -> U.t -> unit) -> U.t -> unit
   val unify : U.t -> U.t -> unit
   val duplicate : map:H'.t -> U.t -> Unifiable.t
-  val accomodate : U.t list -> on:U.t list -> unit
+  val accomodate : map:H'.t -> U.t list -> on:U.t list -> unit
   val replay : map:H'.t -> U.t list -> on:U.t list -> unit
 end = struct
   let h_arrow = H_f.create ()
@@ -394,6 +400,13 @@ end = struct
   let container_of_void u ty =
     let ty = Ty.normalize ty in
     H_t.find_or_call ~create:R.container_of_void ~call:(fun u _ u' -> H'.add u u' h_dot_void) h_container_of_void u ty
+
+  let arrows f u = H_f.iter f u h_arrow
+  let derefs f u = H'.iter f u h_deref
+  let dots f u = H_f.iter f u h_dot
+  let dot_voids f u = H'.iter f u h_dot_void
+  let containers f u = H_f.iter f u h_container
+  let containers_of_void f u = H_t.iter f u h_container_of_void
 
   type 'k handler2 = (U.t -> 'k -> U.t) -> U.t -> 'k -> U.t -> unit
 
@@ -468,11 +481,7 @@ end = struct
       handle_all ~handle1 ~handle2 u u';
       u'
 
-  let accomodate =
-    let map = H'.create () in
-    fun regs ~on ->
-      H'.clear map;
-      List.iter2 (fun clone -> ignore % duplicate ~map ~clone) on regs
+  let accomodate ~map regs ~on = List.iter2 (fun clone -> ignore % duplicate ~map ~clone) on regs
 
   let duplicate ~map u = duplicate ~map u
 
@@ -605,26 +614,25 @@ end = struct
       `Location (u, fun () -> `Value u)
     in
     of_string x
-  and value =
+  and fresh =
     let counter = ref ~-1 in
     fun ?f ty ->
-      let fresh () =
-        incr counter;
-        let name = "fresh#" ^ string_of_int !counter in
-        let ty = Ty.deref_once ty in
-        U.of_repr @@
-        match f with
-        | Some f -> R.local f name ty
-        | None   -> R.global name ty
-      in
-      function
-      | `Location (_, get) ->
-        begin match get () with
-        | `Value u         -> u
-        | `None            -> fresh ()
-        end
-      | `Value u           -> u
-      | `None              -> fresh ()
+      incr counter;
+      let name = "fresh#" ^ string_of_int !counter in
+      let ty = Ty.deref_once ty in
+      U.of_repr @@
+      match f with
+      | Some f -> R.local f name ty
+      | None   -> R.global name ty
+  and value : 'a. ?f:_ -> _ -> ([< `Location of _ | `Value of _ | `None ] as 'a) -> _ = fun ?f ty ->
+    function
+    | `Location (_, get) ->
+      begin match get () with
+      | `Value u         -> u
+      | `None            -> fresh ?f ty
+      end
+    | `Value u           -> u
+    | `None              -> fresh ?f ty
   and location =
     function
     | `Location (u, _)     -> u
@@ -636,7 +644,7 @@ end = struct
       fun ?f lv ->
       let of_lval = of_lval ?f in
       let of_expr = of_expr ?f in
-      let value = value ?f in
+      let value r = value ?f r in
       let lv', off = removeOffsetLval lv in
       let no_offset () =
         match fst lv' with
@@ -747,7 +755,7 @@ end = struct
       fun ?f e ->
       let of_lval = of_lval ?f in
       let of_expr = of_expr ?f in
-      let value = value ?f in
+      let value r = value ?f r in
       if not @@ isPointerType @@ typeOf e
       then `None
       else
@@ -783,8 +791,8 @@ end = struct
         | _, _, Some (e, fis)               -> dot e fis
         | None, None, None                  ->
           match e.enode with
-          | Const (CStr s)                  -> of_string (`S s)
-          | Const (CWStr ws)                -> of_string (`WS ws)
+          | Const (CStr s)                  -> `Value (value (typeOf e) @@ of_string @@ `S s)
+          | Const (CWStr ws)                -> `Value (value (typeOf e) @@ of_string @@ `WS ws)
           | Const (CInt64 _ | CEnum _
                   | CChr _ | CReal _ )      -> assert false
           | Lval lv                         -> `Value (location @@ of_lval lv)
@@ -813,6 +821,76 @@ end = struct
     in
     of_expr ?f x
 
+  module H_k = Kernel_function.Hashtbl
+
+  let h_params = H_k.create 1024
+
+  let h_maps = H_k.create 1024
+
+  let param_regions =
+    let module Kf = Kernel_function in
+    let h_var = H_v.create 512 in
+    let maps = H_k.create 512 in
+    let unify_pointed u' u =
+      let h = H'.create () in
+      let rec unify_pointed ?(retain_h=H'.clear h) u' u =
+        try
+          ignore @@ H'.find u' h
+        with
+        | Not_found ->
+          let open Separation in
+          arrows (fun fi u' -> unify (arrow u fi) u') u';
+          derefs (fun u' -> unify (deref u) u') u';
+          H'.add u u h;
+          dots (fun fi u' -> unify_pointed u' @@ dot u fi) u';
+          dot_voids (fun u' -> unify_pointed u' @@ dot_void u) u';
+          containers (fun fi u' -> unify_pointed u' @@ container u fi) u';
+          containers_of_void (fun ty u' -> unify_pointed u' @@ container_of_void u ty) u'
+      in
+      unify_pointed u' u
+    in
+    fun kf ->
+      let params = Kf.get_formals kf in
+      let comp_regions vi =
+        let u', u =
+          let open H_v in
+          let f = Kf.get_name kf in
+          location @@ of_var ~f vi,
+          memo h_var vi (fun vi -> U.of_repr @@ R.poly f vi.vname @@ Ty.normalize vi.vtype)
+        in
+        let map = H_k.memo maps kf (fun _ -> H'.create ()) in
+        accomodate ~map [u'] ~on:[u];
+        unify_pointed u' u;
+        match unrollType vi.vtype with
+        | TComp (ci, _, _) -> List.map (swap take @@ u) (Ci.all_regions ci)
+        | ty -> Console.fatal "Region.Analysis.comp_regions: not a composite param, but %a" pp_typ ty
+      in
+      List.concat_map
+        (fun vi ->
+           match of_var vi with
+           | `Location (_, get)                ->
+             begin match get () with
+             | `Value u                        -> [u]
+             | `None                           -> []
+             end
+           | `Value u                          -> [u]
+           | `None
+             when isStructOrUnionType vi.vtype -> comp_regions vi
+           | `None                             -> [])
+        params
+
+  let arg_regions ?f exprs =
+    List.concat_map
+      (fun e ->
+         match of_expr ?f e with
+         | `Value u                    -> [u]
+         | `None                       ->
+           match unrollType (typeOf e), e.enode with
+           | TComp (ci, _, _), Lval lv -> List.map (swap take @@ location @@ of_lval ?f lv) (Ci.all_regions ci)
+           | TComp _,          _       -> Console.fatal "Unexpected non-lvalue struct expression `%a'"
+                                            pp_exp e
+           | _                         -> [])
+      exprs
 end
 
 
