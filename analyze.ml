@@ -6,6 +6,8 @@
 (*                                                                        *)
 (**************************************************************************)
 
+[@@@warning "-48"]
+
 open Cil
 open Cil_types
 open Visitor
@@ -31,7 +33,7 @@ let get_addressed_kfs =
               List.iter (ignore % visitFramacExpr (self :> frama_c_visitor)) args;
               SkipChildren
             in
-            function
+            function[@warning "-4"]
             | Call (lv, { enode = Lval (Var vi, NoOffset); _ }, args, _)
               when Kf.mem vi                                             -> avoid_direct_call lv args
             | Call _ | Set _ | Asm _ | Skip _ | Code_annot _             -> DoChildren
@@ -53,13 +55,16 @@ let get_addressed_kfs =
       r
     | Some r -> r
 
-let filter_matching_kfs params =
+let filter_matching_kfs lvo params =
+  let ltyp = may_map typeOfLval ~dft:voidType lvo in
+  let open Kernel_function in
+  let open List in
   get_addressed_kfs () |>
-  List.filter
+  filter
     (fun kf ->
-       let formals = Kernel_function.get_formals kf in
-       if Kernel_function.is_definition kf && List.(length formals = length params) then
-         List.for_all2 (fun vi e -> not @@ need_cast vi.vtype @@ typeOf e) formals params
+       let rt, tformals = get_return_type kf, map (fun vi -> vi.vtype) @@ get_formals kf in
+       if is_definition kf && length tformals = length params
+       then for_all2 (not %% need_cast) (rt :: tformals) (ltyp :: map typeOf params)
        else false)
 
 let condensate () =

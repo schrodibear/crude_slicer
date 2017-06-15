@@ -47,6 +47,9 @@ let const f _x = f
 let const' f x _y = f x
 let curry f a b = f (a, b)
 
+let on cond f x = if cond x then f x else ()
+let tap f e = f e; e
+
 let map_fst f (a, b) = f a, b
 let map_snd f (a, b) = a, f b
 let map_pair f (a, b) = f a, f b
@@ -94,6 +97,8 @@ module List = struct
     let r = ref [] in
     iter (f @@ fun u -> r := u :: !r) u;
     !r
+
+  let singleton x = [x]
 end
 
 module String = struct
@@ -255,6 +260,7 @@ module Ci = struct
 end
 
 module Kf = struct
+  include Cil_datatype.Kf
   let mem vi =
     try
       ignore @@ Globals.Functions.get vi; true

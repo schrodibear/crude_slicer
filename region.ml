@@ -6,7 +6,7 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "-4-6"]
+[@@@warning "-4-6"]
 
 open Cil
 open Cil_types
@@ -14,7 +14,7 @@ open Cil_printer
 open Cil_datatype
 
 open Extlib
-open Common
+open! Common
 
 module Representant = struct
   module Kind = struct
@@ -472,14 +472,17 @@ end = struct
     and handle2 = object
       method f : 'k. 'k handler2 = fun f u k u' -> ignore @@ duplicate ~map ~clone:(f u k) u'
     end in
-    try
-      H'.find u map
-    with
-    | Not_found ->
-      let u' = may_map id ~dft:(U.of_repr @@ R.template (U.repr u)) clone in
-      H'.add u u' map;
-      handle_all ~handle1 ~handle2 u u';
-      u'
+    if (U.repr u).R.kind = `Global
+    then u
+    else
+      try
+        H'.find u map
+      with
+      | Not_found ->
+        let u' = may_map id ~dft:(U.of_repr @@ R.template (U.repr u)) clone in
+        H'.add u u' map;
+        handle_all ~handle1 ~handle2 u u';
+        u'
 
   let accomodate ~map regs ~on = List.iter2 (fun clone -> ignore % duplicate ~map ~clone) on regs
 
@@ -571,18 +574,20 @@ end = struct
             else Ty.deref_once v.vtype
           in
           U.of_repr @@
-          match unrollType v.vtype, f with
+          match typ, f with
           | TPtr (TFun (rt, _ ,_ ,_), _) , _
-            when not (isStructOrUnionType rt)                    -> R.poly ("!" ^ v.vname ^ "!") v.vname typ
-          | TPtr (TFun _, _), _                                  -> R.local ("!" ^ v.vname ^ "!") v.vname typ
+            when not (isStructOrUnionType rt)               -> R.poly ("!" ^ v.vname ^ "!") v.vname typ
+          | TPtr (TFun _, _), _                             -> R.local ("!" ^ v.vname ^ "!") v.vname typ
           | _, Some f
             when v.vformal
-              && not (isStructOrUnionType v.vtype || v.vaddrof)  -> R.poly f v.vname typ
-          | _, Some f when v.vformal                             -> R.local f v.vname typ
-          | _, _ when v.vglob                                    -> R.global v.vname typ
-          | _, Some f                                            -> R.local f v.vname typ
-          | _                                                    ->
-            Console.fatal "Region.of_var: a local or formal variable should be supplied with function name: %s" v.vname
+              && not (isStructOrUnionType typ || v.vaddrof) -> R.poly f v.vname typ
+          | _, Some f when v.vformal                        -> R.local f v.vname typ
+          | _, _ when v.vglob                               -> R.global v.vname typ
+          | _, Some f                                       -> R.local f v.vname typ
+          | _                                               -> Console.fatal "Region.of_var: a local or formal \
+                                                                              variable should be supplied with \
+                                                                              function name: %s"
+                                                                 v.vname
         in
         if isStructOrUnionType v.vtype || isArrayType v.vtype || v.vaddrof
         then `Location (u, resolve_addressible v.vaddrof v.vtype u)
@@ -822,10 +827,11 @@ end = struct
     of_expr ?f x
 
   module H_k = Kernel_function.Hashtbl
+  module H_stmt = Stmt.Hashtbl
 
   let h_params = H_k.create 1024
 
-  let h_maps = H_k.create 1024
+  let h_maps = H_stmt.create 1024
 
   let param_regions =
     let module Kf = Kernel_function in
@@ -833,7 +839,7 @@ end = struct
     let maps = H_k.create 512 in
     let unify_pointed u' u =
       let h = H'.create () in
-      let rec unify_pointed ?(retain_h=H'.clear h) u' u =
+      let rec unify_pointed ?(_retain_h=H'.clear h) u' u =
         try
           ignore @@ H'.find u' h
         with
@@ -851,6 +857,11 @@ end = struct
     in
     fun kf ->
       let params = Kf.get_formals kf in
+      let retval =
+        if isVoidType @@ Kf.get_return_type kf
+        then []
+        else [Kf.get_vi kf]
+      in
       let comp_regions vi =
         let u', u =
           let open H_v in
@@ -877,9 +888,22 @@ end = struct
            | `None
              when isStructOrUnionType vi.vtype -> comp_regions vi
            | `None                             -> [])
-        params
+        (retval @ params)
 
-  let arg_regions ?f exprs =
+  let arg_regions ?f kf lvo exprs =
+    let retr =
+      let rtyp = Ty.normalize @@ Kernel_function.get_return_type kf in
+      if isVoidType rtyp
+      then []
+      else
+        match lvo, rtyp with
+        | None,    (TPtr _ | TComp _)  -> [value ?f rtyp `None]
+        | None,    _                   -> []
+        | Some lv, TPtr _              -> [value ?f rtyp @@ of_lval ?f lv]
+        | Some lv, TComp _             -> [location @@ of_lval ?f lv]
+        | Some _,  _                   -> []
+    in
+    retr @
     List.concat_map
       (fun e ->
          match of_expr ?f e with
@@ -919,7 +943,7 @@ end = struct
                containers_of_void u >>= fun u' ->
                begin match unrollType (U.repr u').R.typ with
                | TComp ({ cfields = fi :: _; cstruct = true; _ }, _ ,_)  -> first_substruct fi u'
-               | TComp ({ cfields = fi :: _; cstruct = false; _ }, _ ,_) -> assert false
+               | TComp ({ cstruct = false; _ }, _ ,_)                    -> assert false
                | _                                                       -> []
                end >>= fun u' ->
                dot_voids u' >>= fun u' ->
@@ -934,8 +958,140 @@ end = struct
                let ty'', n'' = Ty.deref (U.repr u).R.typ in
                if n'' = n' - 1 && Ty.compatible ty' ty'' then [unify u u'] else []
            in
-           List.iter (unify % U.of_repr) rs)
+           let relevant_region u =
+             if has_some f then
+               match (U.repr u).R.kind with
+               | `Global         -> true
+               | `Local f'
+               | `Poly f'
+                 when f' = the f -> true
+               | `Local _
+               | `Poly _
+               | `Dummy          -> false
+             else
+               match (U.repr u).R.kind with
+               | `Global         -> true
+               | `Local _
+               | `Poly _
+               | `Dummy          -> false
+           in
+           List.iter (on relevant_region unify % U.of_repr) rs)
         (R.all_void_xs ())
+
+  let replay_on_call ~stmt ?f kf lvo args =
+    let paramrs_argrs = H_k.memo h_params kf param_regions, arg_regions ?f kf lvo args in
+    let param_regions, arg_regions =
+      let open! List in
+      map_pair (take @@ uncurry min @@ map_pair length paramrs_argrs) paramrs_argrs
+    in
+    let map = H_stmt.memo h_maps stmt (fun _ -> H'.create ()) in
+    replay ~map param_regions ~on:arg_regions
+
+  let expr_of_lval =
+    let cache = H_l.create 4096 in
+    fun ~loc lv -> H_l.memo cache lv (fun lv -> new_exp ~loc @@ Lval lv)
+
+  open Visitor
+
+  class one_function_visitor fundec = object
+    inherit frama_c_inplace
+    method! vfunc fd =
+      if may_map (fun fd' -> Fundec.equal fd fd') ~dft:false fundec
+      then DoChildren
+      else SkipChildren
+  end
+
+  class unifier () fundec =
+    let f = opt_map (fun fd -> fd.svar.vname) fundec in
+    object
+      inherit frama_c_inplace
+      inherit! one_function_visitor fundec
+
+      method! vlval lv = ignore @@ of_lval ?f lv; DoChildren
+      method! vexpr e =
+        ignore @@ of_expr ?f e;
+        DoChildrenPost
+          (tap @@ fun e ->
+           match e.enode with
+           | BinOp ((Eq | Ne), e1, e2, _) -> unify_exprs ?f e1 e2
+           | _                            -> ())
+      method! vstmt _ =
+        DoChildrenPost
+          (tap @@ fun stmt ->
+             match stmt.skind with
+             | Instr (Set (lv, e, loc))                       -> unify_exprs ?f (expr_of_lval ~loc lv) e
+             | Instr
+                 (Call
+                    (lvo,
+                     { enode = Lval (Var vi, NoOffset); _  },
+                     args, _))
+               when Kf.mem vi                                 -> replay_on_call ~stmt ?f (Globals.Functions.get vi)
+                                                                   lvo args
+             | Instr (Call (lvo, _, args, _))                 -> List.iter
+                                                                   (fun kf -> replay_on_call ~stmt ?f kf lvo args)
+                                                                   (Analyze.filter_matching_kfs lvo args)
+             | Return (Some e, loc) when has_some fundec      -> unify_exprs ?f
+                                                                   (expr_of_lval ~loc (var (the fundec).svar)) e
+             | _                                              -> ())
+
+      method finish =
+        unify_voids f;
+        may
+          (fun fd ->
+             let kf = Globals.Functions.get fd.svar in
+             H_k.replace h_params kf @@ param_regions kf)
+          fundec
+    end
+
+  let pp =
+    let h_lv = H_l.create 1024 in
+    let h_exp = H_e.create 1024 in
+    fun fmttr fundec ->
+      let f = opt_map (fun f -> f.svar.vname) fundec in
+      H_l.clear h_lv;
+      H_e.clear h_exp;
+      let vis = object
+        inherit frama_c_inplace
+        inherit! one_function_visitor fundec
+
+        method! vlval _ =
+          DoChildrenPost
+            (tap @@ fun lv ->
+             H_l.memo h_lv lv @@ fun lv ->
+             match of_lval ?f lv with
+             | `None            -> ()
+             | `Location (u, _) -> Format.fprintf fmttr "%a@@%a;@ " pp_lval lv R.pp @@ U.repr u
+             | `Value u         -> Format.fprintf fmttr "%a\\%a;@ " pp_lval lv R.pp @@ U.repr u)
+        method! vexpr _ =
+          DoChildrenPost
+            (tap @@ fun e ->
+             H_e.memo h_exp e @@ fun e ->
+             match of_expr ?f e with
+             | `None    -> ()
+             | `Value u -> Format.fprintf fmttr "%a\\%a;@ " pp_exp e R.pp @@ U.repr u)
+      end in
+      match fundec with
+      | Some fundec -> ignore @@ visitFramacFunction vis fundec
+      | None        -> visitFramacFile vis (Ast.get ())
+
+  module Fixpoint =
+    Fixpoint.Make
+      (struct
+        module E = struct
+          type t = fundec
+          let pp fmttr fundec = pp fmttr (Some fundec)
+        end
+
+        type t = unit
+
+        let get _ _ fundec = fundec
+        let flag = R.flag
+      end)
+
+  let compute_regions () =
+    let sccs = Analyze.condensate () in
+    visitFramacFile (new unifier () None :> frama_c_visitor) @@ Ast.get ();
+    Fixpoint.visit_until_convergence ~order:`topological (fun () f -> new unifier () @@ Some f) () sccs
 end
 
 
