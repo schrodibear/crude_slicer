@@ -498,6 +498,24 @@ module Info = Info.Make (R) (U) ()
 module H_field = Info.H_field
 
 module Analysis (I : sig val fields_of_key : fieldinfo list H_field.t end) : sig
+  type ('a, 'b, 'c) path = [ `Field of 'a | `Container of 'b | `Container_of_void of 'c ]
+  type 'a maybe_region =
+    [< `Location of U.t * (unit -> [ `None | `Value of U.t ])
+    |  `Value of U.t
+    |  `None ] as 'a
+
+  val take : [< (fieldinfo, fieldinfo, typ) path ] list -> U.t -> U.t
+  val inv : [< ('a, 'b, 'c) path ] list -> [> ('b, 'a, 'c) path] list
+  val of_var : ?f:string -> varinfo -> [ `Location of _ | `Value of _  | `None ] maybe_region
+  val of_string : [ `S of string | `WS of int64 list ] -> [ `Location of _ ] maybe_region
+  val of_expr : ?f:string -> exp -> [ `Value of _ | `None ] maybe_region
+  val compute_regions : unit -> unit
+  module H_call : sig
+    type t
+    val find : U.t -> t -> U.t
+    val iter : (U.t -> unit) -> U.t -> t -> unit
+  end
+  val map : stmt -> H_call.t
 end = struct
   module H_v = Varinfo.Hashtbl
   module H_s =
@@ -533,6 +551,8 @@ end = struct
     else if isArrayType typ             then `Value u
     else                                     `None
 
+  type ('a, 'b, 'c) path = [ `Field of 'a | `Container of 'b | `Container_of_void of 'c ]
+
   let rec take path u =
     match path with
     | []                            -> u
@@ -540,7 +560,7 @@ end = struct
     | `Container fi ::         path -> take path @@ container u fi
     | `Container_of_void ty :: path -> take path @@ container_of_void u ty
 
-  let inv =
+  let inv path =
     let rec loop acc =
       function
       | []                            -> acc
@@ -548,7 +568,7 @@ end = struct
       | `Field fi ::             path -> loop (`Container fi :: acc) path
       | `Container_of_void ty :: path -> loop (`Container_of_void ty :: acc) path
     in
-    loop []
+    loop [] path
 
   let memoize ~find ~replace h fn ?f x =
     try find h x
@@ -557,6 +577,11 @@ end = struct
       let r = fn ?f x in
       replace h x r;
       r
+
+  type 'a maybe_region =
+    [< `Location of U.t * (unit -> [ `None | `Value of U.t ])
+    |  `None
+    |  `Value of U.t ] as 'a
 
   (* Also used to retrieve return regions, only use from the inside(!) *)
   let rec of_var ?f x =
@@ -1046,6 +1071,12 @@ end = struct
   let pp =
     let h_lv = H_l.create 1024 in
     let h_exp = H_e.create 1024 in
+    let pp_region_of fmttr pp_e e =
+      function
+      | `None            -> ()
+      | `Location (u, _) -> Format.fprintf fmttr "%a@@%a;@ " pp_e e R.pp @@ U.repr u
+      | `Value u         -> Format.fprintf fmttr "%a\\%a;@ " pp_e e R.pp @@ U.repr u
+    in
     fun fmttr fundec ->
       let f = opt_map (fun f -> f.svar.vname) fundec in
       H_l.clear h_lv;
@@ -1055,20 +1086,9 @@ end = struct
         inherit! one_function_visitor fundec
 
         method! vlval _ =
-          DoChildrenPost
-            (tap @@ fun lv ->
-             H_l.memo h_lv lv @@ fun lv ->
-             match of_lval ?f lv with
-             | `None            -> ()
-             | `Location (u, _) -> Format.fprintf fmttr "%a@@%a;@ " pp_lval lv R.pp @@ U.repr u
-             | `Value u         -> Format.fprintf fmttr "%a\\%a;@ " pp_lval lv R.pp @@ U.repr u)
+          DoChildrenPost (tap @@ fun lv -> H_l.memo h_lv lv @@ pp_region_of fmttr pp_lval lv % of_lval ?f)
         method! vexpr _ =
-          DoChildrenPost
-            (tap @@ fun e ->
-             H_e.memo h_exp e @@ fun e ->
-             match of_expr ?f e with
-             | `None    -> ()
-             | `Value u -> Format.fprintf fmttr "%a\\%a;@ " pp_exp e R.pp @@ U.repr u)
+          DoChildrenPost (tap @@ fun e -> H_e.memo h_exp e @@ pp_region_of fmttr pp_exp e % of_expr ?f)
       end in
       match fundec with
       | Some fundec -> ignore @@ visitFramacFunction vis fundec
@@ -1091,7 +1111,16 @@ end = struct
   let compute_regions () =
     let sccs = Analyze.condensate () in
     visitFramacFile (new unifier () None :> frama_c_visitor) @@ Ast.get ();
-    Fixpoint.visit_until_convergence ~order:`topological (fun () f -> new unifier () @@ Some f) () sccs
+    Fixpoint.visit_until_convergence ~order:`topological (fun () f -> new unifier () @@ Some f) () sccs;
+    unify_voids None
+
+  module H_call = struct
+    type t = H'.t
+    let find = H'.find
+    let iter = H'.iter
+  end
+
+  let map = H_stmt.find h_maps
 end
 
 
