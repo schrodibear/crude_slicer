@@ -10,6 +10,7 @@
 
 open Cil
 open Cil_types
+open Cil_datatype
 open Visitor
 
 open Extlib
@@ -85,3 +86,129 @@ let condensate () =
   let r = Components.scc_list g in
   Console.debug "...finished sccs...";
   r
+
+module Goto_handling = struct
+  module M = struct
+    module H = Stmt.Hashtbl
+
+    let all_paths ?s' s =
+      let open Stmt in
+      let open List in
+      let rec all_paths path =
+        let cs = hd path in
+        match cs.skind with
+        | Return _ -> [path]
+        | _        ->
+          may_map (fun s' -> if equal cs s then [s'] else []) ~dft:[] s' @ cs.succs |>
+          filter
+            (fun s' ->
+               let rec mem_succ =
+                 function
+                 | [] | [_]            -> false
+                 | x :: (y :: _ as xs) -> equal s x && equal s' y || mem_succ xs
+               in
+               not @@ mem_succ path) |>
+          concat_map (all_paths % cons' path)
+      in
+      all_paths [s]
+
+    let add_closure h =
+      let open List in
+      let rec add_closure s =
+        H.add h s ();
+        s.succs |>
+        filter (not % H.mem h) |>
+        iter add_closure
+      in
+      add_closure
+
+    let dependant_stmts =
+      let open List in
+      let r = H.create 64 in
+      let separators = H.create 8 in
+      let cache = H.create 64 in
+      let independant = H.create 64 in
+      fun s s' ->
+        let all_paths = all_paths ~s' s in
+        H.clear separators;
+        begin match all_paths with
+        | []      -> ()
+        | p :: ps ->
+          iter (fun s -> H.replace separators s ()) p;
+          iter
+            (fun p ->
+               H.clear cache;
+               iter (fun s -> H.replace cache s ()) p;
+               H.filter_map_inplace (fun s () -> if H.mem cache s then Some () else None) separators)
+            all_paths
+        end;
+        H.remove separators s;
+        H.iter (const' @@ add_closure independant) separators;
+        H.clear r;
+        add_closure r s;
+        add_closure r s';
+        H.iter (const' @@ H.remove r) independant;
+        H.fold (const' cons) r []
+
+    class goto_visitor ~goto_vars ~stmt_vars kf =
+      object(self)
+        inherit frama_c_inplace
+
+        val mutable next = Kernel_function.find_return kf
+
+        method! vblock =
+          let visit s n =
+            next <- n;
+            ignore @@ visitFramacStmt (self :> frama_c_visitor) s
+          in
+          let rec loop =
+            function
+            | []                  -> ()
+            | [s]                 -> visit s next
+            | s :: (n :: _ as ss) -> visit s n; loop ss
+          in
+          fun b ->
+            loop b.bstmts;
+            SkipChildren
+
+        method! vstmt s =
+          match s.skind with
+          | Instr _
+          | Return _
+          | If _ | Switch _ | Loop _
+          | Block _
+          | UnspecifiedSequence _
+          | Throw _ | TryCatch _
+          | TryFinally _ | TryExcept _ -> DoChildren
+
+          | AsmGoto _
+          | Goto _
+          | Break _
+          | Continue _                 ->
+            let deps = dependant_stmts s next in
+            let vi =
+              makeTempVar
+                ~insert:false
+                ~name:("goto_at_L" ^ string_of_int (fst @@ Stmt.loc s).Lexing.pos_lnum)
+                (Kernel_function.get_definition kf)
+                (TVoid [])
+            in
+            H.replace goto_vars s vi;
+            List.iter (fun s -> H.add stmt_vars s vi) deps;
+            SkipChildren
+      end
+  end
+end
+
+include Goto_handling.M
+
+let fill_goto_tables ~goto_vars ~stmt_vars =
+  H.clear goto_vars;
+  H.clear stmt_vars;
+  Globals.Functions.iter
+    (fun kf ->
+       match Kernel_function.get_definition kf with
+       | exception Kernel_function.No_Definition -> ()
+       | fundec                                  ->
+         Cfg.cfgFun fundec;
+         ignore @@ visitFramacFunction (new goto_visitor ~goto_vars ~stmt_vars kf) fundec)

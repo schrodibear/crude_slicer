@@ -57,6 +57,8 @@ let map_pair f (a, b) = f a, f b
 module List = struct
   include List
 
+  let cons' xs x = x :: xs
+
   let take n l =
     let rec loop n dst =
       function
