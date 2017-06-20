@@ -497,15 +497,19 @@ module Info = Info.Make (R) (U) ()
 
 module H_field = Info.H_field
 
-module Analysis (I : sig val fields_of_key : fieldinfo list H_field.t end) : sig
-  type ('a, 'b, 'c) path = [ `Field of 'a | `Container of 'b | `Container_of_void of 'c ]
+module Analysis (I : sig val offs_of_key : Info.offs H_field.t end) : sig
+  val match_container_of1 : exp_node -> (exp * Info.offs) option
+  val match_container_of2 : exp_node -> (exp * Info.offs) option
+  val match_dot : exp_node -> (exp * Info.offs) option
+
+  type ('a, 'b, 'c) offs = [ `Field of 'a | `Container of 'b | `Container_of_void of 'c ]
   type 'a maybe_region =
     [< `Location of U.t * (unit -> [ `None | `Value of U.t ])
     |  `Value of U.t
     |  `None ] as 'a
 
-  val take : [< (fieldinfo, fieldinfo, typ) path ] list -> U.t -> U.t
-  val inv : [< ('a, 'b, 'c) path ] list -> [> ('b, 'a, 'c) path] list
+  val take : [< (fieldinfo, fieldinfo, typ) offs ] list -> U.t -> U.t
+  val inv : [< ('a, 'b, 'c) offs ] list -> [> ('b, 'a, 'c) offs ] list
   val of_var : ?f:string -> varinfo -> [ `Location of _ | `Value of _  | `None ] maybe_region
   val of_string : [ `S of string | `WS of int64 list ] -> [ `Location of _ ] maybe_region
   val of_expr : ?f:string -> exp -> [ `Value of _ | `None ] maybe_region
@@ -516,6 +520,8 @@ module Analysis (I : sig val fields_of_key : fieldinfo list H_field.t end) : sig
     val iter : (U.t -> unit) -> U.t -> t -> unit
   end
   val map : stmt -> H_call.t
+  val arg_regions : ?f:string -> kernel_function -> lval option -> exp list -> U.t list
+  val param_regions : kernel_function -> U.t list
 end = struct
   module H_v = Varinfo.Hashtbl
   module H_s =
@@ -541,6 +547,71 @@ end = struct
 
   open Separation
 
+  let match_container_of1 =
+    let rec match_offset ?(acc=[]) =
+      function
+      | NoOffset        when acc <> []        -> Some acc
+      | NoOffset                              -> None
+      | Field (fi, off) when fi.fcomp.cstruct -> match_offset ~acc:(`Field fi :: acc) off
+      | Field (fi, off)                       -> match_offset
+                                                   ~acc:(`Container_of_void (Ty.normalize fi.ftype) :: acc)
+                                                   off
+      | Index _                               -> None
+    in
+    function
+    | CastE (pstr, _,
+             { enode = BinOp (MinusPI,
+                              { enode = CastE (chrptr, _, mptr); _ },
+                              { enode =
+                                  CastE (size_t, _,
+                                         { enode = AddrOf (Mem { enode = CastE (pstr', _, zero); _ }, off); _ });
+                                _ }, _); _ })
+      when
+        isPointerType pstr && isPointerType pstr' && isCharPtrType chrptr && isPointerType (typeOf mptr) &&
+        not (need_cast theMachine.typeOfSizeOf size_t) && isZero zero &&
+        let str = Ast_info.pointed_type pstr and str' = Ast_info.pointed_type pstr' in
+        match unrollType str, unrollType str' with
+        | TComp (ci, _ ,_), TComp (ci', _, _)
+          when ci.cstruct && ci'.cstruct && Compinfo.equal ci ci' -> true
+        | _ -> false
+      ->
+      opt_map (fun off -> mptr, off) @@ match_offset off
+    | _ -> None
+
+  let match_container_of2 =
+    function
+    | BinOp ((PlusPI | IndexPI),
+             { enode  = CastE (pstr, _, e); _ },
+             { enode = Const (CInt64 (c, IULongLong, _)); _ }, _)   ->
+      begin match unrollType pstr, unrollType (typeOf e) with
+      | TComp (ci, _, _), (TPtr _ | TArray _ as ty) when ci.cstruct ->
+        begin try
+          Some (e, H_field.find I.offs_of_key (ci, ty, c))
+        with
+        | Not_found -> None
+        end
+      | _ -> None
+      end
+    | _ -> None
+
+  let match_dot =
+    function
+    | BinOp ((PlusPI | IndexPI),
+             { enode = CastE (chrptr, _, e); _ },
+             { enode = Const (CInt64 (c, IULongLong, _)); _ }, _)
+      when isCharPtrType chrptr && isPointerType (typeOf e) ->
+      let ty = Ast_info.pointed_type (typeOf e) in
+      begin match unrollType ty with
+      | TComp (ci, _ ,_) ->
+        begin try
+          Some (e, H_field.find I.offs_of_key (ci, uintType, c))
+        with
+        | Not_found -> None
+        end
+      | _ -> None
+      end
+    | _ -> None
+
   (* Notice about handling integers used as pointers: they don't have regions, i.e. it's unsound(!),
      we just create a fresh region each time we cast an integer to a pointer, but this is done
      separately for each case below *)
@@ -551,24 +622,24 @@ end = struct
     else if isArrayType typ             then `Value u
     else                                     `None
 
-  type ('a, 'b, 'c) path = [ `Field of 'a | `Container of 'b | `Container_of_void of 'c ]
+  type ('a, 'b, 'c) offs = [ `Field of 'a | `Container of 'b | `Container_of_void of 'c ]
 
-  let rec take path u =
-    match path with
+  let rec take offs u =
+    match offs with
     | []                            -> u
-    | `Field fi ::             path -> take path @@ dot u fi
-    | `Container fi ::         path -> take path @@ container u fi
-    | `Container_of_void ty :: path -> take path @@ container_of_void u ty
+    | `Field fi ::             offs -> take offs @@ dot u fi
+    | `Container fi ::         offs -> take offs @@ container u fi
+    | `Container_of_void ty :: offs -> take offs @@ container_of_void u ty
 
-  let inv path =
+  let inv offs =
     let rec loop acc =
       function
       | []                            -> acc
-      | `Container fi ::         path -> loop (`Field fi :: acc) path
-      | `Field fi ::             path -> loop (`Container fi :: acc) path
-      | `Container_of_void ty :: path -> loop (`Container_of_void ty :: acc) path
+      | `Container fi ::         offs -> loop (`Field fi :: acc) offs
+      | `Field fi ::             offs -> loop (`Container fi :: acc) offs
+      | `Container_of_void ty :: offs -> loop (`Container_of_void ty :: acc) offs
     in
-    loop [] path
+    loop [] offs
 
   let memoize ~find ~replace h fn ?f x =
     try find h x
@@ -717,69 +788,6 @@ end = struct
     of_lval ?f x
   and of_expr ?f x =
     let of_expr =
-      let match_container_of1 =
-        let rec match_offset ?(acc=[]) =
-          function
-          | NoOffset when acc <> [] -> Some acc
-          | NoOffset -> None
-          | Field (fi, off) -> match_offset ~acc:(fi :: acc) off
-          | Index _ -> None
-        in
-        function
-        | CastE (pstr, _,
-                 { enode = BinOp (MinusPI,
-                                  { enode = CastE (chrptr, _, mptr); _ },
-                                  { enode =
-                                      CastE (size_t, _,
-                                             { enode = AddrOf (Mem { enode = CastE (pstr', _, zero); _ }, off); _ });
-                                    _ }, _); _ })
-          when
-            isPointerType pstr && isPointerType pstr' && isCharPtrType chrptr && isPointerType (typeOf mptr) &&
-            not (need_cast theMachine.typeOfSizeOf size_t) && isZero zero &&
-            let str = Ast_info.pointed_type pstr and str' = Ast_info.pointed_type pstr' in
-            match unrollType str, unrollType str' with
-            | TComp (ci, _ ,_), TComp (ci', _, _)
-              when ci.cstruct && ci'.cstruct && Compinfo.equal ci ci' -> true
-            | _ -> false
-          ->
-          opt_map (fun off -> mptr, off) @@ match_offset off
-        | _ -> None
-      in
-      let match_container_of2 =
-        function
-        | BinOp ((PlusPI | IndexPI),
-                 { enode  = CastE (pstr, _, e); _ },
-                 { enode = Const (CInt64 (c, IULongLong, _)); _ }, _) ->
-          begin match unrollType pstr, unrollType (typeOf e) with
-          | TComp (ci, _, _), (TPtr _ | TArray _ as ty) when ci.cstruct ->
-            begin try
-              Some (e, H_field.find I.fields_of_key (ci, ty, c))
-            with
-            | Not_found -> None
-            end
-          | _ -> None
-          end
-        | _ -> None
-      in
-      let match_dot =
-        function
-        | BinOp ((PlusPI | IndexPI),
-                 { enode = CastE (chrptr, _, e); _ },
-                 { enode = Const (CInt64 (c, IULongLong, _)); _ }, _)
-          when isCharPtrType chrptr && isPointerType (typeOf e) ->
-          let ty = Ast_info.pointed_type (typeOf e) in
-          begin match unrollType ty with
-          | TComp (ci, _ ,_) ->
-            begin try
-              Some (e, H_field.find I.fields_of_key (ci, uintType, c))
-            with
-            | Not_found -> None
-            end
-          | _ -> None
-          end
-        | _ -> None
-
-      in
       let open! H_e in
       memoize ~find ~replace h_expr @@
       fun ?f e ->
@@ -789,14 +797,6 @@ end = struct
       if not @@ isPointerType @@ typeOf e
       then `None
       else
-        let container_of e fis =
-          let u = List.fold_left container (value (typeOf e) (of_expr e)) fis in
-          `Value u
-        in
-        let dot e fis =
-          let u = List.fold_left dot (value (typeOf e) (of_expr e)) fis in
-          `Value u
-        in
         let cast ty e =
           let ty' = typeOf e in
           let r = of_expr e in
@@ -808,17 +808,17 @@ end = struct
             | ty, (TVoid _ | TComp ({ cstruct = false; _ }, _, _)) -> `Value (container_of_void r @@ Ty.deref_once ty)
             | ty, ty' ->
               match Ci.(match_deep_first_subfield_of ty ty', match_deep_first_subfield_of ty' ty) with
-              | Some path, _                                       -> `Value (take path r)
-              | _,         Some path                               -> `Value (take (inv path) r)
+              | Some offs, _                                       -> `Value (take offs r)
+              | _,         Some offs                               -> `Value (take (inv offs) r)
               | _                                                  -> `Value (container_of_void
                                                                                 (dot_void r)
                                                                                 (Ty.deref_once ty))
 
         in
         match match_container_of1 e.enode, match_container_of2 e.enode, match_dot e.enode with
-        | Some (e, fis), _, _
-        | _, Some (e, fis), _               -> container_of e fis
-        | _, _, Some (e, fis)               -> dot e fis
+        | Some (e, offs), _, _
+        | _, Some (e, offs), _              -> `Value (take (inv offs) @@ value (typeOf e) @@ of_expr e)
+        | _, _, Some (e, offs)              -> `Value (take offs @@ value (typeOf e) @@ of_expr e)
         | None, None, None                  ->
           match e.enode with
           | Const (CStr s)                  -> `Value (value (typeOf e) @@ of_string @@ `S s)
@@ -944,7 +944,7 @@ end = struct
   let unify_exprs ?f e1 e2 =
     let unify_comps ci lv1 lv2 =
       let u1, u2 = map_pair (location % of_lval ?f) (lv1, lv2) in
-      List.iter (fun path -> uncurry unify @@ map_pair (take path) (u1, u2)) (Ci.all_regions ci)
+      List.iter (fun offs -> uncurry unify @@ map_pair (take offs) (u1, u2)) (Ci.all_regions ci)
     in
     match e1.enode, e2.enode, unrollType (typeOf e1) with
     | Lval lv1, Lval lv2, TComp (ci, _, _)    -> unify_comps ci lv1 lv2
@@ -1121,6 +1121,8 @@ end = struct
   end
 
   let map = H_stmt.find h_maps
+
+  let param_regions kf = H_k.memo h_params kf param_regions
 end
 
 

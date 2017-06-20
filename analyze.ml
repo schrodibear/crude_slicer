@@ -14,7 +14,7 @@ open Cil_datatype
 open Visitor
 
 open Extlib
-open Common
+open! Common
 
 let get_addressed_kfs =
   let module H = Kernel_function.Hashtbl in
@@ -96,7 +96,7 @@ module Goto_handling = struct
       let open List in
       let rec all_paths path =
         let cs = hd path in
-        match cs.skind with
+        match[@warning "-4"] cs.skind with
         | Return _ -> [path]
         | _        ->
           may_map (fun s' -> if equal cs s then [s'] else []) ~dft:[] s' @ cs.succs |>
@@ -140,7 +140,7 @@ module Goto_handling = struct
                H.clear cache;
                iter (fun s -> H.replace cache s ()) p;
                H.filter_map_inplace (fun s () -> if H.mem cache s then Some () else None) separators)
-            all_paths
+            ps
         end;
         H.remove separators s;
         H.iter (const' @@ add_closure independant) separators;

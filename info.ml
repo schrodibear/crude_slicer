@@ -652,19 +652,21 @@ module Make (R : Representant) (U : Unifiable with type repr = R.t) () = struct
   module Field_key =
     Datatype.Triple_with_collections (Compinfo) (Typ) (Datatype.Integer) (struct let module_name = "field key" end)
   module H_field = Field_key.Hashtbl
+  type offs = [ `Field of fieldinfo | `Container_of_void of typ ] list
+
   type t =
     {
-      block_id_of_stmt : int H_stmt.t;
-      conds_of_loop    : exp list H_stmt_conds.t;
-      fields_of_key    : fieldinfo list H_field.t;
-      effects          : E.some H_fundec.t
+      goto_vars   : varinfo H_stmt.t;
+      stmt_vars   : varinfo list H_stmt_conds.t;
+      offs_of_key : offs H_field.t;
+      effects     : E.some H_fundec.t
     }
 
   let create () =
     {
-      block_id_of_stmt = H_stmt.create 128;
-      conds_of_loop = H_stmt_conds.create 32;
-      fields_of_key = H_field.create 64;
+      goto_vars = H_stmt.create 128;
+      stmt_vars = H_stmt_conds.create 32;
+      offs_of_key = H_field.create 64;
       effects = H_fundec.create 1024
     }
   let get fi fl f =
