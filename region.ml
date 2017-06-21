@@ -520,8 +520,9 @@ module Analysis (I : sig val offs_of_key : Info.offs H_field.t end) : sig
     val iter : (U.t -> unit) -> U.t -> t -> unit
   end
   val map : stmt -> H_call.t
-  val arg_regions : ?f:string -> kernel_function -> lval option -> exp list -> U.t list
-  val param_regions : kernel_function -> U.t list
+  val arg_regions : ?f:string -> kernel_function -> lval option -> exp list -> U.t list * U.t list
+  val param_regions : kernel_function -> U.t list * U.t list
+  val relevant_region : ?f:string -> U.t -> bool
 end = struct
   module H_v = Varinfo.Hashtbl
   module H_s =
@@ -892,7 +893,7 @@ end = struct
           let open H_v in
           let f = Kf.get_name kf in
           location @@ of_var ~f vi,
-          memo h_var vi (fun vi -> U.of_repr @@ R.poly f vi.vname @@ Ty.normalize vi.vtype)
+          memo h_var vi (fun vi -> U.of_repr @@ R.poly f (vi.vname ^ "'") @@ Ty.normalize vi.vtype)
         in
         let map = H_k.memo maps kf (fun _ -> H'.create ()) in
         accomodate ~map [u'] ~on:[u];
@@ -901,19 +902,20 @@ end = struct
         | TComp (ci, _, _) -> List.map (swap take @@ u) (Ci.all_regions ci)
         | ty -> Console.fatal "Region.Analysis.comp_regions: not a composite param, but %a" pp_typ ty
       in
-      List.concat_map
-        (fun vi ->
-           match of_var vi with
-           | `Location (_, get)                ->
-             begin match get () with
-             | `Value u                        -> [u]
-             | `None                           -> []
-             end
-           | `Value u                          -> [u]
-           | `None
-             when isStructOrUnionType vi.vtype -> comp_regions vi
-           | `None                             -> [])
-        (retval @ params)
+      map_pair
+        (List.concat_map
+           (fun vi ->
+              match of_var vi with
+              | `Location (_, get)                ->
+                begin match get () with
+                | `Value u                        -> [u]
+                | `None                           -> []
+                end
+              | `Value u                          -> [u]
+              | `None
+                when isStructOrUnionType vi.vtype -> comp_regions vi
+              | `None                             -> []))
+        (retval, params)
 
   let arg_regions ?f kf lvo exprs =
     let retr =
@@ -922,13 +924,14 @@ end = struct
       then []
       else
         match lvo, rtyp with
-        | None,    (TPtr _ | TComp _)  -> [value ?f rtyp `None]
+        | None,    TPtr _              -> [value ?f rtyp `None]
+        | None,    TComp (ci, _, _)    -> List.map (swap take @@ value ?f rtyp `None) (Ci.all_regions ci)
         | None,    _                   -> []
         | Some lv, TPtr _              -> [value ?f rtyp @@ of_lval ?f lv]
-        | Some lv, TComp _             -> [location @@ of_lval ?f lv]
+        | Some lv, TComp (ci, _, _)    -> List.map (swap take @@ location @@ of_lval ?f lv) (Ci.all_regions ci)
         | Some _,  _                   -> []
     in
-    retr @
+    retr,
     List.concat_map
       (fun e ->
          match of_expr ?f e with
@@ -952,6 +955,23 @@ end = struct
       match of_expr ?f e1, of_expr ?f e2 with
       | `Value u1, `Value u2                  -> unify u1 u2
       | _                                     -> ()
+
+  let relevant_region ?f u =
+    if has_some f then
+      match (U.repr u).R.kind with
+      | `Global         -> true
+      | `Local f'
+      | `Poly f'
+        when f' = the f -> true
+      | `Local _
+      | `Poly _
+      | `Dummy          -> false
+    else
+      match (U.repr u).R.kind with
+      | `Global         -> true
+      | `Local _
+      | `Poly _
+      | `Dummy          -> false
 
   let unify_voids =
     let open List in
@@ -983,33 +1003,20 @@ end = struct
                let ty'', n'' = Ty.deref (U.repr u).R.typ in
                if n'' = n' - 1 && Ty.compatible ty' ty'' then [unify u u'] else []
            in
-           let relevant_region u =
-             if has_some f then
-               match (U.repr u).R.kind with
-               | `Global         -> true
-               | `Local f'
-               | `Poly f'
-                 when f' = the f -> true
-               | `Local _
-               | `Poly _
-               | `Dummy          -> false
-             else
-               match (U.repr u).R.kind with
-               | `Global         -> true
-               | `Local _
-               | `Poly _
-               | `Dummy          -> false
-           in
-           List.iter (on relevant_region unify % U.of_repr) rs)
+           List.iter (on (relevant_region ?f) unify % U.of_repr) rs)
         (R.all_void_xs ())
 
   let replay_on_call ~stmt ?f kf lvo args =
-    let paramrs_argrs = H_k.memo h_params kf param_regions, arg_regions ?f kf lvo args in
+    let (ret_ext_regions, param_regions), (ret_int_regions, arg_regions) =
+      H_k.memo h_params kf param_regions, arg_regions ?f kf lvo args
+    in
     let param_regions, arg_regions =
       let open! List in
-      map_pair (take @@ uncurry min @@ map_pair length paramrs_argrs) paramrs_argrs
+      let pair = param_regions, arg_regions in
+      map_pair (take @@ uncurry min @@ map_pair length pair) pair
     in
     let map = H_stmt.memo h_maps stmt (fun _ -> H'.create ()) in
+    replay ~map ret_ext_regions ~on:ret_int_regions;
     replay ~map param_regions ~on:arg_regions
 
   let expr_of_lval =

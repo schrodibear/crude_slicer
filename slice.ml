@@ -6,7 +6,7 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "-4-9-44-42"]
+[@@@ocaml.warning "-4-9-44-42-48"]
 
 open Extlib
 
@@ -17,6 +17,137 @@ open Cil_printer
 open Format
 open Visitor
 
+open Info
+open Region
+open! Common
+
+module Make (I : sig val offs_of_key : Info.offs H_field.t end) = struct
+
+  module R = struct
+    include Representant
+    include Analysis (I)
+  end
+  module I = Region.Info
+
+  let w_mem ?f ?fi u =
+    match (U.repr u).R.kind, f with
+    | `Global,    _                              -> I.W.Global_mem (I.M.Global_mem.mk ?fi u)
+    | `Local f,   Some f' when String.equal f f' -> I.W.Local_mem  (I.M.Local_mem.mk ?fi u)
+    | `Poly f,    Some f' when String.equal f f' -> I.W.Poly_mem   (I.M.Poly_mem.mk ?fi u)
+    | (`Local _
+      | `Poly _), None                           -> Console.fatal "Slice.w_mem: broken invariant: writing to global \
+                                                                   region outside any function: %a"
+                                                      R.pp (U.repr u)
+    | (`Local f
+      | `Poly f), Some f'                        -> Console.fatal "Slice.w_mem: broken invariant: writing to local \
+                                                                   region %a of function %s from frunction %s"
+                                                      R.pp (U.repr u) f f'
+    | `Dummy,     _                              -> Console.fatal "Slice.w_mem: broken invariant: dummy region \
+                                                                   encountered"
+
+  let w_var vi =
+    match isArithmeticOrPointerType vi.vtype, vi.vglob, vi.vformal with
+    | true, true,  false -> I.W.Global_var (Global_var.of_varinfo_exn vi)
+    | true, false, true  -> I.W.Poly_var   (Formal_var.of_varinfo_exn vi)
+    | true, false, false -> I.W.Local_var  (Local_var.of_varinfo_exn vi)
+    | false, _,    _     -> Console.fatal
+                              "Slice.w_var: broken invariant: trying to write to composite variable without region: %a"
+                              pp_varinfo vi
+    | true, glob,  frml  -> Console.fatal
+                              "Slice.w_var: broken invariant: inconsistent varinfo: %a: .vglob=%B, .vformal=%B"
+                              pp_varinfo vi  glob frml
+
+  module Make_local (F : I.E.Reads) (A : I.E.Assigns) (C : sig val f : kernel_function option end) = struct
+
+    let f = opt_map Kernel_function.get_name C.f
+
+    let r_mem ?fi u =
+      match (U.repr u).R.kind, f with
+      | `Global, _                                 -> F.Some (I.E.K.Global_mem, I.M.Global_mem.mk ?fi u)
+      | `Local f,   Some f' when String.equal f f' -> F.Some (I.E.K.Local_mem, I.M.Local_mem.mk ?fi u)
+      | `Poly f,    Some f' when String.equal f f' -> F.Some (I.E.K.Poly_mem , I.M.Poly_mem.mk ?fi u)
+      | (`Local _
+        | `Poly _), None                           -> Console.fatal "Slice.r_mem: broken invariant: writing to \
+                                                                     global region outside any function: %a"
+                                                        R.pp (U.repr u)
+      | (`Local f
+        | `Poly f), Some f'                        -> Console.fatal "Slice.r_mem: broken invariant: writing to local \
+                                                                     region %a of function %s from frunction %s"
+                                                        R.pp (U.repr u) f f'
+      | `Dummy,     _                              -> Console.fatal "Slice.r_mem: broken invariant: dummy region \
+                                                                     encountered"
+
+    let r_var vi =
+      match isArithmeticOrPointerType vi.vtype, vi.vglob, vi.vformal with
+      | true, true,  false -> F.Some (I.E.K.Global_var, Global_var.of_varinfo_exn vi)
+      | true, false, true  -> F.Some (I.E.K.Poly_var,   Formal_var.of_varinfo_exn vi)
+      | true, false, false -> F.Some (I.E.K.Local_var, Local_var.of_varinfo_exn vi)
+      | false, _,    _     -> Console.fatal
+                                "Slice.r_var: broken invariant: trying to write to composite variable without region: \
+                                 %a"
+                                pp_varinfo vi
+      | true, glob,  frml  -> Console.fatal
+                                "Slice.r_var: broken invariant: inconsistent varinfo: %a: .vglob=%B, .vformal=%B"
+                                pp_varinfo vi  glob frml
+
+    let initial_deps assigns =
+      let open List in
+      let open Separation in
+      let relevant_region = R.relevant_region ?f in
+      iter
+        (fun (n, rs) ->
+           if n >= 1 then
+             iter
+               (fun r ->
+                  let u = U.of_repr r in
+                  let F.Some (k1, r1) = r_mem u in
+                  let w1 = w_mem ?f u in
+                  if relevant_region u then
+                    dot_voids
+                      (fun u ->
+                         containers_of_void
+                           (fun ty u ->
+                              if snd @@ Ty.deref ty = n then
+                                let F.Some (k2, r2) = r_mem u in
+                                let w2 = w_mem ?f u in
+                                A.add w1 k2 r2 assigns;
+                                A.add w2 k1 r1 assigns)
+                           u)
+                      u)
+               rs)
+        (R.all_void_xs ());
+      may
+        (fun kf ->
+           let rv, args = Kernel_function.(get_vi kf, get_formals kf) in
+           iter
+             (fun vi ->
+                match R.of_var ?f vi with
+                | `Location (u, _)
+                  when not (isStructOrUnionType vi.vtype)
+                    && vi.vaddrof                         -> A.add
+                                                               (w_mem u) I.E.K.Poly_var (Formal_var.of_varinfo_exn vi)
+                                                               assigns
+                | `Location _ | `Value _ | `None          -> ())
+             args;
+           let (ret_ext_regions, param_regions), (ret_int_regions, arg_regions) =
+             R.param_regions kf, R.arg_regions ?f kf (Some (var rv)) (map evar args)
+           in
+           let add_all au pu =
+             match unrollType (U.repr au).R.typ with
+             | TComp (ci, _, _) when ci.cstruct -> iter
+                                                     (fun fi ->
+                                                        if not fi.faddrof && isArithmeticOrPointerType fi.ftype then
+                                                          let F.Some (k, r) = r_mem ~fi pu in
+                                                          A.add (w_mem ~fi au) k r assigns)
+                                                     ci.cfields
+             | _                                -> ()
+           in
+           iter2 add_all arg_regions     param_regions;
+           iter2 add_all ret_ext_regions ret_int_regions)
+  end
+end
+
+(*
 module Console = Options
 
 let (%) f g x = f (g x)
