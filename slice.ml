@@ -57,38 +57,35 @@ module Make (I : sig val offs_of_key : Info.offs H_field.t end) = struct
                               "Slice.w_var: broken invariant: inconsistent varinfo: %a: .vglob=%B, .vformal=%B"
                               pp_varinfo vi  glob frml
 
+  let unless_comp ty f = if not (isStructOrUnionType @@ Ty.normalize ty) then Some (f ()) else None
+
+  let w_lval =
+    let deref_mem u = unless_comp (U.repr u).R.typ @@ fun () -> w_mem u in
+    fun ?f (h, off as lv) ->
+      let no_offset () =
+        match R.of_lval ?f lv with
+        | `Location (u, _) -> deref_mem u
+        | `Value _ | `None ->
+          match h with
+          | Var vi         -> unless_comp vi.vtype @@ fun () -> w_var vi
+          | Mem _          -> Console.fatal "Slice.w_lval: broken invariant: \
+                                             Memory accessing lvalue without a location region: %a"
+                                pp_lval lv
+      in
+      match lastOffset off with
+      | Field (fi, NoOffset) -> Some R.(w_mem ~fi @@ location @@ of_lval ?f lv)
+      | Field _              -> assert false
+      | Index (_, NoOffset)  -> deref_mem R.(location @@ of_lval ?f lv)
+      | Index _              -> assert false
+      | NoOffset             -> no_offset ()
+
   module Make_local (F : I.E.Reads) (A : I.E.Assigns) (C : sig val f : kernel_function option end) = struct
 
     let f = opt_map Kernel_function.get_name C.f
 
-    let r_mem ?fi u =
-      match (U.repr u).R.kind, f with
-      | `Global, _                                 -> F.Some (I.E.K.Global_mem, I.M.Global_mem.mk ?fi u)
-      | `Local f,   Some f' when String.equal f f' -> F.Some (I.E.K.Local_mem, I.M.Local_mem.mk ?fi u)
-      | `Poly f,    Some f' when String.equal f f' -> F.Some (I.E.K.Poly_mem , I.M.Poly_mem.mk ?fi u)
-      | (`Local _
-        | `Poly _), None                           -> Console.fatal "Slice.r_mem: broken invariant: writing to \
-                                                                     global region outside any function: %a"
-                                                        R.pp (U.repr u)
-      | (`Local f
-        | `Poly f), Some f'                        -> Console.fatal "Slice.r_mem: broken invariant: writing to local \
-                                                                     region %a of function %s from frunction %s"
-                                                        R.pp (U.repr u) f f'
-      | `Dummy,     _                              -> Console.fatal "Slice.r_mem: broken invariant: dummy region \
-                                                                     encountered"
+    let r_mem ?fi u = the (F.of_writes @@ w_mem ?f ?fi u)
 
-    let r_var vi =
-      match isArithmeticOrPointerType vi.vtype, vi.vglob, vi.vformal with
-      | true, true,  false -> F.Some (I.E.K.Global_var, Global_var.of_varinfo_exn vi)
-      | true, false, true  -> F.Some (I.E.K.Poly_var,   Formal_var.of_varinfo_exn vi)
-      | true, false, false -> F.Some (I.E.K.Local_var, Local_var.of_varinfo_exn vi)
-      | false, _,    _     -> Console.fatal
-                                "Slice.r_var: broken invariant: trying to write to composite variable without region: \
-                                 %a"
-                                pp_varinfo vi
-      | true, glob,  frml  -> Console.fatal
-                                "Slice.r_var: broken invariant: inconsistent varinfo: %a: .vglob=%B, .vformal=%B"
-                                pp_varinfo vi  glob frml
+    let r_var vi = the (F.of_writes @@ w_var vi)
 
     let initial_deps assigns =
       let open List in
@@ -144,6 +141,10 @@ module Make (I : sig val offs_of_key : Info.offs H_field.t end) = struct
            in
            iter2 add_all arg_regions     param_regions;
            iter2 add_all ret_ext_regions ret_int_regions)
+
+    let add_from_lval lv acc = may F.(fun w -> let Some (k, r) = the (of_writes w) in add k r acc) @@ w_lval ?f lv
+
+    
   end
 end
 

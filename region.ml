@@ -512,7 +512,9 @@ module Analysis (I : sig val offs_of_key : Info.offs H_field.t end) : sig
   val inv : [< ('a, 'b, 'c) offs ] list -> [> ('b, 'a, 'c) offs ] list
   val of_var : ?f:string -> varinfo -> [ `Location of _ | `Value of _  | `None ] maybe_region
   val of_string : [ `S of string | `WS of int64 list ] -> [ `Location of _ ] maybe_region
+  val of_lval : ?f:string -> lval -> [ `Location of _ | `Value of _  | `None ] maybe_region
   val of_expr : ?f:string -> exp -> [ `Value of _ | `None ] maybe_region
+  val location : [ `Location of _ | `Value of _  | `None ] maybe_region -> U.t
   val compute_regions : unit -> unit
   module H_call : sig
     type t
@@ -771,11 +773,11 @@ end = struct
                    else                                fun () -> `None)
       in
       let index () =
-        let u = of_lval lv' in
+        let r = of_lval lv' in
         let ty = typeOfLval lv in
         if isArrayType ty
-        then u
-        else let v = value ty u in `Location (v, fun () -> deref v)
+        then r
+        else let u = value ty r in `Location (u, fun () -> deref u)
       in
       match off with
       | NoOffset                                       -> no_offset ()
