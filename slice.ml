@@ -6,7 +6,7 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "-4-9-44-42-48"]
+[@@@ocaml.warning "-4-9-42-44-45-48"]
 
 open Extlib
 
@@ -21,19 +21,20 @@ open Info
 open Region
 open! Common
 
-module Make (I : sig val offs_of_key : Info.offs H_field.t end) = struct
+module Make (Analysis : Analysis) = struct
 
   module R = struct
     include Representant
-    include Analysis (I)
+    include Analysis
   end
-  module I = Region.Info
+  module U = R.U
+  module I = R.I
 
   let w_mem ?f ?fi u =
     match (U.repr u).R.kind, f with
-    | `Global,    _                              -> I.W.Global_mem (I.M.Global_mem.mk ?fi u)
-    | `Local f,   Some f' when String.equal f f' -> I.W.Local_mem  (I.M.Local_mem.mk ?fi u)
-    | `Poly f,    Some f' when String.equal f f' -> I.W.Poly_mem   (I.M.Poly_mem.mk ?fi u)
+    | `Global,    _                              -> `Global_mem (I.M.Global_mem.mk ?fi u)
+    | `Local f,   Some f' when String.equal f f' -> `Local_mem  (I.M.Local_mem.mk ?fi u)
+    | `Poly f,    Some f' when String.equal f f' -> `Poly_mem   (I.M.Poly_mem.mk ?fi u)
     | (`Local _
       | `Poly _), None                           -> Console.fatal "Slice.w_mem: broken invariant: writing to global \
                                                                    region outside any function: %a"
@@ -47,9 +48,9 @@ module Make (I : sig val offs_of_key : Info.offs H_field.t end) = struct
 
   let w_var vi =
     match isArithmeticOrPointerType vi.vtype, vi.vglob, vi.vformal with
-    | true, true,  false -> I.W.Global_var (Global_var.of_varinfo_exn vi)
-    | true, false, true  -> I.W.Poly_var   (Formal_var.of_varinfo_exn vi)
-    | true, false, false -> I.W.Local_var  (Local_var.of_varinfo_exn vi)
+    | true, true,  false -> `Global_var (Global_var.of_varinfo_exn vi)
+    | true, false, true  -> `Poly_var   (Formal_var.of_varinfo_exn vi)
+    | true, false, false -> `Local_var  (Local_var.of_varinfo_exn vi)
     | false, _,    _     -> Console.fatal
                               "Slice.w_var: broken invariant: trying to write to composite variable without region: %a"
                               pp_varinfo vi
@@ -73,23 +74,25 @@ module Make (I : sig val offs_of_key : Info.offs H_field.t end) = struct
                                 pp_lval lv
       in
       match lastOffset off with
-      | Field (fi, NoOffset) -> Some R.(w_mem ~fi @@ location @@ of_lval ?f lv)
+      | Field (fi, NoOffset) -> unless_comp fi.ftype R.(fun () -> w_mem ~fi @@ location @@ of_lval ?f lv)
       | Field _              -> assert false
       | Index (_, NoOffset)  -> deref_mem R.(location @@ of_lval ?f lv)
       | Index _              -> assert false
       | NoOffset             -> no_offset ()
 
-  module Make_local (F : I.E.Reads) (A : I.E.Assigns) (C : sig val f : kernel_function option end) = struct
+  let dummy_flag = Flag.create "slicing_dummy"
+
+  module Make_local
+      (F : I.E.Reads) (A : I.E.Assigns with type set = F.t) (C : sig val f : kernel_function option end) = struct
 
     let f = opt_map Kernel_function.get_name C.f
 
-    let r_mem ?fi u = the (F.of_writes @@ w_mem ?f ?fi u)
+    let r_mem ?fi u = F.of_writes @@ w_mem ?f ?fi u
 
-    let r_var vi = the (F.of_writes @@ w_var vi)
+    let r_var vi = F.of_writes @@ w_var vi
 
     let initial_deps assigns =
       let open List in
-      let open Separation in
       let relevant_region = R.relevant_region ?f in
       iter
         (fun (n, rs) ->
@@ -100,9 +103,9 @@ module Make (I : sig val offs_of_key : Info.offs H_field.t end) = struct
                   let F.Some (k1, r1) = r_mem u in
                   let w1 = w_mem ?f u in
                   if relevant_region u then
-                    dot_voids
+                    R.dot_voids
                       (fun u ->
-                         containers_of_void
+                         R.containers_of_void
                            (fun ty u ->
                               if snd @@ Ty.deref ty = n then
                                 let F.Some (k2, r2) = r_mem u in
@@ -142,957 +145,338 @@ module Make (I : sig val offs_of_key : Info.offs H_field.t end) = struct
            iter2 add_all arg_regions     param_regions;
            iter2 add_all ret_ext_regions ret_int_regions)
 
-    let add_from_lval lv acc = may F.(fun w -> let Some (k, r) = the (of_writes w) in add k r acc) @@ w_lval ?f lv
+    let add_from_lval lv acc = may F.(fun w -> let Some (k, r) = of_writes w in add k r acc) @@ w_lval ?f lv
+
+    class rval_reads_collector acc = object(self)
+      inherit frama_c_inplace
+
+      method! vexpr =
+        let do_expr = ignore % visitFramacExpr (self :> frama_c_visitor) in
+        let do_off = ignore % visitFramacOffset (self :> frama_c_visitor) in
+        fun e ->
+          match e.enode with
+          | AddrOf  (Mem e, off)
+          | StartOf (Mem e, off) -> do_expr e; do_off off; SkipChildren
+          | Const _
+          | SizeOf _
+          | SizeOfStr _
+          | SizeOfE _
+          | AlignOf _
+          | AlignOfE _
+          | AddrOf _
+          | StartOf _            -> SkipChildren
+          | Lval _
+          | UnOp _
+          | BinOp _
+          | CastE  _
+          | Info _               -> DoChildren
+
+      method! vlval lv =
+        add_from_lval lv acc;
+        DoChildren
+    end
+
+    let add_from_rval e acc = ignore @@ visitFramacExpr (new rval_reads_collector acc) e
+
+    let add_from_lval lv acc =
+      let o = new rval_reads_collector acc in
+      match lv with
+      | Mem e, off -> ignore @@ visitFramacExpr o e; ignore @@ visitFramacOffset o off
+      | Var _, off -> ignore @@ visitFramacOffset o off
+
+    let prj_poly_var s params =
+      let args =
+        match s.skind with
+        | Instr (Call (_, _, args, _)) -> args
+        | _                            -> Console.fatal "Slice.project_reads: need the proper function call site: %a"
+                                            pp_stmt s
+      in
+      let open List in
+      let args = take (length params) args in
+      let add_from_arg = combine params @@ map add_from_rval args in
+      fun acc fv -> assoc (fv : Formal_var.t :> varinfo) add_from_arg acc
+
+    let prj_poly_mem s =
+      let map = R.map s in
+      fun acc m ->
+        let F.Some (k, r) = I.M.Poly_mem.prj ~find:(fun u -> R.H_call.find u map) ~mk:r_mem m in
+        F.add k r acc
+
+    let prj_reads (type t) (module F' : I.E.Reads with type t = t) s params =
+      let prj_poly_var = prj_poly_var s params in
+      let prj_poly_mem = prj_poly_mem s in
+      fun ~from acc ->
+        F'.iter_global_vars (fun v -> F.add_global_var v acc) from;
+        F'.iter_poly_vars   (prj_poly_var acc) from;
+        F'.iter_global_mems (fun mem -> F.add_global_mem mem acc) from;
+        F'.iter_poly_mems   (prj_poly_mem acc) from
+
+    let prj_write ?lv s =
+      function
+      | `Global_var _
+      | `Global_mem _ as w -> Some w
+      | `Poly_mem m        -> I.M.Poly_mem.prj
+                                ~find:(fun u -> R.H_call.find u @@ R.map s)
+                                ~mk:(fun ?fi u -> Some (w_mem ?f ?fi u))
+                                m
+      | `Result            -> opt_bind (w_lval ?f) lv
+      | `Poly_var _
+      | `Local_var _
+      | `Local_mem _       -> None
+
+    (* Incomplete, but suitable for fix-point iteration approach *)
+    let add_transitive_closure =
+      let module Vertex = struct
+        type t = I.W.t * F.t
+        let compare (a, _) (b, _) = I.W.compare a b
+        let equal (a, _) (b, _) = I.W.equal a b
+        let hash (x, _) = I.W.hash x
+      end in
+      let module Deps = Graph.Imperative.Digraph.Concrete (Vertex) in
+      let module Sccs = Graph.Components.Make (Deps) in
+      let open Deps in
+      fun assigns ->
+        let g = create () in
+        A.iter (fun w r -> add_vertex g (w, r)) assigns;
+        iter_vertex
+          (fun (w_from, _ as v_from) ->
+             match w_from  with
+             | `Result                 -> ()
+             | #I.W.readable as w_from ->
+               let F.Some (k, r) = F.of_writes w_from in
+               iter_vertex
+                 (fun (_, r_to as v_to) ->
+                    if not (Vertex.equal v_from v_to) && F.mem k r r_to then add_edge g v_from v_to)
+                 g)
+          g;
+        let open List in
+        let sccs = rev @@ map rev @@ Sccs.scc_list g in
+        let rec round =
+          function
+          | []                                 -> assert false
+          | [_]                                -> ()
+          | (_, from) :: ((_, r_c) :: _ as tl) -> F.import ~from r_c; round tl
+        in
+        iter
+          (fun scc ->
+             round @@ scc @ [hd scc];
+             iter (fun (_, from as v) -> iter_succ (fun (_, r) -> F.import ~from r) g v) scc)
+          sccs
+
+    let comp_assign lv e reads assigns =
+        let r_lv, r_e =
+          match e.enode with
+          | Lval lv' -> R.(location @@ of_lval ?f lv, location @@ of_lval lv')
+          | _        -> Console.fatal "Slicing.comp_assign: RHS is not an lval: %a" pp_exp e
+        in
+        let ci =
+          match unrollType @@ typeOf e with
+          | TComp (ci, _, _)  -> ci
+          | ty                -> Console.fatal "Slicing.comp_assign: RHS is not a composite: %a %a" pp_exp e pp_typ ty
+        in
+        List.iter
+          (fun (path, fi) ->
+             let F.Some (k, r) = r_mem ?fi (R.take path r_e) in
+             let w = w_mem ?fi @@ R.take path r_lv in
+             A.add w k r assigns;
+             A.import_values w reads assigns)
+          (Ci.all_offsets ci)
+
+    (* Working around the value restriction... *)
+    module M = struct
+      let reads = F.create dummy_flag
+
+      module M = struct
+        let under cont info under s =
+          F.clear reads;
+          List.iter
+            (fun vi -> F.add_local_var (Local_var.of_varinfo_exn vi) reads)
+            (I.H_stmt_conds.find info.I.stmt_vars s);
+          Stack.iter (fun from -> F.import ~from reads) under;
+          cont reads
+      end
+    end
+
+    include M.M
+
+    let under' info under' s cont = under cont info under' s
+
+    let gassign reads lv ?e assigns =
+      add_from_lval lv reads;
+      may (fun e -> add_from_rval e reads) e;
+      let e = opt_conv (dummy_exp @@ Lval lv) e in
+      match w_lval ?f lv with
+      | Some w -> A.import_values w reads assigns
+      | None   -> comp_assign lv e reads assigns
+
+    let assign = under gassign
+
+    let return = under @@ fun reads e assigns ->
+      add_from_rval e reads;
+      match e.enode, unrollType @@ typeOf e with
+      | Lval lv, TComp _ -> comp_assign lv e reads assigns
+      | _,       TComp _ -> Console.fatal "Slicing.return: composite expression that is not an lvalue: %a" pp_exp e
+      | _                -> A.import_values `Result reads assigns
+
+    let reach_target = under (fun from -> F.import ~from)
+
+    let call info under s = under' info under s @@ fun from ?lv kf args depends assigns ->
+      let I.E.Some { reads; assigns = (module A'); eff = eff' } =
+        I.get info R.flag @@ Kernel_function.get_definition kf
+      in
+      let prj_reads = prj_reads reads s args in
+      let prj_write = prj_write ?lv s in
+      if I.E.is_target eff' then begin
+        F.import ~from depends;
+        prj_reads ~from:(I.E.depends eff') depends
+      end;
+      A'.iter
+        (fun w from' ->
+           may
+             (fun w -> let reads = A.find w assigns in
+               F.import ~from reads;
+               prj_reads ~from:from' reads)
+             (prj_write w))
+        (I.E.assigns eff');
+      may
+        (fun lv ->
+           add_from_lval lv from;
+           gassign from lv assigns)
+        lv
+
+    let alloc = under @@ fun reads lv ?e assigns ->
+      may (fun e -> add_from_rval e reads) e;
+      gassign reads lv assigns
+
+    let goto info under s = under' info under s @@ fun from assigns ->
+      F.import ~from @@ A.find (w_var @@ I.H_stmt.find info.I.goto_vars s) assigns
+
+    let is_var_sating p e =
+      match (stripCasts e).enode with
+      | Lval (Var v, NoOffset) when p v -> true
+      | _                               -> false
+
+    class effect_collector info eff = object
+      method finish = add_transitive_closure (I.E.assigns eff)
+
+      val curr_reads = Stack.create ()
+
+      inherit frama_c_inplace
+
+      method! vstmt =
+      let handle_call lvo fundec params =
+        let eff' = File_info.get file_info flag fundec in
+        if Effect.is_target eff' then begin
+          add_depends ~reach_target:true;
+          project_reads ~fundec ~params ~from:(Effect.depends eff') (Effect.depends eff)
+        end;
+        let lv = may_map add_from_lval lvo ~dft:ignore in
+        let project_reads = project_reads ~fundec ~params in
+        Effect.iter_writes
+          (fun w from ->
+             match w with
+             | Writes.Global _ | Writes.Result ->
+               let lv = may_map (fun (Reads.Some (k, x)) r -> Reads.add k x r) ~dft:lv (Reads.of_writes w) in
+               let struct_assign = w = Writes.Result && may_map ~dft:false (isStructOrUnionType % typeOfLval) lvo in
+               add_edges ~struct_assign ~lv ~from:(project_reads ~from) ()
+             | _ -> ())
+          eff';
+        may (fun lv' -> add_edges ~lv ~from:(add_rval_from_lval lv') ()) lvo
+      in
+      let handle_all_reads =
+        let from = Reads.create dummy_flag in
+        fun () ->
+          Reads.clear from;
+          collect_reads from;
+          add_depends ~reach_target:false;
+          Effect.iter_writes (fun _ r -> Reads.import ~from r) eff;
+          Reads.import ~from all_reads
+      in
+      let continue_under f =
+        let r = Reads.create dummy_flag in
+        f r;
+        Stack.push r curr_reads;
+        DoChildrenPost (fun s -> ignore @@ Stack.pop curr_reads; s)
+      in
+      let alloc_to ~loc ~lv ~from =
+        let lv = Mem (new_exp ~loc @@ Lval lv), NoOffset in
+        add_edges ~lv:(add_from_lval lv) ~from:(fun r -> from r; add_rval_from_lval lv r) ()
+      in
+      let is_tracking_var v = isVoidPtrType v.vtype && Effect.is_tracking_var (Void_ptr_var.of_varinfo_exn v) eff in
+      fun s ->
+        match s.skind with
+        | Instr (Set (lv, e, loc)) when is_var_sating is_tracking_var e ->
+          alloc_to ~loc ~lv ~from:(add_from_rval e);
+          SkipChildren
+        | Instr (Set (lv, e, _)) ->
+          add_edges
+            ~struct_assign:(isStructOrUnionType @@ typeOfLval lv)
+            ~lv:(add_from_lval lv)
+            ~from:(add_from_rval_and_lval lv e)
+            ();
+          SkipChildren
+        | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _)) when Options.Target_functions.mem vi.vname ->
+          add_depends ~reach_target:true;
+          SkipChildren
+        | Instr (Call (lvo, { enode = Lval (Var vi, NoOffset) }, _, loc)) when Options.Alloc_functions.mem vi.vname ->
+          begin match lvo with
+          | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype ->
+            add_edges ~lv:(add_from_lval lv) ~from:ignore ();
+            Effect.add_tracking_var (Void_ptr_var.of_varinfo_exn v) eff
+          | Some lv -> alloc_to ~loc ~lv ~from:ignore
+          | None -> ()
+          end;
+          SkipChildren
+        | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, [e], _)) when Options.Assume_functions.mem vi.vname ->
+          add_edges ~lv:(add_from_rval e) ~from:ignore ();
+          SkipChildren
+        | Instr (Call (lvo, { enode = Lval (Var vi, NoOffset) }, params, _)) when isFunctionType vi.vtype ->
+          begin try
+           handle_call lvo (Kernel_function.get_definition (Globals.Functions.find_by_name vi.vname)) params;
+          with
+          | Kernel_function.No_Definition -> ()
+          end;
+          SkipChildren
+        (* call by pointer *)
+        | Instr (Call (lvo, _, params, _)) ->
+          List.iter
+            (fun kf -> handle_call lvo (Kernel_function.get_definition kf) params)
+            (filter_matching_kfs params);
+          SkipChildren
+        | Instr (Asm _ | Skip _ | Code_annot _) ->
+          SkipChildren
+        | Return (eo, _) ->
+          handle_all_reads ();
+          add_edges
+            ?lv:None
+            ~from:(may_map add_from_rval eo ~dft:ignore)
+            ();
+          SkipChildren
+        | Goto _ ->
+          handle_all_reads ();
+          SkipChildren
+        | Break _ | Continue _ ->
+          SkipChildren
+        | If (e, _, _, _)  ->
+          continue_under (add_from_rval e)
+        | Switch (e, _, _, _) ->
+          continue_under
+            (fun r ->
+               add_from_rval e r;
+               List.iter (fun e -> add_from_rval e r) (H_stmt_conds.find_or_empty break_continue_cache s))
+        | Loop _ ->
+          continue_under
+            (fun r -> List.iter (fun e -> add_from_rval e r) (H_stmt_conds.find_or_empty break_continue_cache s))
+        | Block _ | UnspecifiedSequence _ -> DoChildren
+        | Throw _ | TryCatch _ | TryFinally _ | TryExcept _  ->
+          failwith "Unsupported features: exceptions and their handling"
+  end
 
     
   end
 end
 
 (*
-module Console = Options
-
-let (%) f g x = f (g x)
-let (%>) f g x = g (f x)
-let const f _x = f
-let const' f x _y = f x
-
-module Primitive_type : sig
-  type t = private typ
-
-  val of_typ : typ -> t option
-  val of_typ_exn : typ -> t
-  val compare : t -> t -> int
-  val equal : t -> t -> bool
-  val hash : t -> int
-  val pp : formatter -> t -> unit
-end = struct
-  type t = typ
-
-  let is_ok t = (match t with TNamed _ -> false | _ -> true) && isArithmeticOrPointerType t
-
-  let of_typ t =
-    let t = unrollTypeDeep t in
-    if is_ok t then Some t
-    else None
-
-  let of_typ_exn t =
-    if is_ok t then t
-    else invalid_arg "Primitive_type.of_typ_exn"
-
-  let compare = Typ.compare
-  let equal = Typ.equal
-  let hash = Typ.hash
-  let pp fmt = fprintf fmt "%a" pp_typ
-end
-
-module Make_var (C : sig val is_ok : varinfo -> bool end) : sig
-  type t = private varinfo
-
-  val of_varinfo : varinfo -> t option
-  val of_varinfo_exn : varinfo -> t
-  val compare : t -> t -> int
-  val equal : t -> t -> bool
-  val hash : t -> int
-  val pp : formatter -> t -> unit
-end = struct
-  type t = varinfo
-
-  let of_varinfo vi = if C.is_ok vi then Some vi else None
-
-  let of_varinfo_exn vi =
-    if C.is_ok vi then vi
-    else invalid_arg "Formal_var.of_varinfo_exn"
-
-  let compare = Varinfo.compare
-  let equal = Varinfo.equal
-  let hash = Varinfo.hash
-  let pp fmt = fprintf fmt "%a" pp_varinfo
-end
-
-module Global_var = Make_var (struct let is_ok vi = isArithmeticOrPointerType vi.vtype && vi.vglob end)
-
-module Struct_field : sig
-  type t = private fieldinfo
-
-  val of_fieldinfo : fieldinfo -> t option
-  val of_fieldinfo_exn : fieldinfo -> t
-  val compare : t -> t -> int
-  val equal : t -> t -> bool
-  val hash : t -> int
-  val pp : formatter -> t -> unit
-end = struct
-  type t = fieldinfo
-
-  let is_ok fi = fi.fcomp.cstruct && isArithmeticOrPointerType fi.ftype
-
-  let of_fieldinfo fi = if is_ok fi then Some fi else None
-
-  let of_fieldinfo_exn fi =
-    if is_ok fi then fi
-    else invalid_arg "Struct_field.of_fieldinfo_exn"
-
-  let compare = Fieldinfo.compare
-  let equal = Fieldinfo.equal
-  let hash = Fieldinfo.hash
-  let pp fmt fi = fprintf fmt "%s.%s" fi.fcomp.cname fi.fname
-end
-
-module Region = struct
-  type t =
-    | Variable of Global_var.t
-    | Field of Struct_field.t
-    | Type_approximation of Primitive_type.t
-
-  let compare r1 r2 =
-    match r1, r2 with
-    | Variable v1, Variable v2 -> Global_var.compare v1 v2
-    | Variable _, _ -> -1
-    | Field f1, Field f2 -> Struct_field.compare f1 f2
-    | Field _, Variable _ -> 1
-    | Field _, _ -> -1
-    | Type_approximation t1, Type_approximation t2 -> Primitive_type.compare t1 t2
-    | Type_approximation _, _ -> 1
-
-  let equal r1 r2 =
-    match r1, r2 with
-    | Variable v1, Variable v2 -> Global_var.equal v1 v2
-    | Field f1, Field f2 -> Struct_field.equal f1 f2
-    | Type_approximation t1, Type_approximation t2 -> Primitive_type.equal t1 t2
-    | Variable _, (Field _ | Type_approximation _)
-    | Field _, (Variable _ | Type_approximation _)
-    | Type_approximation _, (Variable _ | Field _) -> false
-
-  let hash =
-    function
-    | Variable v1 -> 7 * Global_var.hash v1
-    | Field f -> 7 * Struct_field.hash f + 1
-    | Type_approximation t -> 7 * Primitive_type.hash t + 2
-
-  let pp fmttr =
-    let pp fmt = fprintf fmttr fmt in
-    function
-    | Variable v -> pp "%a" Global_var.pp v
-    | Field f -> pp "%a" Struct_field.pp f
-    | Type_approximation t -> pp "(%a)" Primitive_type.pp t
-end
-
-module Flag : sig
-  type t
-  val create : string -> t
-  val report : t -> unit
-  val reported : t -> bool
-  val clear : t -> unit
-  val pp : formatter -> t -> unit
-end = struct
-  type t = bool ref * string
-
-  let create name = ref false, name
-  let report (f, _) = f := true
-  let reported (f, _) = !f
-  let clear (f, _) = f := false
-  let pp fmt (_, name) = fprintf fmt "%s" name
-end
-
-module type Printable_hashed_type = sig
-  include Hashtbl.HashedType
-  val pp : formatter -> t -> unit
-end
-
-module type Reporting_bithashset = sig
-  type elt
-  type t
-  val create : Flag.t -> t
-  val clear : t -> unit
-  val copy : Flag.t -> t -> t
-  val add : elt -> t -> unit
-  val import : from:t -> t -> unit
-  val remove : elt -> t -> unit
-  val sub : t -> from:t -> unit
-  val mem : elt -> t -> bool
-  val intersects : t -> t -> bool
-  val iter : (elt -> unit) -> t -> unit
-  val filter_inplace : (elt -> bool) -> t -> unit
-  val fold : (elt -> 'b -> 'b) -> t -> 'b -> 'b
-  val length : t -> int
-  val is_empty : t -> bool
-  val flag : t -> Flag.t
-  val stats : unit -> Hashtbl.statistics
-  val pp : formatter -> t -> unit
-end
-
-module Make_reporting_bithashset (M : Printable_hashed_type) : Reporting_bithashset with type elt = M.t =
-struct
-  type elt = M.t
-  module H = Hashtbl.Make (M)
-  module H' = Hashtbl.Make (struct type t = int let hash = id let equal : int -> _ -> _ = (=) end)
-
-  let size = 5000
-
-  let index, elem, stats =
-    let h = H.create size and h' = H'.create size in
-    let i = ref ~-1 in
-    (fun e ->
-       try
-         H.find h e
-       with
-       | Not_found ->
-         incr i;
-         H.replace h e !i;
-         H'.replace h' !i e;
-         !i),
-    (fun i ->
-       try
-         H'.find h' i
-       with
-       | Not_found -> failwith "Reporting_bithashset.elem: Can't find element"),
-    fun () -> H.stats h
-
-  type nonrec t = Bv.t * Flag.t
-  let create f = Bv.create ~size false, f
-  let clear (v, f) =
-    if Bv.is_empty v then Flag.report f;
-    Bv.clear v
-  let copy f (v, _) = Bv.copy v, f
-  let add e (v, f) =
-    let i = index e in
-    if not (Bv.get v i) then Flag.report f;
-    Bv.set v i
-  let import ~from:(from, _) (v, f) =
-    if not (Bv.subset from v) then Flag.report f;
-    Bv.union_into ~into:v from
-  let remove e (v, f) =
-    let i = index e in
-    if Bv.get v i then Flag.report f;
-    Bv.reset v i
-  let sub (s, _) ~from:(from, f) =
-    if Bv.inters from s then Flag.report f;
-    Bv.sub_from ~from s
-  let mem e (v, _) = Bv.get v (index e)
-  let intersects (v1, _) (v2, _) = Bv.inters v1 v2
-  let iter f (v, _) = Bv.iter_true v (fun i -> f (elem i))
-  let filter_inplace f (v, fl) = Bv.filter v (fun i -> if not @@ f (elem i) then (Flag.report fl; false) else true)
-  let fold f (v, _) x =
-    let r = ref x in
-    Bv.iter_true v (fun i -> r := f (elem i) !r);
-    !r
-  let length (v, _) = Bv.cardinal v
-  let is_empty (v, _) = Bv.is_empty v
-  let flag (_, f) = f
-  let pp fmt v =
-    fprintf fmt "{@[%a@]}"
-      (pp_print_list ~pp_sep:(fun fmt () -> fprintf fmt ",@ ") M.pp) (fold List.cons v [])
-end
-
-module type Set = sig
-  type t
-  type 'a kind
-  val create : Flag.t -> t
-  val add : 'a kind -> 'a -> t -> unit
-  val import : from:t -> t -> unit
-  val flag : t -> Flag.t
-  val copy : Flag.t -> t -> t
-  val pp : formatter -> t -> unit
-end
-
-module Make_reporting_hashmap (M_key : Printable_hashed_type) (S : Set) : sig
-  type key = M_key.t
-  type set = S.t
-  type 'a kind = 'a S.kind
-  type t
-  val create : Flag.t -> t
-  val clear : t -> unit
-  val copy : Flag.t -> t -> t
-  val shallow_copy : Flag.t -> t -> t
-  val add : key -> 'a kind -> 'a -> t -> unit
-  val import : from:t -> t -> unit
-  val import_values : key -> set -> t -> unit
-  val remove : key -> t -> unit
-  val mem : key -> t -> bool
-  val iter : (key -> set -> unit) -> t -> unit
-  exception Different_flag
-  val filter_map_inplace : ?check:bool -> (key -> set -> set option) -> t -> unit
-  val find : key -> t -> set
-  val fold : (key -> set -> 'b -> 'b) -> t -> 'b -> 'b
-  val length : t -> int
-  val flag : t -> Flag.t
-  val stats : t -> Hashtbl.statistics
-  val pp : formatter -> t -> unit
-end = struct
-  type key = M_key.t
-  type set = S.t
-  type 'a kind = 'a S.kind
-  module H = Hashtbl.Make(M_key)
-  type nonrec t = S.t H.t * Flag.t
-  let create f =
-    H.create 32, f
-  let clear (h, f) =
-    if H.length h > 0 then Flag.report f;
-    H.clear h
-  let copy f (h, _) =
-    let r = H.copy h in
-    H.filter_map_inplace (fun _ r -> Some (S.copy f r)) r;
-    r, f
-  let shallow_copy f (h, _) = H.copy h, f
-  let add k kind e (h, f) =
-    if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f));
-    S.add kind e (H.find h k)
-  let import ~from:(from, _) (h, f) =
-    H.iter
-      (fun k from ->
-         if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f));
-         S.import ~from (H.find h k))
-      from
-  let import_values k from (h, f) =
-    if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f));
-    S.import ~from (H.find h k)
-  let remove k (h, f) =
-    if H.mem h k then Flag.report f;
-    H.remove h k
-  let mem k (h, _) = H.mem h k
-  let iter f (h, _) =
-    H.iter f h
-  let find k (h, f) =
-    try H.find h k
-    with Not_found ->
-      let r = S.create f in
-      Flag.report f;
-      H.replace h k r;
-      r
-  exception Different_flag
-  let filter_map_inplace ?(check=true) f (h, fl) =
-    H.filter_map_inplace
-      (fun e set ->
-         let r = f e set in
-         match r with
-         | None -> Flag.report fl; None
-         | Some s -> if check && S.flag s != fl then raise Different_flag else (if s != set then Flag.report fl; r))
-      h
-  let fold f (h, _) x =
-    H.fold f h x
-  let length (h, _) = H.length h
-  let flag (_, f) = f
-  let stats (h, _) = H.stats h
-  let pp fmt (h, _) =
-    fprintf fmt "  [@[%a@]]"
-      (pp_print_list
-         ~pp_sep:(fun fmt () -> fprintf fmt ";@;")
-         (fun fmt (k, h) -> fprintf fmt "@[%a@ ->@ @[%a@]@]" M_key.pp k S.pp h))
-      (H.fold (fun k h -> List.cons (k, h)) h [])
-end
-
-module H_region = Make_reporting_bithashset (Region)
-
-module Formal_var = Make_var (struct let is_ok vi = isArithmeticOrPointerType vi.vtype && vi.vformal end)
-
-module H_formal_var = Make_reporting_bithashset (Formal_var)
-
-module Local_var =
-  Make_var (struct let is_ok vi = isArithmeticOrPointerType vi.vtype && not vi.vglob && not vi.vformal end)
-
-module H_local_var = Make_reporting_bithashset (Local_var)
-
-module Writes = struct
-  type t =
-    | Global of Region.t
-    | Local of Local_var.t
-    | Poly of Formal_var.t
-    | Result
-
-  let compare w1 w2 =
-    match w1, w2 with
-    | Global r1, Global r2 -> Region.compare r1 r2
-    | Global _, _ -> -1
-    | Local _, Global _ -> 1
-    | Local v1, Local v2 -> Local_var.compare v1 v2
-    | Local _, _ -> -1
-    | Poly v1, Poly v2 -> Formal_var.compare v1 v2
-    | Poly _, Result -> -1
-    | Poly _, _ -> 1
-    | Result, Result -> 0
-    | Result, _ -> 1
-
-  let equal w1 w2 =
-    match w1, w2 with
-    | Global r1, Global r2 -> Region.equal r1 r2
-    | Local v1, Local v2 -> Local_var.equal v1 v2
-    | Poly v1, Poly v2 -> Formal_var.equal v1 v2
-    | Result, Result -> true
-    | _ -> false
-
-  let hash =
-    function
-    | Global r -> Region.hash r * 11
-    | Local v -> 3 * Local_var.hash v + 1
-    | Poly v -> 5 * Formal_var.hash v + 3
-    | Result -> 7
-
-  let pp fmttr =
-    let pp fmt = fprintf fmttr fmt in
-    function
-    | Global r -> pp "%a" Region.pp r
-    | Local v -> pp "~%a" Local_var.pp v
-    | Poly v -> pp "\'%a" Formal_var.pp v
-    | Result -> pp "R"
-end
-
-module Reads : sig
-  type t
-
-  type _ kind =
-    | Global : Region.t kind
-    | Poly : Formal_var.t kind
-    | Local : Local_var.t kind
-
-  type some = Some : 'a kind * 'a -> some
-
-  val of_writes : Writes.t -> some option
-
-  val create : Flag.t -> t
-  val clear : t -> unit
-  val import : from:t -> t -> unit
-  val add_global : Region.t -> t -> unit
-  val add_poly : Formal_var.t -> t -> unit
-  val add_local : Local_var.t -> t -> unit
-  val add : 'a kind -> 'a -> t -> unit
-  val sub : t -> from:t -> unit
-  val mem : 'a kind -> 'a -> t -> bool
-  val intersects : t -> t -> bool
-  val flag : t -> Flag.t
-  val copy : Flag.t -> t -> t
-
-  val iter_global : (Region.t -> unit) -> t -> unit
-  val iter_poly : (Formal_var.t -> unit) -> t -> unit
-  val iter_local : (Local_var.t -> unit) -> t -> unit
-  val is_empty : t -> bool
-  val is_singleton : t -> bool
-  val has_vars : t -> bool
-  val length : t -> int
-
-  val pp : formatter -> t -> unit
-end = struct
-  type t =
-    {
-      global : H_region.t;
-      poly   : H_formal_var.t;
-      local  : H_local_var.t
-    }
-
-  type _ kind =
-    | Global : Region.t kind
-    | Poly : Formal_var.t kind
-    | Local : Local_var.t kind
-
-  type some = Some : 'a kind * 'a -> some
-
-  let of_writes : _ -> some option =
-    function
-    | Writes.Global r -> Some (Some (Global, r))
-    | Writes.Local v -> Some (Some (Local, v))
-    | Writes.Poly v -> Some (Some (Poly, v))
-    | Writes.Result -> None
-
-  let create f = { global = H_region.create f; poly = H_formal_var.create f; local = H_local_var.create f }
-  let clear r = H_region.clear r.global; H_formal_var.clear r.poly; H_local_var.clear r.local
-  let import ~from r =
-    H_region.import ~from:from.global r.global;
-    H_formal_var.import ~from:from.poly r.poly;
-    H_local_var.import ~from:from.local r.local
-  let add_global g r = H_region.add g r.global
-  let add_poly v r = H_formal_var.add v r.poly
-  let add_local v r = H_local_var.add v r.local
-  let add : type a. a kind -> a -> _ = fun k x r ->
-    match k with
-    | Global -> H_region.add x r.global
-    | Poly -> H_formal_var.add x r.poly
-    | Local -> H_local_var.add x r.local
-  let sub r ~from =
-    H_region.sub r.global ~from:from.global;
-    H_local_var.sub r.local ~from:from.local;
-    H_formal_var.sub r.poly ~from:from.poly
-  let mem : type a. a kind -> a -> _ = fun k x r ->
-    match k with
-    | Global -> H_region.mem x r.global
-    | Poly -> H_formal_var.mem x r.poly
-    | Local -> H_local_var.mem x r.local
-  let intersects r1 r2 =
-    H_region.intersects r1.global r2.global ||
-    H_formal_var.intersects r1.poly r2.poly ||
-    H_local_var.intersects r1.local r2.local
-  let flag r = H_region.flag r.global
-  let copy f r =
-    { global = H_region.copy f r.global; poly = H_formal_var.copy f r.poly; local = H_local_var.copy f r.local }
-
-  let iter_global f r = H_region.iter f r.global
-  let iter_poly f r = H_formal_var.iter f r.poly
-  let iter_local f r = H_local_var.iter f r.local
-  let is_empty r = H_region.is_empty r.global && H_formal_var.is_empty r.poly && H_local_var.is_empty r.local
-  let is_singleton r =
-    H_region.length r.global = 1 && H_formal_var.is_empty r.poly && H_local_var.is_empty r.local ||
-    H_formal_var.length r.poly = 1 && H_region.is_empty r.global && H_local_var.is_empty r.local ||
-    H_local_var.length r.local = 1 && H_formal_var.is_empty r.poly && H_region.is_empty r.global
-  let length r = H_region.length r.global + H_formal_var.length r.poly + H_local_var.length r.local
-  let has_vars r = not (H_formal_var.is_empty r.poly && H_local_var.is_empty r.local)
-
-  let pp fmt r =
-    fprintf fmt "  @[gl:%a,@ @,pol:%a,@ @,loc:%a@]" H_region.pp r.global H_formal_var.pp r.poly H_local_var.pp r.local
-end
-
-module Fundec = struct include Fundec let pp = pretty end
-module Stmt = struct include Stmt let pp = pretty end
-
-module H_fundec = Make_reporting_bithashset (Fundec)
-module H_stmt = Make_reporting_bithashset (Stmt)
-
-module Requires : sig
-  type t
-
-  val create : Flag.t -> t
-  val import : from:t -> t -> unit
-  val add_body : fundec -> t -> unit
-  val add_stmt : stmt -> t -> unit
-  val copy : Flag.t -> t -> t
-
-  val iter_bodies : (fundec -> unit) -> t -> unit
-  val iter_stmts : (stmt -> unit) -> t -> unit
-  val has_body : fundec -> t -> bool
-  val has_stmt : stmt -> t -> bool
-end = struct
-  type t =
-    {
-      bodies : H_fundec.t;
-      stmts  : H_stmt.t
-    }
-
-  let create f = { bodies = H_fundec.create f; stmts = H_stmt.create f }
-  let import ~from r =
-    H_fundec.import ~from:from.bodies r.bodies;
-    H_stmt.import ~from:from.stmts r.stmts
-  let add_body f r = H_fundec.add f r.bodies
-  let add_stmt s r = H_stmt.add s r.stmts
-  let copy f r = { bodies = H_fundec.copy f r.bodies; stmts = H_stmt.copy f r.stmts }
-
-  let iter_bodies f r = H_fundec.iter f r.bodies
-  let iter_stmts f r = H_stmt.iter f r.stmts
-  let has_body f r = H_fundec.mem f r.bodies
-  let has_stmt s r = H_stmt.mem s r.stmts
-end
-
-module H_write = Make_reporting_hashmap (Writes) (Reads)
-
-module Void_ptr_var = Make_var (struct let is_ok vi = isVoidPtrType vi.vtype end)
-
-module H_void_ptr_var = Make_reporting_bithashset (Void_ptr_var)
-
-module Effect : sig
-  type t
-
-  val create : Flag.t -> t
-  val reads : Writes.t -> t -> Reads.t
-  val depends : t -> Reads.t
-  val add_reads : Writes.t -> Reads.t -> t -> unit
-  val add_writes : H_write.t -> t -> unit
-  val add_global_read : Writes.t -> Region.t -> t -> unit
-  val add_poly_read : Writes.t -> Formal_var.t -> t -> unit
-  val add_local_read : Writes.t -> Local_var.t -> t -> unit
-  val add_global_dep : Region.t -> t -> unit
-  val add_poly_dep : Formal_var.t -> t -> unit
-  val add_local_dep : Local_var.t -> t -> unit
-  val add_depends : Reads.t -> t -> unit
-  val add_result_dep : t -> unit
-  val add_requires : Requires.t -> t -> unit
-  val add_body_req : fundec -> t -> unit
-  val add_stmt_req : stmt -> t -> unit
-  val set_is_target : t -> unit
-  val add_tracking_var : Void_ptr_var.t -> t -> unit
-  val shallow_copy_writes : Flag.t -> t -> H_write.t
-  val copy : Flag.t -> t -> t
-
-  val iter_writes : (Writes.t -> Reads.t -> unit) -> t -> unit
-  val is_target : t -> bool
-  val is_tracking_var : Void_ptr_var.t -> t -> bool
-  val iter_global_deps : (Region.t -> unit) -> t -> unit
-  val iter_poly_deps : (Formal_var.t -> unit) -> t -> unit
-  val iter_local_deps : (Local_var.t -> unit) -> t -> unit
-  val has_result_dep : t -> bool
-  val iter_body_reqs : (fundec -> unit) -> t -> unit
-  val iter_stmt_reqs : (stmt -> unit) -> t -> unit
-  val has_body_req : fundec -> t -> bool
-  val has_stmt_req : stmt -> t -> bool
-  val flag : t -> Flag.t
-
-  val pp : formatter -> t -> unit
-end = struct
-  type t =
-    {
-              writes     : H_write.t;
-              tracking   : H_void_ptr_var.t;
-      mutable is_target  : bool;
-              depends    : Reads.t;
-      mutable result_dep : bool;
-              requires   : Requires.t;
-              flag       : Flag.t;
-    }
-
-  let create f =
-    {
-      writes = H_write.create f;
-      tracking = H_void_ptr_var.create f;
-      is_target = false;
-      depends = Reads.create f;
-      result_dep = false;
-      requires = Requires.create f;
-      flag = f
-    }
-
-  let reads w e = H_write.find w e.writes
-  let depends e = e.depends
-  let add_writes from e = H_write.import ~from e.writes
-  let add_reads w from e = H_write.import_values w from e.writes
-  let add_global_read w r e = Reads.add_global r (reads w e)
-  let add_poly_read w p e = Reads.add_poly p (reads w e)
-  let add_local_read w l e = Reads.add_local l (reads w e)
-  let add_global_dep d e = Reads.add_global d e.depends
-  let add_poly_dep d e = Reads.add_poly d e.depends
-  let add_local_dep d e = Reads.add_local d e.depends
-  let add_depends d e = Reads.import ~from:d e.depends
-  let add_result_dep e = if not e.result_dep then Flag.report e.flag; e.result_dep <- true
-  let add_requires d e = Requires.import ~from:d e.requires
-  let set_is_target e = if not e.is_target then Flag.report e.flag; e.is_target <- true
-
-  let add_body_req f e = Requires.add_body f e.requires
-  let add_stmt_req s e = Requires.add_stmt s e.requires
-  let has_body_req f e = Requires.has_body f e.requires
-  let has_stmt_req s e = Requires.has_stmt s e.requires
-  let add_tracking_var v e = H_void_ptr_var.add v e.tracking
-  let shallow_copy_writes f e = H_write.shallow_copy f e.writes
-  let copy f e =
-    {
-      writes = H_write.copy f e.writes;
-      tracking = H_void_ptr_var.copy f e.tracking;
-      is_target = e.is_target;
-      depends = Reads.copy f e.depends;
-      result_dep = e.result_dep;
-      requires = Requires.copy f e.requires;
-      flag = f
-    }
-
-  let iter_writes f e = H_write.iter f e.writes
-  let is_target e = e.is_target
-  let iter_global_deps f e = Reads.iter_global f e.depends
-  let iter_poly_deps f e = Reads.iter_poly f e.depends
-  let iter_local_deps f e = Reads.iter_local f e.depends
-  let has_result_dep e = e.result_dep
-  let is_tracking_var v e = H_void_ptr_var.mem v e.tracking
-  let iter_body_reqs f e = Requires.iter_bodies f e.requires
-  let iter_stmt_reqs f e = Requires.iter_stmts f e.requires
-  let flag e = e.flag
-
-  let pp fmt e =
-    fprintf fmt "@[w:@;@[%a@];@.track:%a;@.tar:%B;@.deps:@;%a;@.RD:%B@]"
-      H_write.pp e.writes H_void_ptr_var.pp e.tracking e.is_target Reads.pp e.depends e.result_dep
-end
-
-module File_info = struct
-  module H = Fundec.Hashtbl
-  type t = Effect.t H.t
-
-  let create () = H.create 256
-  let get fi fl f = try H.find fi f with Not_found -> let r = Effect.create fl in H.replace fi f r; r
-end
-
-let flag = Flag.create "convergence"
-
-let rec until_convergence f fi scc =
-  Flag.clear flag;
-  f fi scc;
-  if not (Flag.reported flag) then ()
-  else until_convergence f fi scc
-
-class type ['a] frama_c_collector = object inherit frama_c_inplace method finish : 'a end
-
-let visit_until_convergence ~order (v : _ -> _ -> _ #frama_c_collector) fi sccs =
-  let iter =
-    match order with
-    | `topological -> List.iter
-    | `reversed -> fun f l -> List.(iter f (rev l))
-  in
-  iter
-    (fun scc ->
-       let scc = List.(Kernel_function.(scc |> filter is_definition |> map get_definition)) in
-       until_convergence
-         (fun fi ->
-            List.iter
-              (fun d ->
-                 Console.debug "Analysing function %s..." d.svar.vname;
-                 let v = v fi d in
-                 ignore @@ visitFramacFunction (v :> frama_c_visitor) d;
-                 v#finish;
-                 Console.debug ~level:3 "Resulting effect is:@.%a@." Effect.pp @@ File_info.get fi flag d))
-         fi
-         scc)
-    sccs
-
-let rec add_from_lval acc =
-  let add_parameter vi = Reads.add_poly (Formal_var.of_varinfo_exn vi) acc in
-  let add_global vi = Reads.add_global (Region.Variable (Global_var.of_varinfo_exn vi)) acc in
-  let add_local vi = Reads.add_local (Local_var.of_varinfo_exn vi) acc in
-  let add_field fi = Reads.add_global (Region.Field (Struct_field.of_fieldinfo_exn fi)) acc in
-  let add_type typ =
-    let typ = typeDeepDropAllAttributes @@ unrollTypeDeep typ in
-    Reads.add_global (Region.Type_approximation (Primitive_type.of_typ_exn typ)) acc
-  in
-  fun lv ->
-    let typ = typeOfLval lv in
-    if isArithmeticOrPointerType typ then
-      match lv with
-      | Var ({ vformal = true; vaddrof = false; _ } as vi), NoOffset                    -> add_parameter vi
-      | Var ({ vglob = true; vaddrof = false; _ } as vi), NoOffset                      -> add_global vi
-      | Var ({ vaddrof = false; _ } as vi), NoOffset                                    -> add_local vi
-      | _, off ->
-        match lastOffset off with
-        | Field ({ fcomp = { cstruct = true; _ }; faddrof = false; _ } as fi, NoOffset) -> add_field fi
-        | _                                                                             -> add_type typ
-    else
-      match unrollType typ with
-      | TInt _
-      | TEnum _
-      | TFloat _
-      | TPtr _
-      | TNamed _                                                                        -> assert false
-      (* Unrolled, not a pointer or arithmetic *)
-      | TVoid _                                                                         -> add_type charType
-      | TArray _                                                                        ->
-        add_from_lval acc @@ addOffsetLval (Index (integer ~loc:Location.unknown 0, NoOffset)) lv
-      | TFun _ as t                                                                     -> add_type (TPtr (t, []))
-      | TComp (ci, _, _)                                                                ->
-        List.iter (fun fi -> add_from_lval acc @@ addOffsetLval (Field (fi, NoOffset)) lv) ci.cfields
-      | TBuiltin_va_list _                                                              -> add_type voidPtrType
-
-class vertex_collector vertices =
-  object(self)
-    inherit frama_c_inplace
-
-    method! vexpr e =
-      match e.enode with
-      | AddrOf (Mem e, _)
-      | StartOf (Mem e, _) ->
-        ignore @@ visitFramacExpr (self :> frama_c_visitor) e;
-        SkipChildren
-      | SizeOfE _
-      | AlignOfE _
-      | AddrOf _
-      | StartOf _ ->
-        SkipChildren
-      | _ -> DoChildren
-
-    method! vlval lv =
-      add_from_lval vertices lv;
-      DoChildren
-  end
-
-class lval_vertex_collector vertices =
-  object
-    inherit vertex_collector vertices as super
-
-    method! vlval lv =
-      ignore @@ super#vlval lv;
-      match lv with
-      | Mem _, _-> SkipChildren
-      | _ -> DoChildren
-    method! voffs _ = SkipChildren
-  end
-
-class rval_in_lval_vertex_collector vertices =
-  object
-    val o = new vertex_collector vertices
-
-    inherit frama_c_inplace
-
-    method! vlval =
-      function
-      | Mem e, off ->
-        ignore @@ visitFramacExpr o e;
-        ignore @@ visitFramacOffset o off;
-        SkipChildren
-      | _ -> DoChildren
-
-    method! voffs =
-      function
-      | Index (e, _) ->
-        ignore @@ visitFramacExpr o e;
-        DoChildren
-      | _ -> DoChildren
-  end
-
-let add_from_lval lv acc = ignore @@ visitFramacLval (new lval_vertex_collector acc) lv
-let add_from_rval e acc = ignore @@ visitFramacExpr (new vertex_collector acc) e
-let add_rval_from_lval lv acc = ignore @@ visitFramacLval (new rval_in_lval_vertex_collector acc) lv
-let add_from_rval_and_lval lv e acc = add_from_rval e acc; add_rval_from_lval lv acc
-
-let get_addressed_kfs =
-  let cache = ref None in
-  fun () ->
-    let fill () =
-      let o =
-        object(self)
-          val mutable result = []
-          method add vi = result <- Globals.Functions.get vi :: result
-          method get = result
-
-          inherit frama_c_inplace
-          method !vexpr e =
-            match e.enode with
-            | AddrOf (Var vi, NoOffset) when isFunctionType vi.vtype ->
-              self#add vi;
-              SkipChildren
-            | _ ->
-              DoChildren
-          method! vlval (lv, _) =
-            match lv with
-            | Var ({ vaddrof = true; vtype } as vi) when isFunctionType vtype ->
-              self#add vi;
-              SkipChildren
-            | _ -> DoChildren
-        end
-      in
-      Visitor.visitFramacFileSameGlobals (o :> frama_c_visitor) @@ Ast.get ();
-      o#get
-    in
-    match !cache with
-    | None ->
-      let r = fill () in
-      cache := Some r;
-      r
-    | Some r -> r
-
-let filter_matching_kfs params =
-  get_addressed_kfs () |>
-  List.filter
-    (fun kf ->
-       let formals = Kernel_function.get_formals kf in
-       if Kernel_function.is_definition kf && List.(length formals = length params) then
-         List.for_all2 (fun vi e -> not @@ need_cast vi.vtype @@ typeOf e) formals params
-       else false)
-
-module H_stmt_conds = struct
-  include Stmt.Hashtbl
-
-  let find_or_empty h k = try find h k with Not_found -> []
-end
-
-class break_continue_collector =
-  object
-    val heads = H_stmt_conds.create 16
-    val curr_head = Stack.create ()
-
-    inherit frama_c_inplace
-
-    method! vstmt s =
-      match s.skind with
-      | If (e, _, _, _) ->
-        begin try
-          let (_, st) = Stack.top curr_head in
-          Stack.push e st;
-          DoChildrenPost (fun s -> ignore @@ Stack.pop st; s)
-        with
-        | Stack.Empty -> DoChildren
-        end
-      | Switch _ | Loop _ ->
-        Stack.push (s, Stack.create ()) curr_head;
-        DoChildrenPost (fun s -> ignore @@ Stack.pop curr_head; s)
-      | Break _ | Continue _ ->
-        begin try
-          let (s, st) = Stack.top curr_head in
-          let l = H_stmt_conds.find_or_empty heads s in
-          H_stmt_conds.replace heads s (Stack.fold (fun l x -> x :: l) [] st @ l)
-        with
-        | Stack.Empty -> ()
-        end;
-        SkipChildren
-      | _ -> DoChildren
-
-    method heads = heads
-  end
-
-let collect_break_continue sccs =
-  let vis = new break_continue_collector in
-  List.(Kernel_function.(
-      sccs |>
-      flatten |>
-      filter is_definition |>
-      map get_definition |>
-      iter @@ ignore % visitFramacFunction (vis :> frama_c_visitor)));
-  vis#heads
-
-let take n l =
-  let rec loop n dst = function
-    | h :: t when n > 0 ->
-      loop (n - 1) (h :: dst) t
-    | _ -> List.rev dst
-  in
-  loop n [] l
-
-let project_reads ~fundec ~params =
-  let params =
-    if
-      match unrollType fundec.svar.vtype with
-      | TFun (_, _, true, _) -> true
-      | _ -> false
-    then take (List.length fundec.sformals) params
-    else params
-  in
-  let params = List.(combine fundec.sformals @@ map add_from_rval params) in
-  fun ~from acc ->
-    Reads.iter_poly (fun fv -> List.assoc (fv :> varinfo) params acc) from;
-    Reads.iter_global (fun r -> Reads.add_global r acc) from
-
-(* Incomplete, but suitable for fix-point iteration approach *)
-let add_transitive_closure =
-  let module Vertex = struct
-    type t = Writes.t * Reads.t
-    let compare (a, _) (b, _) = Writes.compare a b
-    let equal (a, _) (b, _) = Writes.equal a b
-    let hash (x, _) = Writes.hash x
-  end in
-  let module Deps = Graph.Imperative.Digraph.Concrete (Vertex) in
-  let module Sccs = Graph.Components.Make (Deps) in
-  fun e ->
-    let g = Deps.create () in
-    Effect.iter_writes (fun w r -> Deps.add_vertex g (w, r)) e;
-    Deps.iter_vertex
-      (fun (w_from, _ as v_from) ->
-        if w_from <> Writes.Result then
-          Deps.iter_vertex
-            (fun (_, r_to as v_to) ->
-               if not (Vertex.equal v_from v_to) then
-                 may
-                   (fun (Reads.Some (kind, r)) -> if Reads.mem kind r r_to then Deps.add_edge g v_from v_to)
-                   (Reads.of_writes w_from))
-
-          g)
-      g;
-    let sccs = Sccs.scc_list g in
-    List.iter
-      (fun scc ->
-         let scc' = scc @ [List.hd scc] in
-         let rec round =
-           function
-           | [] -> assert false
-           | (_, from) :: _ as h ->
-             function
-             | [] -> ()
-             | (_, r_c as c) :: t ->
-               Reads.import ~from r_c;
-               round (c :: h) t
-         in
-         round [List.hd scc'] (List.tl scc');
-         List.iter (fun (_, from as v) -> Deps.iter_succ (fun (_, r) -> Reads.import ~from r) g v) scc)
-      sccs
-
-let is_var_sating p e =
-  match (stripCasts e).enode with
-  | Lval (Var v, NoOffset) when p v -> true
-  | _ -> false
 
 class effect_collector break_continue_cache file_info def =
   let eff = File_info.get file_info flag def in
@@ -1573,3 +957,4 @@ let slice () =
   collect_effects (collect_break_continue sccs) fi sccs;
   mark fi sccs;
   sweep fi
+*)

@@ -49,8 +49,8 @@ let cache_offsets =
            | `Field fi             -> Ty.normalize fi.ftype
          in
          let off = Integer.of_int @@ fst (bitsOffset (TComp (ci, empty_size_cache (), [])) (to_offset path)) lsr 3 in
-         H_field.replace path_of_key (ci, ty, off) path;
-         H_field.replace path_of_key (ci, ty, negate off) path)
+         Info.H_field.replace path_of_key (ci, ty, off) path;
+         Info.H_field.replace path_of_key (ci, ty, negate off) path)
 
 let container_of =
   let mkCast = mkCast ~overflow:Check ~force:true in
@@ -77,9 +77,7 @@ let rec mark =
   | `Field fi :: os            -> fi.faddrof <- true; mark os
   | `Container_of_void _ :: os -> mark os
 
-module Make (I : sig val offs_of_key : Info.offs H_field.t end) = struct
-  module Analysis = Analysis (I)
-
+module Make (Analysis : Analysis) = struct
   open Analysis
 
   class rewriter = object(self)

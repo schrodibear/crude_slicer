@@ -54,6 +54,8 @@ let map_fst f (a, b) = f a, b
 let map_snd f (a, b) = a, f b
 let map_pair f (a, b) = f a, f b
 
+let some x = Some x
+
 module List = struct
   include List
 

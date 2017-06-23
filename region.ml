@@ -236,7 +236,7 @@ module type Unifiable = sig
   val repr : t -> repr
 end
 
-module Make_unifiable (R : Representant) : Unifiable with type repr = R.t = struct
+module Make_unifiable (R : Representant) () : Unifiable with type repr = R.t = struct
   type t = R.t
   type repr = R.t
   let of_repr = id
@@ -278,7 +278,9 @@ module Make_unifiable (R : Representant) : Unifiable with type repr = R.t = stru
       | `Second -> set r2 ~as_repr_of:r1
 end
 
-module Make_hashmap (R : Representant) (U : Unifiable with type repr = R.t) : sig
+module type Hashmap = sig
+  module R : Representant
+  module U : Unifiable with type repr = R.t
   type t
   val create : unit -> t
   val add : U.t -> U.t -> t -> unit
@@ -287,7 +289,13 @@ module Make_hashmap (R : Representant) (U : Unifiable with type repr = R.t) : si
   val find_or_call : create:(R.t -> R.t) -> call:(U.t -> U.t -> unit) -> t -> U.t -> U.t
   val iter : (U.t -> unit) -> U.t -> t -> unit
   val clear : t -> unit
-end = struct
+end
+
+module Make_hashmap (R : Representant) (U : Unifiable with type repr = R.t) :
+  Hashmap with module R = R and module U = U = struct
+  module R = R
+  module U = U
+
   module H = Hashtbl.Make (R)
   type t = U.t H.t
   let create () = H.create 4096
@@ -307,7 +315,10 @@ end = struct
   let clear h = H.clear h
 end
 
-module Make_pair_hashmap (R : Representant) (U : Unifiable with type repr = R.t) (K : Hashtbl.HashedType) : sig
+module type Pair_hashmap = sig
+  module R : Representant
+  module U : Unifiable with type repr = R.t
+  module K : Hashtbl.HashedType
   type t
   val create : unit -> t
   val add : U.t -> K.t -> U.t -> t -> unit
@@ -316,7 +327,14 @@ module Make_pair_hashmap (R : Representant) (U : Unifiable with type repr = R.t)
   val find_or_call : create:(R.t -> K.t -> R.t) -> call:(U.t -> K.t -> U.t -> unit) -> t -> U.t -> K.t -> U.t
   val iter : (K.t -> U.t -> unit) -> U.t -> t -> unit
   val clear : t -> unit
-end = struct
+end
+
+module Make_pair_hashmap (R : Representant) (U : Unifiable with type repr = R.t) (K : Hashtbl.HashedType) :
+  Pair_hashmap with module R = R and module U = U and module K = K = struct
+  module R = R
+  module U = U
+  module K = K
+
   module H =
     Hashtbl.Make
       (struct
@@ -350,20 +368,11 @@ end = struct
   let clear (h, ks) = H.clear h; H_k.clear ks
 end
 
-module Unifiable = Make_unifiable (Representant)
+module Separation : functor () -> sig
+  module R = Representant
+  module U : Unifiable with type repr = R.t
+  module H' : Hashmap with module R := R and module U = U
 
-module H_f = Make_pair_hashmap (Representant) (Unifiable) (Fieldinfo)
-module H_t = Make_pair_hashmap (Representant) (Unifiable) (Typ)
-module H' = Make_hashmap (Representant) (Unifiable)
-
-module R = Representant
-module U = Unifiable
-
-let global = R.global
-let poly = R.poly
-let local = R.local
-
-module Separation : sig
   val arrow : U.t -> fieldinfo -> U.t
   val deref : U.t -> U.t
   val dot : U.t -> fieldinfo -> U.t
@@ -377,10 +386,17 @@ module Separation : sig
   val containers : (fieldinfo -> U.t -> unit) -> U.t -> unit
   val containers_of_void : (typ -> U.t -> unit) -> U.t -> unit
   val unify : U.t -> U.t -> unit
-  val duplicate : map:H'.t -> U.t -> Unifiable.t
+  val duplicate : map:H'.t -> U.t -> U.t
   val accomodate : map:H'.t -> U.t list -> on:U.t list -> unit
   val replay : map:H'.t -> U.t list -> on:U.t list -> unit
-end = struct
+end = functor () -> struct
+  module R = Representant
+  module U = Make_unifiable (R) ()
+
+  module H_f = Make_pair_hashmap (R) (U) (Fieldinfo)
+  module H_t = Make_pair_hashmap (R) (U) (Typ)
+  module H' = Make_hashmap (R) (U)
+
   let h_arrow = H_f.create ()
   let h_deref = H'.create ()
   let h_dot = H_f.create ()
@@ -493,11 +509,11 @@ end = struct
     List.iter2 unify on (List.map (duplicate ~map) regs)
 end
 
-module Info = Info.Make (R) (U) ()
+module type Analysis = sig
+  module R = Representant
+  module U : Unifiable with type repr = R.t
+  module I : module type of Info.Make (R) (U) ()
 
-module H_field = Info.H_field
-
-module Analysis (I : sig val offs_of_key : Info.offs H_field.t end) : sig
   val match_container_of1 : exp_node -> (exp * Info.offs) option
   val match_container_of2 : exp_node -> (exp * Info.offs) option
   val match_dot : exp_node -> (exp * Info.offs) option
@@ -516,6 +532,8 @@ module Analysis (I : sig val offs_of_key : Info.offs H_field.t end) : sig
   val of_expr : ?f:string -> exp -> [ `Value of _ | `None ] maybe_region
   val location : [ `Location of _ | `Value of _  | `None ] maybe_region -> U.t
   val compute_regions : unit -> unit
+  val dot_voids : (U.t -> unit) -> U.t -> unit
+  val containers_of_void : (typ -> U.t -> unit) -> U.t -> unit
   module H_call : sig
     type t
     val find : U.t -> t -> U.t
@@ -525,7 +543,18 @@ module Analysis (I : sig val offs_of_key : Info.offs H_field.t end) : sig
   val arg_regions : ?f:string -> kernel_function -> lval option -> exp list -> U.t list * U.t list
   val param_regions : kernel_function -> U.t list * U.t list
   val relevant_region : ?f:string -> U.t -> bool
-end = struct
+end
+
+module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : Analysis = struct
+  module Separation = Separation ()
+
+  open Separation
+  module R = R
+  module U = U
+
+  module H_field = Info.H_field
+  module I = Info.Make (R) (U) ()
+
   module H_v = Varinfo.Hashtbl
   module H_s =
     Hashtbl.Make
@@ -547,8 +576,6 @@ end = struct
   let h_str = H_s.create 256
   let h_lval = H_l.create 4096
   let h_expr = H_e.create 4096
-
-  open Separation
 
   let match_container_of1 =
     let rec match_offset ?(acc=[]) =
@@ -589,7 +616,7 @@ end = struct
       begin match unrollType pstr, unrollType (typeOf e) with
       | TComp (ci, _, _), (TPtr _ | TArray _ as ty) when ci.cstruct ->
         begin try
-          Some (e, H_field.find I.offs_of_key (ci, ty, c))
+          Some (e, H_field.find I'.offs_of_key (ci, ty, c))
         with
         | Not_found -> None
         end
@@ -607,7 +634,7 @@ end = struct
       begin match unrollType ty with
       | TComp (ci, _ ,_) ->
         begin try
-          Some (e, H_field.find I.offs_of_key (ci, uintType, c))
+          Some (e, H_field.find I'.offs_of_key (ci, uintType, c))
         with
         | Not_found -> None
         end
@@ -1122,6 +1149,9 @@ end = struct
     visitFramacFile (new unifier () None :> frama_c_visitor) @@ Ast.get ();
     Fixpoint.visit_until_convergence ~order:`topological (fun () f -> new unifier () @@ Some f) () sccs;
     unify_voids None
+
+  let dot_voids = dot_voids
+  let containers_of_void = containers_of_void
 
   module H_call = struct
     type t = H'.t

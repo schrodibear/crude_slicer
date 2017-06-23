@@ -46,7 +46,7 @@ module Make (I : Info) = struct
          let scc = List.(Kernel_function.(scc |> filter is_definition |> map get_definition)) in
          until_convergence
            (fun fi ->
-              List.iter
+              iter
                 (fun d ->
                    Console.debug "Analysing function %s..." d.svar.vname;
                    let v = v fi d in
