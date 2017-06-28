@@ -147,7 +147,7 @@ module Make (Analysis : Analysis) = struct
 
     let add_from_lval lv acc = may F.(fun w -> let Some (k, r) = of_writes w in add k r acc) @@ w_lval ?f lv
 
-    class rval_reads_collector acc = object(self)
+    class rval_collector = object(self)
       inherit frama_c_inplace
 
       method! vexpr =
@@ -170,6 +170,11 @@ module Make (Analysis : Analysis) = struct
           | BinOp _
           | CastE  _
           | Info _               -> DoChildren
+    end
+
+    class rval_reads_collector acc = object
+      inherit frama_c_inplace
+      inherit! rval_collector
 
       method! vlval lv =
         add_from_lval lv acc;
@@ -183,6 +188,17 @@ module Make (Analysis : Analysis) = struct
       match lv with
       | Mem e, off -> ignore @@ visitFramacExpr o e; ignore @@ visitFramacOffset o off
       | Var _, off -> ignore @@ visitFramacOffset o off
+
+    class rval_assigner assigns from = object
+      inherit frama_c_inplace
+      inherit! rval_collector
+
+      method! vlval lv =
+        may (fun w -> A.import_values w from assigns) (w_lval ?f lv);
+        DoChildren
+    end
+
+    let assign_all e from assigns = ignore @@ visitFramacExpr (new rval_assigner assigns from) e
 
     let prj_poly_var s params =
       let args =
@@ -263,6 +279,19 @@ module Make (Analysis : Analysis) = struct
              iter (fun (_, from as v) -> iter_succ (fun (_, r) -> F.import ~from r) g v) scc)
           sccs
 
+    let close_depends =
+      let reads = F.create dummy_flag in
+      fun assigns depends ->
+        F.clear reads;
+        F.import ~from:depends reads;
+        let import_reads w = F.import ~from:(A.find w assigns) depends in
+        F.iter_global_mems (fun m -> import_reads @@ `Global_mem m) reads;
+        F.iter_poly_mems   (fun m -> import_reads @@ `Poly_mem m)   reads;
+        F.iter_local_mems  (fun m -> import_reads @@ `Local_mem m)  reads;
+        F.iter_global_vars (fun v -> import_reads @@ `Global_var v) reads;
+        F.iter_poly_vars   (fun v -> import_reads @@ `Poly_var v)   reads;
+        F.iter_local_vars  (fun v -> import_reads @@ `Local_var v)  reads
+
     let comp_assign lv e reads assigns =
         let r_lv, r_e =
           match e.enode with
@@ -311,20 +340,23 @@ module Make (Analysis : Analysis) = struct
 
     let assign = under gassign
 
-    let return = under @@ fun reads e assigns ->
-      add_from_rval e reads;
-      match e.enode, unrollType @@ typeOf e with
-      | Lval lv, TComp _ -> comp_assign lv e reads assigns
-      | _,       TComp _ -> Console.fatal "Slicing.return: composite expression that is not an lvalue: %a" pp_exp e
-      | _                -> A.import_values `Result reads assigns
+    let return = under @@ fun reads ?e assigns ->
+      may
+        (fun e ->
+           add_from_rval e reads;
+           match e.enode, unrollType @@ typeOf e with
+           | Lval lv, TComp _ -> comp_assign lv e reads assigns
+           | _,       TComp _ -> Console.fatal "Slicing.return: composite expression that is not an lvalue: %a" pp_exp e
+           | _                -> A.import_values `Result reads assigns)
+        e
 
     let reach_target = under (fun from -> F.import ~from)
 
-    let call info under s = under' info under s @@ fun from ?lv kf args depends assigns ->
+    let call info under s = under' info under s @@ fun from ?lv kf depends assigns ->
       let I.E.Some { reads; assigns = (module A'); eff = eff' } =
         I.get info R.flag @@ Kernel_function.get_definition kf
       in
-      let prj_reads = prj_reads reads s args in
+      let prj_reads = prj_reads reads s (Kernel_function.get_formals kf) in
       let prj_write = prj_write ?lv s in
       if I.E.is_target eff' then begin
         F.import ~from depends;
@@ -348,285 +380,111 @@ module Make (Analysis : Analysis) = struct
       may (fun e -> add_from_rval e reads) e;
       gassign reads lv assigns
 
+    let stub = under @@ fun reads ?lv es assigns ->
+      may
+        (fun lv ->
+           List.iter (fun e -> add_from_rval e reads) es;
+           gassign reads lv assigns)
+        lv
+
     let goto info under s = under' info under s @@ fun from assigns ->
       F.import ~from @@ A.find (w_var @@ I.H_stmt.find info.I.goto_vars s) assigns
+
+    let assume = under @@ fun under e assigns ->
+      add_from_rval e under;
+      assign_all e under assigns
 
     let is_var_sating p e =
       match (stripCasts e).enode with
       | Lval (Var v, NoOffset) when p v -> true
       | _                               -> false
 
-    class effect_collector info eff = object
-      method finish = add_transitive_closure (I.E.assigns eff)
+    class effect_collector info eff =
+      let under = Stack.create () in
+      let assign       = assign       info under in
+      let return       = return       info under in
+      let reach_target = reach_target info under in
+      let call         = call         info under in
+      let alloc        = alloc        info under in
+      let stub         = stub         info under in
+      let goto         = goto         info under in
+      let assume       = assume       info under in
+      let assigns = I.E.assigns eff in
+      let depends = I.E.depends eff in
+      object
+        method finish =
+          add_transitive_closure assigns;
+          close_depends assigns depends
 
-      val curr_reads = Stack.create ()
+        inherit frama_c_inplace
 
-      inherit frama_c_inplace
-
-      method! vstmt =
-      let handle_call lvo fundec params =
-        let eff' = File_info.get file_info flag fundec in
-        if Effect.is_target eff' then begin
-          add_depends ~reach_target:true;
-          project_reads ~fundec ~params ~from:(Effect.depends eff') (Effect.depends eff)
-        end;
-        let lv = may_map add_from_lval lvo ~dft:ignore in
-        let project_reads = project_reads ~fundec ~params in
-        Effect.iter_writes
-          (fun w from ->
-             match w with
-             | Writes.Global _ | Writes.Result ->
-               let lv = may_map (fun (Reads.Some (k, x)) r -> Reads.add k x r) ~dft:lv (Reads.of_writes w) in
-               let struct_assign = w = Writes.Result && may_map ~dft:false (isStructOrUnionType % typeOfLval) lvo in
-               add_edges ~struct_assign ~lv ~from:(project_reads ~from) ()
-             | _ -> ())
-          eff';
-        may (fun lv' -> add_edges ~lv ~from:(add_rval_from_lval lv') ()) lvo
-      in
-      let handle_all_reads =
-        let from = Reads.create dummy_flag in
-        fun () ->
-          Reads.clear from;
-          collect_reads from;
-          add_depends ~reach_target:false;
-          Effect.iter_writes (fun _ r -> Reads.import ~from r) eff;
-          Reads.import ~from all_reads
-      in
-      let continue_under f =
-        let r = Reads.create dummy_flag in
-        f r;
-        Stack.push r curr_reads;
-        DoChildrenPost (fun s -> ignore @@ Stack.pop curr_reads; s)
-      in
-      let alloc_to ~loc ~lv ~from =
-        let lv = Mem (new_exp ~loc @@ Lval lv), NoOffset in
-        add_edges ~lv:(add_from_lval lv) ~from:(fun r -> from r; add_rval_from_lval lv r) ()
-      in
-      let is_tracking_var v = isVoidPtrType v.vtype && Effect.is_tracking_var (Void_ptr_var.of_varinfo_exn v) eff in
-      fun s ->
-        match s.skind with
-        | Instr (Set (lv, e, loc)) when is_var_sating is_tracking_var e ->
-          alloc_to ~loc ~lv ~from:(add_from_rval e);
-          SkipChildren
-        | Instr (Set (lv, e, _)) ->
-          add_edges
-            ~struct_assign:(isStructOrUnionType @@ typeOfLval lv)
-            ~lv:(add_from_lval lv)
-            ~from:(add_from_rval_and_lval lv e)
-            ();
-          SkipChildren
-        | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _)) when Options.Target_functions.mem vi.vname ->
-          add_depends ~reach_target:true;
-          SkipChildren
-        | Instr (Call (lvo, { enode = Lval (Var vi, NoOffset) }, _, loc)) when Options.Alloc_functions.mem vi.vname ->
-          begin match lvo with
-          | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype ->
-            add_edges ~lv:(add_from_lval lv) ~from:ignore ();
-            Effect.add_tracking_var (Void_ptr_var.of_varinfo_exn v) eff
-          | Some lv -> alloc_to ~loc ~lv ~from:ignore
-          | None -> ()
-          end;
-          SkipChildren
-        | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, [e], _)) when Options.Assume_functions.mem vi.vname ->
-          add_edges ~lv:(add_from_rval e) ~from:ignore ();
-          SkipChildren
-        | Instr (Call (lvo, { enode = Lval (Var vi, NoOffset) }, params, _)) when isFunctionType vi.vtype ->
-          begin try
-           handle_call lvo (Kernel_function.get_definition (Globals.Functions.find_by_name vi.vname)) params;
-          with
-          | Kernel_function.No_Definition -> ()
-          end;
-          SkipChildren
-        (* call by pointer *)
-        | Instr (Call (lvo, _, params, _)) ->
-          List.iter
-            (fun kf -> handle_call lvo (Kernel_function.get_definition kf) params)
-            (filter_matching_kfs params);
-          SkipChildren
-        | Instr (Asm _ | Skip _ | Code_annot _) ->
-          SkipChildren
-        | Return (eo, _) ->
-          handle_all_reads ();
-          add_edges
-            ?lv:None
-            ~from:(may_map add_from_rval eo ~dft:ignore)
-            ();
-          SkipChildren
-        | Goto _ ->
-          handle_all_reads ();
-          SkipChildren
-        | Break _ | Continue _ ->
-          SkipChildren
-        | If (e, _, _, _)  ->
-          continue_under (add_from_rval e)
-        | Switch (e, _, _, _) ->
-          continue_under
-            (fun r ->
-               add_from_rval e r;
-               List.iter (fun e -> add_from_rval e r) (H_stmt_conds.find_or_empty break_continue_cache s))
-        | Loop _ ->
-          continue_under
-            (fun r -> List.iter (fun e -> add_from_rval e r) (H_stmt_conds.find_or_empty break_continue_cache s))
-        | Block _ | UnspecifiedSequence _ -> DoChildren
-        | Throw _ | TryCatch _ | TryFinally _ | TryExcept _  ->
-          failwith "Unsupported features: exceptions and their handling"
-  end
-
-    
+        method! vstmt =
+          let is_tracking_var v = isVoidPtrType v.vtype && I.E.is_tracking_var (Void_ptr_var.of_varinfo_exn v) eff in
+          let start_tracking s lv v arg =
+            assign s lv ~e:arg assigns;
+            I.E.add_tracking_var (Void_ptr_var.of_varinfo_exn v) eff
+          in
+          let do_children_under e =
+            let r = F.create dummy_flag in
+            add_from_rval e r;
+            Stack.push r under;
+            DoChildrenPost (fun s -> ignore @@ Stack.pop under; s)
+          in
+          fun s ->
+            match s.skind with
+            | Instr (Set (lv, e, _))
+              when is_var_sating is_tracking_var e                       -> alloc s lv ~e assigns;      SkipChildren
+            | Instr (Set (lv, e, _))                                     -> assign s lv ~e assigns;     SkipChildren
+            | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _))
+              when Options.Target_functions.mem vi.vname                 -> reach_target s depends;     SkipChildren
+            | Instr (Call (lvo,
+                           { enode = Lval (Var vi, NoOffset) },
+                           arg :: _,
+                           loc))
+              when Options.Alloc_functions.mem vi.vname                  ->
+              begin match lvo with
+              | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype  -> start_tracking s lv v arg;  SkipChildren
+              | Some lv                                                  -> alloc s lv ~e:arg assigns;  SkipChildren
+              | None                                                     ->                             SkipChildren
+              end;
+            | Instr (Call (_,
+                           { enode = Lval (Var vi, NoOffset) }, [e], _))
+              when Options.Assume_functions.mem vi.vname                 -> assume s e assigns;         SkipChildren
+            | Instr (Call (lv,
+                           { enode = Lval (Var vi, NoOffset) },
+                           _, _))
+              when Kf.mem vi                                             -> call
+                                                                              s
+                                                                              ?lv
+                                                                              (Globals.Functions.get vi)
+                                                                              depends
+                                                                              assigns;                  SkipChildren
+            | Instr (Call (lv,
+                           { enode = Lval (Var _, NoOffset) },
+                           args, _))                                     -> stub s ?lv args assigns;    SkipChildren
+            | Instr (Call (lv, _, args, _))                              -> List.iter
+                                                                              (fun kf ->
+                                                                                 call
+                                                                                   s
+                                                                                   ?lv
+                                                                                   kf
+                                                                                   depends
+                                                                                   assigns)
+                                                                              (Analyze.filter_matching_kfs
+                                                                                 lv args);              SkipChildren
+            | Instr (Asm _ | Skip _ | Code_annot _)                      ->                             SkipChildren
+            | Return (e, _)                                              -> return s ?e assigns;        SkipChildren
+            | Goto _ | AsmGoto _ | Break _ | Continue _                  -> goto s assigns;             SkipChildren
+            | If (e, _, _, _) | Switch (e, _, _, _)                      -> do_children_under e
+            | Loop _  | Block _ | UnspecifiedSequence _                  -> DoChildren
+            | Throw _ | TryCatch _ | TryFinally _ | TryExcept _          -> failwith
+                                                                              "Unsupported features: exceptions \
+                                                                               and their handling"
+      end
   end
 end
 
 (*
-
-class effect_collector break_continue_cache file_info def =
-  let eff = File_info.get file_info flag def in
-  let dummy_flag = Flag.create "effect_collector_dummy" in
-  object
-    method finish = add_transitive_closure eff
-
-    val all_reads = Reads.create dummy_flag
-    val curr_reads = Stack.create ()
-
-    inherit frama_c_inplace
-
-    method! vstmt =
-      let collect_reads acc =
-        Reads.import ~from:all_reads acc;
-        Stack.iter (fun from -> Reads.import ~from acc) curr_reads
-      in
-      let add_edges =
-        let r_lv = Reads.create dummy_flag and r_from = Reads.create dummy_flag in
-        fun ?(struct_assign=false) ?lv ~from () ->
-          Reads.clear r_lv;
-          Reads.clear r_from;
-          from r_from;
-          collect_reads r_from;
-          match lv with
-          | Some lv ->
-            lv r_lv;
-            let handle r_from =
-              Reads.iter_global (fun r -> Effect.add_reads (Writes.Global r) r_from eff) r_lv;
-              Reads.iter_poly (fun v -> Effect.add_reads (Writes.Poly v) r_from eff) r_lv;
-              Reads.iter_local (fun v -> Effect.add_reads (Writes.Local v) r_from eff) r_lv
-            in
-            if not struct_assign then handle r_from
-            else if not (Reads.is_empty r_lv) then
-              let r = Reads.copy dummy_flag r_from in
-              Reads.sub ~from:r r_lv;
-              handle r
-          | None -> Effect.add_reads Writes.Result r_from eff
-      in
-      let add_depends ~reach_target =
-        if reach_target then Effect.set_is_target eff;
-        if Effect.is_target eff then collect_reads (Effect.depends eff)
-      in
-      let handle_call lvo fundec params =
-        let eff' = File_info.get file_info flag fundec in
-        if Effect.is_target eff' then begin
-          add_depends ~reach_target:true;
-          project_reads ~fundec ~params ~from:(Effect.depends eff') (Effect.depends eff)
-        end;
-        let lv = may_map add_from_lval lvo ~dft:ignore in
-        let project_reads = project_reads ~fundec ~params in
-        Effect.iter_writes
-          (fun w from ->
-             match w with
-             | Writes.Global _ | Writes.Result ->
-               let lv = may_map (fun (Reads.Some (k, x)) r -> Reads.add k x r) ~dft:lv (Reads.of_writes w) in
-               let struct_assign = w = Writes.Result && may_map ~dft:false (isStructOrUnionType % typeOfLval) lvo in
-               add_edges ~struct_assign ~lv ~from:(project_reads ~from) ()
-             | _ -> ())
-          eff';
-        may (fun lv' -> add_edges ~lv ~from:(add_rval_from_lval lv') ()) lvo
-      in
-      let handle_all_reads =
-        let from = Reads.create dummy_flag in
-        fun () ->
-          Reads.clear from;
-          collect_reads from;
-          add_depends ~reach_target:false;
-          Effect.iter_writes (fun _ r -> Reads.import ~from r) eff;
-          Reads.import ~from all_reads
-      in
-      let continue_under f =
-        let r = Reads.create dummy_flag in
-        f r;
-        Stack.push r curr_reads;
-        DoChildrenPost (fun s -> ignore @@ Stack.pop curr_reads; s)
-      in
-      let alloc_to ~loc ~lv ~from =
-        let lv = Mem (new_exp ~loc @@ Lval lv), NoOffset in
-        add_edges ~lv:(add_from_lval lv) ~from:(fun r -> from r; add_rval_from_lval lv r) ()
-      in
-      let is_tracking_var v = isVoidPtrType v.vtype && Effect.is_tracking_var (Void_ptr_var.of_varinfo_exn v) eff in
-      fun s ->
-        match s.skind with
-        | Instr (Set (lv, e, loc)) when is_var_sating is_tracking_var e ->
-          alloc_to ~loc ~lv ~from:(add_from_rval e);
-          SkipChildren
-        | Instr (Set (lv, e, _)) ->
-          add_edges
-            ~struct_assign:(isStructOrUnionType @@ typeOfLval lv)
-            ~lv:(add_from_lval lv)
-            ~from:(add_from_rval_and_lval lv e)
-            ();
-          SkipChildren
-        | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _)) when Options.Target_functions.mem vi.vname ->
-          add_depends ~reach_target:true;
-          SkipChildren
-        | Instr (Call (lvo, { enode = Lval (Var vi, NoOffset) }, _, loc)) when Options.Alloc_functions.mem vi.vname ->
-          begin match lvo with
-          | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype ->
-            add_edges ~lv:(add_from_lval lv) ~from:ignore ();
-            Effect.add_tracking_var (Void_ptr_var.of_varinfo_exn v) eff
-          | Some lv -> alloc_to ~loc ~lv ~from:ignore
-          | None -> ()
-          end;
-          SkipChildren
-        | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, [e], _)) when Options.Assume_functions.mem vi.vname ->
-          add_edges ~lv:(add_from_rval e) ~from:ignore ();
-          SkipChildren
-        | Instr (Call (lvo, { enode = Lval (Var vi, NoOffset) }, params, _)) when isFunctionType vi.vtype ->
-          begin try
-           handle_call lvo (Kernel_function.get_definition (Globals.Functions.find_by_name vi.vname)) params;
-          with
-          | Kernel_function.No_Definition -> ()
-          end;
-          SkipChildren
-        (* call by pointer *)
-        | Instr (Call (lvo, _, params, _)) ->
-          List.iter
-            (fun kf -> handle_call lvo (Kernel_function.get_definition kf) params)
-            (filter_matching_kfs params);
-          SkipChildren
-        | Instr (Asm _ | Skip _ | Code_annot _) ->
-          SkipChildren
-        | Return (eo, _) ->
-          handle_all_reads ();
-          add_edges
-            ?lv:None
-            ~from:(may_map add_from_rval eo ~dft:ignore)
-            ();
-          SkipChildren
-        | Goto _ ->
-          handle_all_reads ();
-          SkipChildren
-        | Break _ | Continue _ ->
-          SkipChildren
-        | If (e, _, _, _)  ->
-          continue_under (add_from_rval e)
-        | Switch (e, _, _, _) ->
-          continue_under
-            (fun r ->
-               add_from_rval e r;
-               List.iter (fun e -> add_from_rval e r) (H_stmt_conds.find_or_empty break_continue_cache s))
-        | Loop _ ->
-          continue_under
-            (fun r -> List.iter (fun e -> add_from_rval e r) (H_stmt_conds.find_or_empty break_continue_cache s))
-        | Block _ | UnspecifiedSequence _ -> DoChildren
-        | Throw _ | TryCatch _ | TryFinally _ | TryExcept _  ->
-          failwith "Unsupported features: exceptions and their handling"
-  end
 
 let collect_effects break_continue_cache =
   visit_until_convergence
