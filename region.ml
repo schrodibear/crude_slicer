@@ -1095,6 +1095,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
                                                                    (expr_of_lval ~loc (var (the fundec).svar)) e
              | _                                              -> ())
 
+      method start = ()
       method finish =
         unify_voids f;
         may

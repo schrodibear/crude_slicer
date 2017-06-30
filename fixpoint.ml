@@ -50,6 +50,7 @@ module Make (I : Info) = struct
                 (fun d ->
                    Console.debug "Analysing function %s..." d.svar.vname;
                    let v = v fi d in
+                   v#start;
                    ignore @@ visitFramacFunction (v :> frama_c_visitor) d;
                    v#finish;
                    Console.debug ~level:3 "Resulting effect is:@.%a@." I.E.pp @@ I.get fi I.flag d))
