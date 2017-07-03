@@ -83,9 +83,14 @@ module Make (Analysis : Analysis) = struct
   let dummy_flag = Flag.create "slicing_dummy"
 
   module Make_local
-      (F : I.E.Reads) (A : I.E.Assigns with type set = F.t) (C : sig val f : kernel_function option end) = struct
+      (C : sig val f : kernel_function option end) (F : I.E.Reads) (A : I.E.Assigns with type set = F.t) = struct
 
     let f = opt_map Kernel_function.get_name C.f
+
+    let unwrap (I.E.Some { reads = (module F'); assigns = (module A'); eff }) : (A.t, F.t) I.E.t =
+      match F'.W, A'.W with
+      | F.W, A.W -> eff
+      | _        -> Console.fatal "Slice.unpack: broken invariant: got effect of a different function"
 
     let r_mem ?fi u = F.of_writes @@ w_mem ?f ?fi u
 
@@ -292,7 +297,19 @@ module Make (Analysis : Analysis) = struct
         F.iter_poly_vars   (fun v -> import_reads @@ `Poly_var v)   reads;
         F.iter_local_vars  (fun v -> import_reads @@ `Local_var v)  reads
 
-    let comp_assign lv e reads assigns =
+    let deref ~loc lv = Mem (new_exp ~loc @@ Lval lv), NoOffset
+
+    let is_var_sating p e =
+      match (stripCasts e).enode with
+      | Lval (Var v, NoOffset) when p v -> true
+      | _                               -> false
+
+    module Collect (M : sig val from : stmt -> F.t val info : I.t val eff : (A.t, F.t) I.E.t end) = struct
+      open M
+      let assigns = I.E.assigns eff
+      let depends = I.E.depends eff
+
+      let comp_assign lv e from =
         let r_lv, r_e =
           match e.enode with
           | Lval lv' -> R.(location @@ of_lval ?f lv, location @@ of_lval lv')
@@ -308,113 +325,90 @@ module Make (Analysis : Analysis) = struct
              let F.Some (k, r) = r_mem ?fi (R.take path r_e) in
              let w = w_mem ?fi @@ R.take path r_lv in
              A.add w k r assigns;
-             A.import_values w reads assigns)
+             A.import_values w from assigns)
           (Ci.all_offsets ci)
 
-    (* Working around the value restriction... *)
-    module M = struct
-      let reads = F.create dummy_flag
+      let gassign lv ?e from =
+        add_from_lval lv from;
+        may (fun e -> add_from_rval e from) e;
+        let e = opt_conv (dummy_exp @@ Lval lv) e in
+        match w_lval ?f lv with
+        | Some w -> A.import_values w from assigns
+        | None   -> comp_assign lv e from
 
-      module M = struct
-        let under cont info under s =
-          F.clear reads;
-          List.iter
-            (fun vi -> F.add_local_var (Local_var.of_varinfo_exn vi) reads)
-            (I.H_stmt_conds.find info.I.stmt_vars s);
-          Stack.iter (fun from -> F.import ~from reads) under;
-          cont reads
-      end
+      let assign s lv e = gassign lv ~e (from s)
+      let return s eo =
+        let from = from s in
+        may
+          (fun e ->
+             add_from_rval e from;
+             match e.enode, unrollType @@ typeOf e with
+             | Lval lv, TComp _ -> comp_assign lv e from
+             | _,       TComp _ -> Console.fatal "Slicing.return: composite expression that is not an lvalue: %a" pp_exp e
+             | _                -> A.import_values `Result from assigns)
+          eo
+      let reach_target s = F.import ~from:(from s) depends
+
+      let call s ?lv kf =
+        let from = from s in
+        let I.E.Some { reads; assigns = (module A'); eff = eff' } =
+          I.get info R.flag @@ Kernel_function.get_definition kf
+        in
+        let prj_reads = prj_reads reads s (Kernel_function.get_formals kf) in
+        let prj_write = prj_write ?lv s in
+        if I.E.is_target eff' then begin
+          F.import ~from depends;
+          prj_reads ~from:(I.E.depends eff') depends
+        end;
+        A'.iter
+          (fun w' from' ->
+             may
+               (fun w ->
+                  let reads = A.find w assigns in
+                  F.import ~from reads;
+                  prj_reads ~from:from' reads)
+               (prj_write w'))
+          (I.E.assigns eff');
+        may
+          (fun lv ->
+             add_from_lval lv from;
+             gassign lv from)
+          lv
+
+      let alloc s lv e =
+        let from = from s in
+        let lv = deref ~loc:(Stmt.loc s) lv in
+        add_from_rval e from;
+        gassign lv from
+      let stub s ?lv es =
+        let from = from s in
+        may
+          (fun lv ->
+             List.iter (fun e -> add_from_rval e from) es;
+             gassign lv from)
+          lv
+      let goto s = F.import ~from:(from s) @@ A.find (w_var @@ I.H_stmt.find info.I.goto_vars s) assigns
+      let assume s e =
+        let from = from s in
+        add_from_rval e from;
+        assign_all e from assigns
     end
 
-    include M.M
-
-    let under' info under' s cont = under cont info under' s
-
-    let gassign reads lv ?e assigns =
-      add_from_lval lv reads;
-      may (fun e -> add_from_rval e reads) e;
-      let e = opt_conv (dummy_exp @@ Lval lv) e in
-      match w_lval ?f lv with
-      | Some w -> A.import_values w reads assigns
-      | None   -> comp_assign lv e reads assigns
-
-    let assign = under gassign
-
-    let return = under @@ fun reads ?e assigns ->
-      may
-        (fun e ->
-           add_from_rval e reads;
-           match e.enode, unrollType @@ typeOf e with
-           | Lval lv, TComp _ -> comp_assign lv e reads assigns
-           | _,       TComp _ -> Console.fatal "Slicing.return: composite expression that is not an lvalue: %a" pp_exp e
-           | _                -> A.import_values `Result reads assigns)
-        e
-
-    let reach_target = under (fun from -> F.import ~from)
-
-    let call info under s = under' info under s @@ fun from ?lv kf depends assigns ->
-      let I.E.Some { reads; assigns = (module A'); eff = eff' } =
-        I.get info R.flag @@ Kernel_function.get_definition kf
-      in
-      let prj_reads = prj_reads reads s (Kernel_function.get_formals kf) in
-      let prj_write = prj_write ?lv s in
-      if I.E.is_target eff' then begin
-        F.import ~from depends;
-        prj_reads ~from:(I.E.depends eff') depends
-      end;
-      A'.iter
-        (fun w from' ->
-           may
-             (fun w ->
-                let reads = A.find w assigns in
-                F.import ~from reads;
-                prj_reads ~from:from' reads)
-             (prj_write w))
-        (I.E.assigns eff');
-      may
-        (fun lv ->
-           add_from_lval lv from;
-           gassign from lv assigns)
-        lv
-
-    let deref ~loc lv = Mem (new_exp ~loc @@ Lval lv), NoOffset
-
-    let alloc = under @@ fun reads ~loc lv ?e assigns ->
-      let lv = deref ~loc lv in
-      may (fun e -> add_from_rval e reads) e;
-      gassign reads lv assigns
-
-    let stub = under @@ fun reads ?lv es assigns ->
-      may
-        (fun lv ->
-           List.iter (fun e -> add_from_rval e reads) es;
-           gassign reads lv assigns)
-        lv
-
-    let goto info under s = under' info under s @@ fun from assigns ->
-      F.import ~from @@ A.find (w_var @@ I.H_stmt.find info.I.goto_vars s) assigns
-
-    let assume = under @@ fun under e assigns ->
-      add_from_rval e under;
-      assign_all e under assigns
-
-    let is_var_sating p e =
-      match (stripCasts e).enode with
-      | Lval (Var v, NoOffset) when p v -> true
-      | _                               -> false
-
-    class effect_collector info eff =
+    let collector info =
+      let eff = unwrap @@ I.get info R.flag (Kernel_function.get_definition @@ the C.f) in
       let under = Stack.create () in
-      let assign       = assign       info under in
-      let return       = return       info under in
-      let reach_target = reach_target info under in
-      let call         = call         info under in
-      let alloc        = alloc        info under in
-      let stub         = stub         info under in
-      let goto         = goto         info under in
-      let assume       = assume       info under in
-      let assigns = I.E.assigns eff in
-      let depends = I.E.depends eff in
+      let from =
+        let from = F.create dummy_flag in
+        fun s ->
+          F.clear from;
+          List.iter
+            (fun vi -> F.add_local_var (Local_var.of_varinfo_exn vi) from)
+            (I.H_stmt_conds.find info.I.stmt_vars s);
+          Stack.iter (fun from' -> F.import ~from:from' from) under;
+          from
+      in
+      let module Collect = Collect (struct let from, info, eff = from, info, eff end) in
+      let open Collect in
       object
         method start = ()
         method finish =
@@ -426,7 +420,7 @@ module Make (Analysis : Analysis) = struct
         method! vstmt =
           let is_tracking_var v = isVoidPtrType v.vtype && I.E.is_tracking_var (Void_ptr_var.of_varinfo_exn v) eff in
           let start_tracking s lv v arg =
-            assign s lv ~e:arg assigns;
+            assign s lv arg;
             I.E.add_tracking_var (Void_ptr_var.of_varinfo_exn v) eff
           in
           let do_children_under e =
@@ -438,51 +432,46 @@ module Make (Analysis : Analysis) = struct
           fun s ->
             match s.skind with
             | Instr (Set (lv, e, loc))
-              when is_var_sating is_tracking_var e                       -> alloc s ~loc lv ~e assigns; SkipChildren
-            | Instr (Set (lv, e, _))                                     -> assign s lv ~e assigns;     SkipChildren
+              when is_var_sating is_tracking_var e                       -> alloc s lv e;                 SkipChildren
+            | Instr (Set (lv, e, _))                                     -> assign s lv e;                SkipChildren
             | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _))
-              when Options.Target_functions.mem vi.vname                 -> reach_target s depends;     SkipChildren
+              when Options.Target_functions.mem vi.vname                 -> reach_target s;               SkipChildren
             | Instr (Call (lvo,
                            { enode = Lval (Var vi, NoOffset) },
                            arg :: _,
                            loc))
               when Options.Alloc_functions.mem vi.vname                  ->
               begin match lvo with
-              | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype  -> start_tracking s lv v arg;  SkipChildren
-              | Some lv                                                  -> alloc
-                                                                              s ~loc lv ~e:arg assigns; SkipChildren
-              | None                                                     ->                             SkipChildren
+              | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype  -> start_tracking s lv v arg;    SkipChildren
+              | Some lv                                                  -> alloc s lv arg;               SkipChildren
+              | None                                                     ->                               SkipChildren
               end;
             | Instr (Call (_,
                            { enode = Lval (Var vi, NoOffset) }, [e], _))
-              when Options.Assume_functions.mem vi.vname                 -> assume s e assigns;         SkipChildren
+              when Options.Assume_functions.mem vi.vname                 -> assume s e;                   SkipChildren
             | Instr (Call (lv,
                            { enode = Lval (Var vi, NoOffset) },
                            _, _))
               when Kf.mem vi                                             -> call
                                                                               s
                                                                               ?lv
-                                                                              (Globals.Functions.get vi)
-                                                                              depends
-                                                                              assigns;                  SkipChildren
+                                                                              (Globals.Functions.get vi); SkipChildren
             | Instr (Call (lv,
                            { enode = Lval (Var _, NoOffset) },
-                           args, _))                                     -> stub s ?lv args assigns;    SkipChildren
+                           args, _))                                     -> stub s ?lv args;              SkipChildren
             | Instr (Call (lv, _, args, _))                              -> List.iter
                                                                               (fun kf ->
                                                                                  call
                                                                                    s
                                                                                    ?lv
-                                                                                   kf
-                                                                                   depends
-                                                                                   assigns)
+                                                                                   kf)
                                                                               (Analyze.filter_matching_kfs
-                                                                                 lv args);              SkipChildren
-            | Instr (Asm _ | Skip _ | Code_annot _)                      ->                             SkipChildren
-            | Return (e, _)                                              -> return s ?e assigns;        SkipChildren
-            | Goto _ | AsmGoto _ | Break _ | Continue _                  -> goto s assigns;             SkipChildren
+                                                                                 lv args);                SkipChildren
+            | Instr (Asm _ | Skip _ | Code_annot _)                      ->                               SkipChildren
+            | Return (e, _)                                              -> return s e;                   SkipChildren
+            | Goto _ | AsmGoto _ | Break _ | Continue _                  -> goto s;                       SkipChildren
             | If (e, _, _, _) | Switch (e, _, _, _)                      -> do_children_under e
-            | Loop _  | Block _ | UnspecifiedSequence _                  -> DoChildren
+            | Loop _  | Block _ | UnspecifiedSequence _                  ->                               DoChildren
             | Throw _ | TryCatch _ | TryFinally _ | TryExcept _          -> failwith
                                                                               "Unsupported features: exceptions \
                                                                                and their handling"

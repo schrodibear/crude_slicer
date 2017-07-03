@@ -106,11 +106,14 @@ module type Set = sig
   val pp : formatter -> t -> unit
 end
 
+type ('k, 's, _) hashmap = ..
+
 module type Reporting_hashmap = sig
   type key
   type set
   type 'a kind
   type t
+  type ('k, 's, _) hashmap += W : (key, set, t) hashmap
   val create : Flag.t -> t
   val clear : t -> unit
   val copy : Flag.t -> t -> t
@@ -136,8 +139,9 @@ module Make_reporting_hashmap (K : Hashed_printable) (S : Set) :
   type key = K.t
   type set = S.t
   type 'a kind = 'a S.kind
-  module H = Hashtbl.Make(K)
+  module H = Hashtbl.Make (K)
   type t = S.t H.t * Flag.t
+  type ('k, 's, _) hashmap += W : (key, set, t) hashmap
   let create f =
     H.create 32, f
   let clear (h, f) =

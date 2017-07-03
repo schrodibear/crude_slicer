@@ -305,6 +305,8 @@ module Make_reads_kind (W : Writes) : Reads_kind with module W = W = struct
   include M
 end
 
+type ('w, _) reads = ..
+
 module type Reads = sig
   module W : Writes
 
@@ -313,6 +315,8 @@ module type Reads = sig
   module K : Reads_kind with module W = W
 
   type t
+
+  type ('w, _) reads += W : (W.t, t) reads
 
   type 'a kind = 'a K.t
 
@@ -377,6 +381,8 @@ module Make_reads (W : Writes) (K : Reads_kind with module W = W) () :
       poly_mems   : H_poly_mem.t;
       local_mems  : H_local_mem.t
     }
+
+  type ('w, _) reads += W : (W.t, t) reads
 
   let of_writes : _ -> some =
     function[@warning "-42"]
