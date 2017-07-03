@@ -152,7 +152,7 @@ module Make (Analysis : Analysis) = struct
 
     let add_from_lval lv acc = may F.(fun w -> let Some (k, r) = of_writes w in add k r acc) @@ w_lval ?f lv
 
-    class rval_collector = object(self)
+    class rval_visitor f = object(self)
       inherit frama_c_inplace
 
       method! vexpr =
@@ -175,35 +175,24 @@ module Make (Analysis : Analysis) = struct
           | BinOp _
           | CastE  _
           | Info _               -> DoChildren
-    end
-
-    class rval_reads_collector acc = object
-      inherit frama_c_inplace
-      inherit! rval_collector
 
       method! vlval lv =
-        add_from_lval lv acc;
+        f lv;
         DoChildren
     end
 
-    let add_from_rval e acc = ignore @@ visitFramacExpr (new rval_reads_collector acc) e
+    let visit_rval f = ignore % visitFramacExpr (new rval_visitor f)
+
+    let add_from_rval e acc = visit_rval (fun lv -> add_from_lval lv acc) e
 
     let add_from_lval lv acc =
-      let o = new rval_reads_collector acc in
+      let o = new rval_visitor (fun lv -> add_from_lval lv acc) in
       match lv with
       | Mem e, off -> ignore @@ visitFramacExpr o e; ignore @@ visitFramacOffset o off
       | Var _, off -> ignore @@ visitFramacOffset o off
 
-    class rval_assigner assigns from = object
-      inherit frama_c_inplace
-      inherit! rval_collector
-
-      method! vlval lv =
-        may (fun w -> A.import_values w from assigns) (w_lval ?f lv);
-        DoChildren
-    end
-
-    let assign_all e from assigns = ignore @@ visitFramacExpr (new rval_assigner assigns from) e
+    let assign_all e from assigns =
+      visit_rval (fun lv -> may (fun w -> A.import_values w from assigns) @@ w_lval ?f lv) e
 
     let prj_poly_var s params =
       let args =
@@ -309,6 +298,9 @@ module Make (Analysis : Analysis) = struct
       let assigns = I.E.assigns eff
       let depends = I.E.depends eff
 
+      let add_transitive_closure () = add_transitive_closure assigns
+      let close_depends () = close_depends assigns depends
+
       let comp_assign lv e from =
         let r_lv, r_e =
           match e.enode with
@@ -412,8 +404,8 @@ module Make (Analysis : Analysis) = struct
       object
         method start = ()
         method finish =
-          add_transitive_closure assigns;
-          close_depends assigns depends
+          add_transitive_closure ();
+          close_depends ()
 
         inherit frama_c_inplace
 
@@ -431,7 +423,7 @@ module Make (Analysis : Analysis) = struct
           in
           fun s ->
             match s.skind with
-            | Instr (Set (lv, e, loc))
+            | Instr (Set (lv, e, _))
               when is_var_sating is_tracking_var e                       -> alloc s lv e;                 SkipChildren
             | Instr (Set (lv, e, _))                                     -> assign s lv e;                SkipChildren
             | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _))
@@ -439,7 +431,7 @@ module Make (Analysis : Analysis) = struct
             | Instr (Call (lvo,
                            { enode = Lval (Var vi, NoOffset) },
                            arg :: _,
-                           loc))
+                           _))
               when Options.Alloc_functions.mem vi.vname                  ->
               begin match lvo with
               | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype  -> start_tracking s lv v arg;    SkipChildren
@@ -477,7 +469,16 @@ module Make (Analysis : Analysis) = struct
                                                                                and their handling"
       end
 
-    let comp_assign lv mods =
+    module Mark
+        (M : sig val decide : [< I.W.t] list -> [ `Needed | `Not_yet ] val info : I.t val eff : (A.t, F.t) I.E.t end) =
+    struct
+      open M
+      let assigns = I.E.assigns eff
+      let depends = I.E.depends eff
+
+      let close_depends () = close_depends assigns depends
+
+      let comp_assign lv =
         let r_lv = R.(location @@ of_lval ?f lv) in
         let ci =
           match unrollType @@ typeOfLval lv with
@@ -485,141 +486,112 @@ module Make (Analysis : Analysis) = struct
           | ty                -> Console.fatal "Slicing.comp_assign: LHS is not a composite: %a : %a"
                                    pp_lval lv pp_typ ty
         in
-        List.iter
-          (fun (path, fi) ->
-             let F.Some (k, r) = r_mem ?fi (R.take path r_lv) in
-             F.add k r mods)
-          (Ci.all_offsets ci)
+        List.map (fun (path, fi) -> w_mem ?f ?fi @@ R.take path r_lv) (Ci.all_offsets ci)
 
-    include
-      (struct
-        type 'a reads = F.t
-        type verdict = Needed | Not_yet
-        type 'b cont = { f : 'a. ('a reads -> verdict) -> 'a reads -> bool ref -> 'b }
-        let mods = F.create dummy_flag
-        let mod_res = ref false
-        let need cont deps result_dep =
-          F.clear mods;
-          mod_res := false;
-          cont.f (fun _ -> if result_dep && !mod_res || F.intersects mods deps then Needed else Not_yet) mods mod_res
-      end :
-       sig
-         type 'a reads = private F.t
-         type verdict = private Needed | Not_yet
-         type 'b cont = { f : 'a. ('a reads -> verdict) -> 'a reads -> bool ref -> 'b }
-         val need : 'b cont -> F.t -> bool -> 'b
-       end)
+      let gassign lv = decide @@ match w_lval ?f lv with Some w -> [w] | None -> comp_assign lv
+      let assign = gassign
+      let return eo =
+        decide @@
+        may_map
+          (fun e ->
+             match e.enode, unrollType @@ typeOf e with
+             | Lval lv, TComp _ -> comp_assign lv
+             | _,       TComp _ -> Console.fatal "Slicing.return: composite expression that is not an lvalue: %a"
+                                     pp_exp e
+             | _                -> [`Result])
+          ~dft:[]
+          eo
+      let call s ?lv kf =
+        let I.E.Some { reads = (module F');
+                       assigns = (module A');
+                       eff = eff' } =
+          I.get info R.flag @@ Kernel_function.get_definition kf
+        in
+        let prj_write = prj_write ?lv s in
+        let deps' = I.E.depends eff' in
+        let may_push_and_cons f =
+          opt_fold @@ List.cons % tap (fun w -> let F.Some (k, r) = F.of_writes w in if F.mem k r depends then f ())
+        in
+        decide @@
+        A'.fold
+          (fun w' _ ->
+             match w', lv with
+             | `Result,              Some lv -> may_push_and_cons
+                                                  (fun () -> I.E.add_result_dep eff')
+                                                  (w_lval ?f lv)
+             | `Result,              None    -> id
+             | (#I.W.readable as w'), _      -> may_push_and_cons
+                                                  (fun () ->
+                                                     let F'.Some (k', r') = F'.of_writes w' in
+                                                     F'.add k' r' deps')
+                                                  (prj_write w'))
+          (I.E.assigns eff')
+          []
+      let alloc ~loc = gassign % deref ~loc
+      let stub = may_map gassign ~dft:`Not_yet
+      let goto s = decide @@ [`Local_var (Local_var.of_varinfo_exn @@ I.H_stmt.find info.I.goto_vars s)]
+      let assume e =
+        let r = ref [] in
+        visit_rval (fun lv -> may (fun w -> r := w :: !r) @@ w_lval ?f lv) e;
+        decide !r
+    end
 
-    let gassign decide mods _ lv =
-      let cmods = (mods : _ reads :> F.t) in
-      begin match w_lval ?f lv with
-      | Some w -> F.(let Some (k, r) = of_writes w in add k r cmods)
-      | None   -> comp_assign lv cmods
-      end;
-      decide mods
-
-    let assign = need { f = gassign }
-
-    let return = need { f = fun decide mods mod_res e ->
-      let cmods = (mods : _ reads :> F.t) in
-      may
-        (fun e ->
-           match e.enode, unrollType @@ typeOf e with
-           | Lval lv, TComp _ -> comp_assign lv cmods
-           | _,       TComp _ -> Console.fatal "Slicing.return: composite expression that is not an lvalue: %a" pp_exp e
-           | _                -> mod_res := true)
-        e;
-      decide mods }
-
-    let need' deps cont = need cont deps
-
-    let call info deps = need' deps { f = fun decide mods _ s ?lv kf ->
-      let cmods = (mods : _ reads :> F.t) in
-      let I.E.Some { reads = (module F');
-                     assigns = (module A');
-                     eff = eff' } =
-        I.get info R.flag @@ Kernel_function.get_definition kf
+    let marker info =
+      let eff = unwrap @@ I.get info R.flag (Kernel_function.get_definition @@ the C.f) in
+      let depends = I.E.depends eff in
+      let has_result_dep = I.E.has_result_dep eff in
+      let reads = F.create dummy_flag in
+      let decide : 'a. ([< I.W.t ] as 'a) list -> _ =
+        let decide needed = if needed then `Needed else `Not_yet in
+        let single w = let F.Some (k, r) = F.of_writes w in decide (F.mem k r depends) in
+        let intersects l =
+          F.clear reads;
+          List.iter
+            (function
+              | `Result            -> ()
+              | #I.W.readable as w ->
+                let F.Some (k, r) = F.of_writes w in
+                F.add k r reads)
+              l;
+          F.intersects reads depends
+        in
+        let rec mem_result : 'a. ([< I.W.t] as 'a) list -> _ =
+          function
+          | []            -> false
+          | `Result :: _  -> true
+          | _       :: xs -> mem_result xs
+        in
+        function
+        | []                                -> `Not_yet
+        | [`Result] when has_result_dep     -> `Needed
+        | [`Result]                         -> `Not_yet
+        | [#I.W.readable as w]              -> single w
+        | l                                 -> decide (has_result_dep && mem_result l || intersects l)
       in
-      let prj_write = prj_write ?lv s in
-      let deps' = I.E.depends eff' in
-      A'.iter
-        (fun w' _ ->
-           let result lv =
-             may
-               (fun w ->
-                  let F.Some (k, r) = F.of_writes w in
-                  F.add k r cmods;
-                  if F.mem k r deps then I.E.add_result_dep eff')
-               (w_lval ?f lv)
-           in
-           match w', lv with
-           | `Result,                                Some lv -> result lv
-           | `Result,                                None    -> ()
-           | (`Local_var _   | `Local_mem _
-             | `Poly_var _   | `Poly_mem _
-             | `Global_var _ | `Global_mem _ as w'), _       ->
-             may
-               (fun w ->
-                  let F.Some (k, r) = F.of_writes w in
-                  F.add k r cmods;
-                  if F.mem k r deps then
-                    let F'.Some (k', r') = F'.of_writes w' in
-                    F'.add k' r' deps')
-               (prj_write w'))
-        (I.E.assigns eff');
-      decide mods }
-
-    let alloc = need { f = fun decide mods mod_res ~loc lv ->
-      let lv = deref ~loc lv in
-      gassign decide mods mod_res lv }
-
-    let stub = need { f = fun decide mods mod_res lv ->
-      may_map (fun lv -> gassign decide mods mod_res lv) ~dft:(decide mods) lv }
-
-    let goto info = need { f = fun decide mods _ s ->
-      F.add F.K.Local_var (Local_var.of_varinfo_exn @@ I.H_stmt.find info.I.goto_vars s) (mods : _ reads :> F.t);
-      decide mods }
-
-    let assume = need { f = fun decide mods _ e ->
-      add_from_rval e (mods : _ reads :> F.t);
-      decide mods }
-
-    class marker info eff =
-      let deps = I.E.depends eff in
-      let result_dep = I.E.has_result_dep eff in
-      let assign       = assign    deps result_dep in
-      let return       = return    deps result_dep in
-      let call         = call info deps result_dep in
-      let alloc        = alloc     deps result_dep in
-      let stub         = stub      deps result_dep in
-      let goto         = goto info deps result_dep in
-      let assume       = assume    deps result_dep in
-      let assigns = I.E.assigns eff in
-      object(self)
-        method start = close_depends assigns deps
+      let module Mark = Mark (struct let decide, info, eff = decide, info, eff end) in
+      let open Mark in
+      object
+        method start = close_depends ()
         method finish = ()
-
-        method add_stmt s = I.E.add_stmt_req s eff
-        method add_body f = I.E.add_body_req f eff
 
         inherit frama_c_inplace
         method! vstmt =
           let is_tracking_var v = isVoidPtrType v.vtype && I.E.is_tracking_var (Void_ptr_var.of_varinfo_exn v) eff in
           fun s ->
             let mark vi =
-              self#add_stmt s;
+              I.E.add_stmt_req s eff;
               may
                 (fun vi ->
                    try
-                     self#add_body (Kernel_function.get_definition @@ Globals.Functions.get vi)
+                     I.E.add_body_req (Kernel_function.get_definition @@ Globals.Functions.get vi) eff
                    with
                    | Kernel_function.No_Definition -> ())
                 vi
             in
             let stmt ?vi verdict =
               begin match verdict with
-              | Not_yet -> ()
-              | Needed  -> mark vi
+              | `Not_yet -> ()
+              | `Needed  -> mark vi
               end;
               SkipChildren
             in
@@ -630,10 +602,7 @@ module Make (Analysis : Analysis) = struct
               end;
               SkipChildren
             in
-            let stmts stmts =
-              if List.exists (fun s -> I.E.has_stmt_req s eff) stmts then
-                self#add_stmt s
-            in
+            let stmts stmts = if List.exists (fun s -> I.E.has_stmt_req s eff) stmts then I.E.add_stmt_req s eff in
             let block b = stmts b.bstmts in
             match s.skind with
             | Instr (Set (lv, e, loc))
@@ -664,9 +633,9 @@ module Make (Analysis : Analysis) = struct
             | Instr (Call (lv, _, args, _))                               -> at_least_one
                                                                                (fun kf ->
                                                                                   match call s ?lv kf with
-                                                                                  | Needed ->
+                                                                                  | `Needed ->
                                                                                     Some (Kernel_function.get_vi kf)
-                                                                                  | Not_yet -> None)
+                                                                                  | `Not_yet -> None)
                                                                                (Analyze.filter_matching_kfs lv args)
             | Instr (Asm _ | Skip _ | Code_annot _)                       -> SkipChildren
             | Return (e, _)                                               -> stmt @@ return e
