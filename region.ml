@@ -1135,7 +1135,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     Fixpoint.Make
       (struct
         module E = struct
-          type t = fundec
+          type some = fundec
           let pp fmttr fundec = pp fmttr (Some fundec)
         end
 

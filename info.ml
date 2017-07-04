@@ -297,6 +297,8 @@ module type Reads_kind = sig
     | Global_mem : Global_mem.t t
     | Poly_mem : Poly_mem.t t
     | Local_mem : Local_mem.t t
+
+  type some = Some : 'a t * 'a -> some
 end
 
 module Make_reads_kind (W : Writes) : Reads_kind with module W = W = struct
@@ -320,7 +322,7 @@ module type Reads = sig
 
   type 'a kind = 'a K.t
 
-  type some = Some : 'a K.t * 'a -> some
+  type some = K.some = Some : 'a K.t * 'a -> some
 
   val of_writes : [< W.readable ] -> some
 
@@ -333,9 +335,11 @@ module type Reads = sig
   val add_global_mem : Global_mem.t -> t -> unit
   val add_poly_mem : Poly_mem.t -> t -> unit
   val add_local_mem : Local_mem.t -> t -> unit
-  val add : 'a K.t -> 'a -> t -> unit
+  val add : 'a kind -> 'a -> t -> unit
+  val add_some : some -> t -> unit
   val sub : t -> from:t -> unit
-  val mem : 'a K.t -> 'a -> t -> bool
+  val mem : 'a kind -> 'a -> t -> bool
+  val mem_some : some -> t -> bool
   val intersects : t -> t -> bool
   val flag : t -> Flag.t
   val copy : Flag.t -> t -> t
@@ -368,7 +372,7 @@ module Make_reads (W : Writes) (K : Reads_kind with module W = W) () :
 
   type 'a kind = 'a K.t
 
-  type some = Some : 'a K.t * 'a -> some
+  type some = K.some = Some : 'a K.t * 'a -> some
 
   open! K
 
@@ -433,6 +437,8 @@ module Make_reads (W : Writes) (K : Reads_kind with module W = W) () :
     | Poly_mem   -> H_poly_mem.add x r.poly_mems
     | Local_mem  -> H_local_mem.add x r.local_mems
 
+  let add_some (e : some) r = let Some (k, x) = e in add k x r
+
   let sub r ~from =
     H_global_var.sub r.global_vars ~from:from.global_vars;
     H_formal_var.sub r.poly_vars ~from:from.poly_vars;
@@ -449,6 +455,8 @@ module Make_reads (W : Writes) (K : Reads_kind with module W = W) () :
     | Global_mem -> H_global_mem.mem x r.global_mems
     | Poly_mem   -> H_poly_mem.mem x r.poly_mems
     | Local_mem  -> H_local_mem.mem x r.local_mems
+
+  let mem_some (e : some) r = let Some (k, x) = e in mem k x r
 
   let intersects r1 r2 =
     H_global_var.intersects r1.global_vars r2.global_vars ||
@@ -554,11 +562,11 @@ module Make_effect (W : Writes) : sig
   type ('a, 'r) t
   module K : Reads_kind with module W = W
   module type Reads = Reads with module W = W and module K = K
-  module type Assigns = Reporting_hashmap with type key = W.t and type 'a kind = 'a K.t
+  module type Assigns = Reporting_hashmap with type key = W.t and type 'a S.kind = 'a K.t and type S.some = K.some
   type some =
     | Some :
         { reads : (module Reads with type t = 'r);
-          assigns : (module Assigns with type set = 'r and type t = 'a);
+          assigns : (module Assigns with type S.t = 'r and type t = 'a);
           eff : ('a, 'r) t } -> some
   val create : Flag.t -> some
   val assigns : ('a, 'r) t -> 'a
@@ -599,11 +607,11 @@ end = struct
     }
 
   module type Reads = Reads with module W = W and module K = K
-  module type Assigns = Reporting_hashmap with type key = W.t and type 'a kind = 'a K.t
+  module type Assigns = Reporting_hashmap with type key = W.t and type 'a S.kind = 'a K.t and type S.some = K.some
   type some =
     | Some :
         { reads : (module Reads with type t = 'r);
-          assigns : (module Assigns with type set = 'r and type t = 'a);
+          assigns : (module Assigns with type S.t = 'r and type t = 'a);
           eff : ('a, 'r) t } -> some
   let create f : some =
     let module R = Reads () in

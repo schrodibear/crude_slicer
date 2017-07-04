@@ -97,9 +97,11 @@ end
 
 module type Set = sig
   type t
+  type some
   type 'a kind
   val create : Flag.t -> t
   val add : 'a kind -> 'a -> t -> unit
+  val add_some : some -> t -> unit
   val import : from:t -> t -> unit
   val flag : t -> Flag.t
   val copy : Flag.t -> t -> t
@@ -109,25 +111,25 @@ end
 type ('k, 's, _) hashmap = ..
 
 module type Reporting_hashmap = sig
+  module S : Set
   type key
-  type set
-  type 'a kind
   type t
-  type ('k, 's, _) hashmap += W : (key, set, t) hashmap
+  type ('k, 's, _) hashmap += W : (key, S.t, t) hashmap
   val create : Flag.t -> t
   val clear : t -> unit
   val copy : Flag.t -> t -> t
   val shallow_copy : Flag.t -> t -> t
-  val add : key -> 'a kind -> 'a -> t -> unit
+  val add : key -> 'a S.kind -> 'a -> t -> unit
+  val add_some : key -> S.some -> t -> unit
   val import : from:t -> t -> unit
-  val import_values : key -> set -> t -> unit
+  val import_values : key -> S.t -> t -> unit
   val remove : key -> t -> unit
   val mem : key -> t -> bool
-  val iter : (key -> set -> unit) -> t -> unit
+  val iter : (key -> S.t -> unit) -> t -> unit
   exception Different_flag
-  val filter_map_inplace : ?check:bool -> (key -> set -> set option) -> t -> unit
-  val find : key -> t -> set
-  val fold : (key -> set -> 'b -> 'b) -> t -> 'b -> 'b
+  val filter_map_inplace : ?check:bool -> (key -> S.t -> S.t option) -> t -> unit
+  val find : key -> t -> S.t
+  val fold : (key -> S.t -> 'b -> 'b) -> t -> 'b -> 'b
   val length : t -> int
   val flag : t -> Flag.t
   val stats : t -> Hashtbl.statistics
@@ -135,13 +137,12 @@ module type Reporting_hashmap = sig
 end
 
 module Make_reporting_hashmap (K : Hashed_printable) (S : Set) :
-  Reporting_hashmap with type key = K.t and type set = S.t and type 'a kind = 'a S.kind = struct
+  Reporting_hashmap with type key = K.t and module S = S = struct
   type key = K.t
-  type set = S.t
-  type 'a kind = 'a S.kind
+  module S = S
   module H = Hashtbl.Make (K)
   type t = S.t H.t * Flag.t
-  type ('k, 's, _) hashmap += W : (key, set, t) hashmap
+  type ('k, 's, _) hashmap += W : (key, S.t, t) hashmap
   let create f =
     H.create 32, f
   let clear (h, f) =
@@ -155,6 +156,9 @@ module Make_reporting_hashmap (K : Hashed_printable) (S : Set) :
   let add k kind e (h, f) =
     if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f));
     S.add kind e (H.find h k)
+  let add_some k e (h, f) =
+    if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f));
+    S.add_some e (H.find h k)
   let import ~from:(from, _) (h, f) =
     H.iter
       (fun k from ->

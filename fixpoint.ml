@@ -14,14 +14,14 @@ open Common
 
 module type Info = sig
   module E : sig
-    type t
+    type some
 
-    val pp : formatter -> t -> unit
+    val pp : formatter -> some -> unit
   end
 
   type t
 
-  val get : t -> Flag.t -> fundec -> E.t
+  val get : t -> Flag.t -> fundec -> E.some
   val flag : Flag.t
 end
 
@@ -33,7 +33,7 @@ module Make (I : Info) = struct
     if not (Flag.reported I.flag) then ()
     else until_convergence f fi scc
 
-  class type ['a] frama_c_collector = object inherit frama_c_inplace method finish : 'a end
+  class type ['a] frama_c_collector = object inherit frama_c_inplace method start : unit method finish : 'a end
 
   let visit_until_convergence ~order (v : _ -> _ -> _ #frama_c_collector) fi sccs =
     let iter =
