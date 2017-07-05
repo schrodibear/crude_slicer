@@ -23,28 +23,7 @@ open! Common
 
 module Make (Analysis : Analysis) = struct
 
-  module R = struct
-    include Representant
-    include Analysis
-  end
-  module U = R.U
-  module I = R.I
-
-  let w_mem ?f ?fi u =
-    match (U.repr u).R.kind, f with
-    | `Global,    _                              -> `Global_mem (I.M.Global_mem.mk ?fi u)
-    | `Local f,   Some f' when String.equal f f' -> `Local_mem  (I.M.Local_mem.mk ?fi u)
-    | `Poly f,    Some f' when String.equal f f' -> `Poly_mem   (I.M.Poly_mem.mk ?fi u)
-    | (`Local _
-      | `Poly _), None                           -> Console.fatal "Slice.w_mem: broken invariant: writing to global \
-                                                                   region outside any function: %a"
-                                                      R.pp (U.repr u)
-    | (`Local f
-      | `Poly f), Some f'                        -> Console.fatal "Slice.w_mem: broken invariant: writing to local \
-                                                                   region %a of function %s from frunction %s"
-                                                      R.pp (U.repr u) f f'
-    | `Dummy,     _                              -> Console.fatal "Slice.w_mem: broken invariant: dummy region \
-                                                                   encountered"
+  module I = Analysis.I
 
   let w_var vi =
     match isArithmeticOrPointerType vi.vtype, vi.vglob, vi.vformal with
@@ -60,25 +39,12 @@ module Make (Analysis : Analysis) = struct
 
   let unless_comp ty f = if not (isStructOrUnionType @@ Ty.normalize ty) then Some (f ()) else None
 
-  let w_lval =
-    let deref_mem u = unless_comp (U.repr u).R.typ @@ fun () -> w_mem u in
-    fun ?f (h, off as lv) ->
-      let no_offset () =
-        match R.of_lval ?f lv with
-        | `Location (u, _) -> deref_mem u
-        | `Value _ | `None ->
-          match h with
-          | Var vi         -> unless_comp vi.vtype @@ fun () -> w_var vi
-          | Mem _          -> Console.fatal "Slice.w_lval: broken invariant: \
-                                             Memory accessing lvalue without a location region: %a"
-                                pp_lval lv
-      in
-      match lastOffset off with
-      | Field (fi, NoOffset) -> unless_comp fi.ftype R.(fun () -> w_mem ~fi @@ location @@ of_lval ?f lv)
-      | Field _              -> assert false
-      | Index (_, NoOffset)  -> deref_mem R.(location @@ of_lval ?f lv)
-      | Index _              -> assert false
-      | NoOffset             -> no_offset ()
+  let deref ~loc lv = Mem (new_exp ~loc @@ Lval lv), NoOffset
+
+  let is_var_sating p e =
+    match (stripCasts e).enode with
+    | Lval (Var v, NoOffset) when p v -> true
+    | _                               -> false
 
   let dummy_flag = Flag.create "slicing_dummy"
 
@@ -89,32 +55,74 @@ module Make (Analysis : Analysis) = struct
 
     let f = opt_map Kernel_function.get_name C.f
 
+    module R = struct
+      include Representant
+      include Analysis
+      let poly,         local,         of_var,    of_lval,    of_expr,    relevant_region,    arg_regions =
+          poly (the f), local (the f), of_var ?f, of_lval ?f, of_expr ?f, relevant_region ?f, arg_regions ?f
+    end
+    module U = R.U
+
+    let w_mem ?fi u =
+      match (U.repr u).R.kind, f with
+      | `Global,    _                              -> `Global_mem (I.M.Global_mem.mk ?fi u)
+      | `Local f,   Some f' when String.equal f f' -> `Local_mem  (I.M.Local_mem.mk ?fi u)
+      | `Poly f,    Some f' when String.equal f f' -> `Poly_mem   (I.M.Poly_mem.mk ?fi u)
+      | (`Local _
+        | `Poly _), None                           -> Console.fatal "Slice.w_mem: broken invariant: writing to global \
+                                                                     region outside any function: %a"
+                                                        R.pp (U.repr u)
+      | (`Local f
+        | `Poly f), Some f'                        -> Console.fatal "Slice.w_mem: broken invariant: writing to local \
+                                                                     region %a of function %s from frunction %s"
+                                                        R.pp (U.repr u) f f'
+      | `Dummy,     _                              -> Console.fatal "Slice.w_mem: broken invariant: dummy region \
+                                                                     encountered"
+    let w_lval =
+      let deref_mem u = unless_comp (U.repr u).R.typ @@ fun () -> w_mem u in
+      fun (h, off as lv) ->
+        let no_offset () =
+          match R.of_lval lv with
+          | `Location (u, _) -> deref_mem u
+          | `Value _ | `None ->
+            match h with
+            | Var vi         -> unless_comp vi.vtype @@ fun () -> w_var vi
+            | Mem _          -> Console.fatal "Slice.w_lval: broken invariant: \
+                                               Memory accessing lvalue without a location region: %a"
+                                  pp_lval lv
+        in
+        match lastOffset off with
+        | Field (fi, NoOffset) -> unless_comp fi.ftype R.(fun () -> w_mem ~fi @@ location @@ of_lval lv)
+        | Field _              -> assert false
+        | Index (_, NoOffset)  -> deref_mem R.(location @@ of_lval lv)
+        | Index _              -> assert false
+        | NoOffset             -> no_offset ()
+
     let unwrap (I.E.Some { reads = (module F'); assigns = (module A'); eff }) : (A.t, F.t) I.E.t =
       match F'.W, A'.W with
       | F.W, A.W -> eff
       | _        -> Console.fatal "Slice.unpack: broken invariant: got effect of a different function"
 
-    let r_mem ?fi u = F.of_writes @@ w_mem ?f ?fi u
+    let r_mem ?fi u = F.of_writes @@ w_mem ?fi u
 
     let r_var vi = F.of_writes @@ w_var vi
 
     let initial_deps assigns =
       let open List in
-      let relevant_region = R.relevant_region ?f in
       iter
         (fun (n, rs) ->
            if n >= 1 then
              iter
                (fun r ->
                   let u = U.of_repr r in
-                  if relevant_region u then
+                  if R.relevant_region u then
                     R.dot_voids
                       (fun u' ->
                          R.containers_of_void
                            (fun ty u'' ->
                               if snd @@ Ty.deref ty = n then begin
-                                A.add_some (w_mem ?f u)   (r_mem u'') assigns;
-                                A.add_some (w_mem ?f u'') (r_mem u)   assigns
+                                A.add_some (w_mem u)   (r_mem u'') assigns;
+                                A.add_some (w_mem u'') (r_mem u)   assigns
                               end)
                            u')
                       u)
@@ -125,7 +133,7 @@ module Make (Analysis : Analysis) = struct
            let rv, args = Kernel_function.(get_vi kf, get_formals kf) in
            iter
              (fun vi ->
-                match R.of_var ?f vi with
+                match R.of_var vi with
                 | `Location (u, _)
                   when not (isStructOrUnionType vi.vtype)
                     && vi.vaddrof                         -> A.add
@@ -134,7 +142,7 @@ module Make (Analysis : Analysis) = struct
                 | `Location _ | `Value _ | `None          -> ())
              args;
            let (ret_ext_regions, param_regions), (ret_int_regions, arg_regions) =
-             R.param_regions kf, R.arg_regions ?f kf (Some (var rv)) (map evar args)
+             R.param_regions kf, R.arg_regions kf (Some (var rv)) (map evar args)
            in
            let add_all au pu =
              match unrollType (U.repr au).R.typ with
@@ -148,7 +156,7 @@ module Make (Analysis : Analysis) = struct
            iter2 add_all arg_regions     param_regions;
            iter2 add_all ret_ext_regions ret_int_regions)
 
-    let add_from_lval lv acc = may F.(fun w -> add_some (of_writes w) acc) @@ w_lval ?f lv
+    let add_from_lval lv acc = may F.(fun w -> add_some (of_writes w) acc) @@ w_lval lv
 
     class rval_visitor f = object(self)
       inherit frama_c_inplace
@@ -190,7 +198,7 @@ module Make (Analysis : Analysis) = struct
       | Var _, off -> ignore @@ visitFramacOffset o off
 
     let assign_all e from assigns =
-      visit_rval (fun lv -> may (fun w -> A.import_values w from assigns) @@ w_lval ?f lv) e
+      visit_rval (fun lv -> may (fun w -> A.import_values w from assigns) @@ w_lval lv) e
 
     let prj_poly_var s params =
       let args =
@@ -223,9 +231,9 @@ module Make (Analysis : Analysis) = struct
       | `Global_mem _ as w -> Some w
       | `Poly_mem m        -> I.M.Poly_mem.prj
                                 ~find:(fun u -> R.H_call.find u @@ R.map s)
-                                ~mk:(fun ?fi u -> Some (w_mem ?f ?fi u))
+                                ~mk:(fun ?fi u -> Some (w_mem ?fi u))
                                 m
-      | `Result            -> opt_bind (w_lval ?f) lv
+      | `Result            -> opt_bind w_lval lv
       | `Poly_var _
       | `Local_var _
       | `Local_mem _       -> None
@@ -283,13 +291,6 @@ module Make (Analysis : Analysis) = struct
         F.iter_poly_vars   (fun v -> import_reads @@ `Poly_var v)   reads;
         F.iter_local_vars  (fun v -> import_reads @@ `Local_var v)  reads
 
-    let deref ~loc lv = Mem (new_exp ~loc @@ Lval lv), NoOffset
-
-    let is_var_sating p e =
-      match (stripCasts e).enode with
-      | Lval (Var v, NoOffset) when p v -> true
-      | _                               -> false
-
     module Collect (M : sig val from : stmt -> F.t val info : I.t val eff : (A.t, F.t) I.E.t end) = struct
       open M
       let assigns = I.E.assigns eff
@@ -301,7 +302,7 @@ module Make (Analysis : Analysis) = struct
       let comp_assign lv e from =
         let r_lv, r_e =
           match e.enode with
-          | Lval lv' -> R.(location @@ of_lval ?f lv, location @@ of_lval lv')
+          | Lval lv' -> R.(location @@ of_lval lv, location @@ of_lval lv')
           | _        -> Console.fatal "Slicing.comp_assign: RHS is not an lval: %a" pp_exp e
         in
         let ci =
@@ -320,7 +321,7 @@ module Make (Analysis : Analysis) = struct
         add_from_lval lv from;
         may (fun e -> add_from_rval e from) e;
         let e = opt_conv (dummy_exp @@ Lval lv) e in
-        match w_lval ?f lv with
+        match w_lval lv with
         | Some w -> A.import_values w from assigns
         | None   -> comp_assign lv e from
 
@@ -475,16 +476,16 @@ module Make (Analysis : Analysis) = struct
       let close_depends () = close_depends assigns depends
 
       let comp_assign lv =
-        let r_lv = R.(location @@ of_lval ?f lv) in
+        let r_lv = R.(location @@ of_lval lv) in
         let ci =
           match unrollType @@ typeOfLval lv with
           | TComp (ci, _, _)  -> ci
           | ty                -> Console.fatal "Slicing.comp_assign: LHS is not a composite: %a : %a"
                                    pp_lval lv pp_typ ty
         in
-        List.map (fun (path, fi) -> w_mem ?f ?fi @@ R.take path r_lv) (Ci.all_offsets ci)
+        List.map (fun (path, fi) -> w_mem ?fi @@ R.take path r_lv) (Ci.all_offsets ci)
 
-      let gassign lv = decide @@ match w_lval ?f lv with Some w -> [w] | None -> comp_assign lv
+      let gassign lv = decide @@ match w_lval lv with Some w -> [w] | None -> comp_assign lv
       let assign = gassign
       let return eo =
         decide @@
@@ -514,7 +515,7 @@ module Make (Analysis : Analysis) = struct
              match w', lv with
              | `Result,              Some lv -> may_push_and_cons
                                                   (fun () -> I.E.add_result_dep eff')
-                                                  (w_lval ?f lv)
+                                                  (w_lval lv)
              | `Result,              None    -> id
              | (#I.W.readable as w'), _      -> may_push_and_cons
                                                   F'.(fun () -> add_some (of_writes w') deps')
@@ -526,7 +527,7 @@ module Make (Analysis : Analysis) = struct
       let goto s = decide @@ [`Local_var (Local_var.of_varinfo_exn @@ I.H_stmt.find info.I.goto_vars s)]
       let assume e =
         let r = ref [] in
-        visit_rval (fun lv -> may (fun w -> r := w :: !r) @@ w_lval ?f lv) e;
+        visit_rval (fun lv -> may (fun w -> r := w :: !r) @@ w_lval lv) e;
         decide !r
     end
 
@@ -663,12 +664,11 @@ module Make (Analysis : Analysis) = struct
     let collectors, markers = H.create 512, H.create 512 in
     Globals.Functions.iter_on_fundecs
       (fun d ->
-         let I.E.Some { reads = (module F); assigns = (module A); _ } = I.get info R.flag d in
+         let I.E.Some { reads = (module F); assigns = (module A); _ } = I.get info Representant.flag d in
          let module L = Make_local (struct let f = Some (Globals.Functions.get d.svar) end) (F) (A) in
          H.replace collectors d @@ L.collector info;
          H.replace markers d @@ L.marker info);
     { collectors; markers }
-
 
 end
 
