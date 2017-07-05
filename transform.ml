@@ -15,42 +15,7 @@ open Visitor
 open Extlib
 open! Common
 open Region
-
-let rec to_offset =
-  function
-  | []                         -> NoOffset
-  | `Field fi :: os            -> Field (fi, to_offset os)
-  | `Container_of_void _ :: os -> to_offset os
-
-let cache_offsets =
-  let open List in
-  let negate off = Integer.(rem (neg off) @@ add (max_unsigned_number @@ theMachine.theMachine.sizeof_ptr lsl 3) one) in
-  let iter_rev_prefixes f =
-    let rec loop acc =
-      function
-      | []      -> f acc
-      | x :: xs -> f acc; loop (x :: acc) xs
-    in
-    loop []
-  in
-  fun ~path_of_key ci ->
-    Ci.all_offsets ci |>
-    map (fun (path, fo) -> path @ may_map (fun fi -> [`Field fi]) ~dft:[] fo) |>
-    iter
-      (iter_rev_prefixes @@
-       fun rev_path ->
-       let path = rev rev_path in
-       match rev_path with
-       | []                                            -> ()
-       | (`Container_of_void _ | `Field _ as off) :: _ ->
-         let ty =
-           match off with
-           | `Container_of_void ty -> Ty.normalize ty
-           | `Field fi             -> Ty.normalize fi.ftype
-         in
-         let off = Integer.of_int @@ fst (bitsOffset (TComp (ci, empty_size_cache (), [])) (to_offset path)) lsr 3 in
-         Info.H_field.replace path_of_key (ci, ty, off) path;
-         Info.H_field.replace path_of_key (ci, ty, negate off) path)
+open Analyze
 
 let container_of =
   let mkCast = mkCast ~overflow:Check ~force:true in
@@ -79,6 +44,8 @@ let rec mark =
 
 module Make (Analysis : Analysis) = struct
   open Analysis
+
+  let builtin_expect = Str.regexp @@ Options.Builtin_expect_regexp.get ()
 
   class rewriter = object(self)
     inherit frama_c_inplace
@@ -114,5 +81,13 @@ module Make (Analysis : Analysis) = struct
                    theMachine.ptrdiffType) &&
             not (need_cast ty ty')              -> ChangeDoChildrenPost (mkBinOp ~loc op e1 e2, id)
         | _                                     -> DoChildren
+
+    method! vinst =
+      function
+      | Call (Some lv, { enode = Lval (Var { vname; _ }, NoOffset); _ }, [e; _], loc)
+        when Str.string_match builtin_expect vname 0                                  -> ChangeTo [Set (lv, e, loc)]
+      | _                                                                             -> DoChildren
   end
+
+  let rewrite () = visitFramacFile (new rewriter) @@ Ast.get ()
 end

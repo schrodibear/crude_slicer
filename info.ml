@@ -324,7 +324,7 @@ module type Reads = sig
 
   type some = K.some = Some : 'a K.t * 'a -> some
 
-  val of_writes : [< W.readable ] -> some
+  val of_write : [< W.readable ] -> some
 
   val create : Flag.t -> t
   val clear : t -> unit
@@ -388,7 +388,7 @@ module Make_reads (W : Writes) (K : Reads_kind with module W = W) () :
 
   type ('w, _) reads += W : (W.t, t) reads
 
-  let of_writes : _ -> some =
+  let of_write : _ -> some =
     function[@warning "-42"]
     | `Global_var v -> Some (Global_var, v)
     | `Local_var v  -> Some (Local_var, v)
@@ -582,10 +582,11 @@ module Make_effect (W : Writes) : sig
   val is_target : (_, _) t -> bool
   val is_tracking_var : Void_ptr_var.t -> (_, _) t -> bool
   val has_result_dep : (_, _) t -> bool
-  val iter_body_reqs : (fundec -> unit) -> (_, _) t -> unit
-  val iter_stmt_reqs : (stmt -> unit) -> (_, _) t -> unit
+  val iter_body_reqs : (fundec -> unit) -> some -> unit
+  val iter_stmt_reqs : (stmt -> unit) -> some -> unit
   val has_body_req : fundec -> (_, _) t -> bool
   val has_stmt_req : stmt -> (_, _) t -> bool
+  val has_stmt_req' : stmt -> some -> bool
   val flag : (_, _) t -> Flag.t
 
   val pp : formatter -> some -> unit
@@ -639,6 +640,7 @@ end = struct
   let add_stmt_req s e = Requires.add_stmt s e.requires
   let has_body_req f e = Requires.has_body f e.requires
   let has_stmt_req s e = Requires.has_stmt s e.requires
+  let has_stmt_req' s (Some { eff; _ } : some) = has_stmt_req s eff
   let add_tracking_var v e = H_void_ptr_var.add v e.tracking
   let copy f (Some { reads = (module R) as reads; assigns = (module A) as assigns; eff = e } : some) : some =
     Some {
@@ -656,8 +658,8 @@ end = struct
   let is_target e = e.is_target
   let has_result_dep e = e.result_dep
   let is_tracking_var v e = H_void_ptr_var.mem v e.tracking
-  let iter_body_reqs f e = Requires.iter_bodies f e.requires
-  let iter_stmt_reqs f e = Requires.iter_stmts f e.requires
+  let iter_body_reqs f (Some { eff; _ } : some) = Requires.iter_bodies f eff.requires
+  let iter_stmt_reqs f (Some { eff; _ } : some) = Requires.iter_stmts f eff.requires
   let flag e = e.flag
 
   let pp fmt (Some { reads = (module R); assigns = (module A); eff = e } : some) =
@@ -682,7 +684,7 @@ module Make (R : Representant) (U : Unifiable with type repr = R.t) () = struct
   module H_stmt_conds = struct
     include Stmt.Hashtbl
 
-    let find_or_empty h k = try find h k with Not_found -> []
+    let find_or_empty h k = try find_all h k with Not_found -> []
   end
 
   type nonrec offs = offs
@@ -690,7 +692,7 @@ module Make (R : Representant) (U : Unifiable with type repr = R.t) () = struct
   type t =
     {
       goto_vars   : varinfo H_stmt.t;
-      stmt_vars   : varinfo list H_stmt_conds.t;
+      stmt_vars   : varinfo H_stmt_conds.t;
       offs_of_key : offs H_field.t;
       effects     : E.some H_fundec.t
     }

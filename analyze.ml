@@ -6,7 +6,7 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@warning "-48"]
+[@@@warning "-48-44"]
 
 open Cil
 open Cil_types
@@ -86,6 +86,54 @@ let condensate () =
   let r = Components.scc_list g in
   Console.debug "...finished sccs...";
   r
+
+let rec to_offset =
+  function
+  | []                         -> NoOffset
+  | `Field fi :: os            -> Field (fi, to_offset os)
+  | `Container_of_void _ :: os -> to_offset os
+
+let cache_offsets =
+  let open List in
+  let negate off = Integer.(rem (neg off) @@ add (max_unsigned_number @@ theMachine.theMachine.sizeof_ptr lsl 3) one) in
+  let iter_rev_prefixes f =
+    let rec loop acc =
+      function
+      | []      -> f acc
+      | x :: xs -> f acc; loop (x :: acc) xs
+    in
+    loop []
+  in
+  fun ~offs_of_key ci ->
+    Ci.all_offsets ci |>
+    map (fun (path, fo) -> path @ may_map (fun fi -> [`Field fi]) ~dft:[] fo) |>
+    iter
+      (iter_rev_prefixes @@
+       fun rev_path ->
+       let path = rev rev_path in
+       match rev_path with
+       | []                                            -> ()
+       | (`Container_of_void _ | `Field _ as off) :: _ ->
+         let ty =
+           match off with
+           | `Container_of_void ty -> Ty.normalize ty
+           | `Field fi             -> Ty.normalize fi.ftype
+         in
+         let off = Integer.of_int @@ fst (bitsOffset (TComp (ci, empty_size_cache (), [])) (to_offset path)) lsr 3 in
+         Info.H_field.replace offs_of_key (ci, ty, off) path;
+         Info.H_field.replace offs_of_key (ci, ty, negate off) path)
+
+let cache_offsets ~offs_of_key =
+  visitFramacFile
+    (object
+      inherit frama_c_inplace
+      method! vglob_aux =
+        function[@warning "-4"]
+        | GCompTag (ci, _)
+        | GCompTagDecl (ci, _) -> cache_offsets ~offs_of_key ci; SkipChildren
+        | _                    ->                                SkipChildren
+    end)
+    (Ast.get ())
 
 module Goto_handling = struct
   module M = struct

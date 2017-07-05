@@ -65,3 +65,12 @@ module Region_depth =
       let arg_name = ""
       let default = 3
     end)
+
+module Builtin_expect_regexp =
+  String
+    (struct
+      let option_name = "-builtin_expect"
+      let help = "Specify regexp to recognize and remove __builtin_expect wrapper function"
+      let arg_name = ""
+      let default = ".*__builtin_expect"
+    end)

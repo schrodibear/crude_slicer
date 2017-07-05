@@ -61,6 +61,8 @@ module List = struct
 
   let cons' xs x = x :: xs
 
+  let fold_left' f l acc = fold_left f acc l
+
   let take n l =
     let rec loop n dst =
       function
