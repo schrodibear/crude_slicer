@@ -11,9 +11,12 @@
 open Cil
 open Cil_types
 open Cil_datatype
+open Cil_printer
 open Visitor
+open Pretty_utils
 
 open Extlib
+open Format
 open! Common
 
 let get_addressed_kfs =
@@ -105,6 +108,7 @@ let cache_offsets =
     loop []
   in
   fun ~offs_of_key ci ->
+    Console.debug ~level:2 "Collecting offsets from compinfo %s..." (compFullName ci);
     Ci.all_offsets ci |>
     map (fun (path, fo) -> path @ may_map (fun fi -> [`Field fi]) ~dft:[] fo) |>
     iter
@@ -123,7 +127,15 @@ let cache_offsets =
          Info.H_field.replace offs_of_key (ci, ty, off) path;
          Info.H_field.replace offs_of_key (ci, ty, negate off) path)
 
+let pp_off fmttr =
+  let pp fmt = fprintf fmttr fmt in
+  function
+  | `Container_of_void ty -> pp "@@(%a)" pp_typ ty
+  | `Field fi             -> pp ".%a" pp_field fi
+
 let cache_offsets ~offs_of_key =
+  Console.debug "Started cache_offsets...";
+  Info.H_field.clear offs_of_key;
   visitFramacFile
     (object
       inherit frama_c_inplace
@@ -133,7 +145,13 @@ let cache_offsets ~offs_of_key =
         | GCompTagDecl (ci, _) -> cache_offsets ~offs_of_key ci; SkipChildren
         | _                    ->                                SkipChildren
     end)
-    (Ast.get ())
+    (Ast.get ());
+  Console.debug ~level:3 "Finished cache_offsets. Result is:@.@[<hov2>%a@]"
+    (pp_iter2 ~sep:";@." ~between:"@ ->@ " Info.H_field.iter
+       Integer.(fun fmt (ci, ty, off) ->
+         fprintf fmt "%s, %a, %s(%LX)" (compFullName ci) pp_typ ty (to_string off) (to_int64 off))
+       (pp_list ~sep:"" pp_off))
+    offs_of_key;
 
 module Goto_handling = struct
   module M = struct
@@ -251,6 +269,7 @@ end
 include Goto_handling.M
 
 let fill_goto_tables ~goto_vars ~stmt_vars =
+  Console.debug "Started fill_goto_tables...";
   H.clear goto_vars;
   H.clear stmt_vars;
   Globals.Functions.iter
@@ -258,5 +277,6 @@ let fill_goto_tables ~goto_vars ~stmt_vars =
        match Kernel_function.get_definition kf with
        | exception Kernel_function.No_Definition -> ()
        | fundec                                  ->
+         Console.debug ~level:2 "Filling goto tables in function %s..." fundec.svar.vname;
          Cfg.cfgFun fundec;
          ignore @@ visitFramacFunction (new goto_visitor ~goto_vars ~stmt_vars kf) fundec)

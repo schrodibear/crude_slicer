@@ -518,14 +518,14 @@ module type Analysis = sig
   val match_container_of2 : exp_node -> (exp * Info.offs) option
   val match_dot : exp_node -> (exp * Info.offs) option
 
-  type ('a, 'b, 'c) offs = [ `Field of 'a | `Container of 'b | `Container_of_void of 'c ]
+  type ('a, 'b) offs = [ `Field of 'a | `Container_of_void of 'b ]
   type 'a maybe_region =
     [< `Location of U.t * (unit -> [ `None | `Value of U.t ])
     |  `Value of U.t
     |  `None ] as 'a
 
-  val take : [< (fieldinfo, fieldinfo, typ) offs ] list -> U.t -> U.t
-  val inv : [< ('a, 'b, 'c) offs ] list -> [> ('b, 'a, 'c) offs ] list
+  val take : [< (fieldinfo, typ) offs | `Container of fieldinfo | `Dot_void ] list -> U.t -> U.t
+  val inv : [< ('a, 'b) offs ] list -> [> `Container of 'a | `Dot_void ] list
   val of_var : ?f:string -> varinfo -> [ `Location of _ | `Value of _  | `None ] maybe_region
   val of_string : [ `S of string | `WS of int64 list ] -> [ `Location of _ ] maybe_region
   val of_lval : ?f:string -> lval -> [ `Location of _ | `Value of _  | `None ] maybe_region
@@ -580,7 +580,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
   let match_container_of1 =
     let rec match_offset ?(acc=[]) =
       function
-      | NoOffset        when acc <> []        -> Some acc
+      | NoOffset        when acc <> []        -> Some (List.rev acc)
       | NoOffset                              -> None
       | Field (fi, off) when fi.fcomp.cstruct -> match_offset ~acc:(`Field fi :: acc) off
       | Field (fi, off)                       -> match_offset
@@ -652,7 +652,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     else if isArrayType typ             then `Value u
     else                                     `None
 
-  type ('a, 'b, 'c) offs = [ `Field of 'a | `Container of 'b | `Container_of_void of 'c ]
+  type ('a, 'b) offs = [ `Field of 'a | `Container_of_void of 'b ]
 
   let rec take offs u =
     match offs with
@@ -660,14 +660,14 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     | `Field fi ::             offs -> take offs @@ dot u fi
     | `Container fi ::         offs -> take offs @@ container u fi
     | `Container_of_void ty :: offs -> take offs @@ container_of_void u ty
+    | `Dot_void ::             offs -> take offs @@ dot_void u
 
   let inv offs =
     let rec loop acc =
       function
-      | []                            -> acc
-      | `Container fi ::         offs -> loop (`Field fi :: acc) offs
-      | `Field fi ::             offs -> loop (`Container fi :: acc) offs
-      | `Container_of_void ty :: offs -> loop (`Container_of_void ty :: acc) offs
+      | []                           -> acc
+      | `Field fi ::            offs -> loop (`Container fi :: acc) offs
+      | `Container_of_void _ :: offs -> loop (`Dot_void :: acc) offs
     in
     loop [] offs
 

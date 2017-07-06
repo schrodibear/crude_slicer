@@ -545,7 +545,7 @@ module Make (Analysis : Analysis) = struct
       let depends = I.E.depends eff in
       let has_result_dep = I.E.has_result_dep eff in
       let reads = F.create dummy_flag in
-      let decide : 'a. ([< I.W.t ] as 'a) list -> _ =
+      let decide =
         let decide needed = if needed then `Needed else `Not_yet in
         let single w = decide F.(mem_some (of_write w) depends) in
         let intersects l =
@@ -557,18 +557,18 @@ module Make (Analysis : Analysis) = struct
             l;
           F.intersects reads depends
         in
-        let rec mem_result : 'a. ([< I.W.t] as 'a) list -> _ =
+        let rec mem_result =
           function
           | []            -> false
           | `Result :: _  -> true
-          | _       :: xs -> mem_result xs
+          | #I.W.t  :: xs -> mem_result xs
         in
         function
         | []                                -> `Not_yet
         | [`Result] when has_result_dep     -> `Needed
         | [`Result]                         -> `Not_yet
         | [#I.W.readable as w]              -> single w
-        | l                                 -> decide (has_result_dep && mem_result l || intersects l)
+        | (l : [< I.W.t] list)              -> decide (has_result_dep && mem_result l || intersects l)
       in
       let module Mark = Mark (struct let decide, info, eff = decide, info, eff end) in
       let open Mark in
@@ -763,15 +763,16 @@ module Make (Analysis : Analysis) = struct
 end
 
 let slice () =
+  Console.debug "Started slicing...";
   let offs_of_key = Info.H_field.create 2048 in
   Analyze.cache_offsets ~offs_of_key;
-  let module Analysis = Region.Analysis (struct let offs_of_key = offs_of_key end) () in
-  let { Analysis.I.goto_vars; stmt_vars; _ } as info = Analysis.I.create () in
+  let module Region_analysis = Region.Analysis (struct let offs_of_key = offs_of_key end) () in
+  let { Region_analysis.I.goto_vars; stmt_vars; _ } as info = Region_analysis.I.create () in
   Analyze.fill_goto_tables ~goto_vars ~stmt_vars;
-  let module Transform = Transform.Make (Analysis) in
+  let module Transform = Transform.Make (Region_analysis) in
   Transform.rewrite ();
-  Analysis.compute_regions ();
-  let module Slice = Make (Analysis) in
+  Region_analysis.compute_regions ();
+  let module Slice = Make (Region_analysis) in
   let module Slice = Slice.Make (struct let info = info end) in
   Slice.init ();
   let sccs = Analyze.condensate () in
