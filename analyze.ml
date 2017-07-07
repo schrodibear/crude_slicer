@@ -134,25 +134,32 @@ let pp_off fmttr =
   | `Container_of_void ty -> pp "@@(%a)" pp_typ ty
   | `Field fi             -> pp ".%a" pp_field fi
 
-let cache_offsets ~offs_of_key =
-  Console.debug "Started cache_offsets...";
-  Info.H_field.clear offs_of_key;
-  visitFramacFile
-    (object
-      inherit frama_c_inplace
-      method! vglob_aux =
-        function[@warning "-4"]
-        | GCompTag (ci, _)
-        | GCompTagDecl (ci, _) -> cache_offsets ~offs_of_key ci; SkipChildren
-        | _                    ->                                SkipChildren
-    end)
-    (Ast.get ());
-  Console.debug ~level:3 "Finished cache_offsets. @[<2>Result is:@\n%a@]"
-    (pp_iter2 ~sep:";@\n" ~between:"@ ->@ " Info.H_field.iter
-       Integer.(fun fmt (ci, ty, off) ->
-         fprintf fmt "@[%s, %a, %s(%LX)@]" (compFullName ci) pp_typ ty (to_string off) (to_int64 off))
-       (pp_list ~sep:"" pp_off))
-    offs_of_key;
+let cache_offsets =
+  let conv n =
+    let open Integer in
+    let mx = max_unsigned_number @@ theMachine.theMachine.sizeof_ptr lsl 3 in
+    let mxpos = div mx @@ of_int 2 in
+    if gt n mxpos then sub n mx else n
+  in
+  fun ~offs_of_key ->
+    Console.debug "Started cache_offsets...";
+    Info.H_field.clear offs_of_key;
+    visitFramacFile
+      (object
+        inherit frama_c_inplace
+        method! vglob_aux =
+          function[@warning "-4"]
+                | GCompTag (ci, _)
+                | GCompTagDecl (ci, _) -> cache_offsets ~offs_of_key ci; SkipChildren
+                | _                    ->                                SkipChildren
+      end)
+      (Ast.get ());
+    Console.debug ~level:3 "Finished cache_offsets. @[<2>Result is:@\n%a@]"
+      (pp_iter2 ~sep:";@\n" ~between:"@ ->@ " Info.H_field.iter
+         Integer.(fun fmt (ci, ty, off) ->
+           fprintf fmt "@[%s, %a, %s(%LX)@]" (compFullName ci) pp_typ ty (to_string off) (to_int64 @@ conv off))
+         (pp_list ~sep:"" pp_off))
+      offs_of_key
 
 module Goto_handling = struct
   module H = Stmt.Hashtbl
@@ -280,7 +287,7 @@ let fill_goto_tables ~goto_vars ~stmt_vars =
        | exception Kernel_function.No_Definition -> ()
        | fundec                                  ->
          Console.debug ~level:2 "Filling goto tables in function %s..." fundec.svar.vname;
-         Cfg.cfgFun fundec;
+         (* Cfg.cfgFun fundec; *) (* Already computed by default in current Frama-C *)
          ignore @@ visitFramacFunction (new goto_visitor ~goto_vars ~stmt_vars kf) fundec);
   Console.debug ~level:3 "Finished filling goto tables. \
                           Result is:@\n@[<2>Goto vars:@\n%a@]@\n@[<2>Stmt vars:@\n%a@]"

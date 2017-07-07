@@ -772,6 +772,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       let open! H_l in
       memoize ~find ~replace h_lval @@
       fun ?f lv ->
+      let of_var = of_var ?f in
       let of_lval = of_lval ?f in
       let of_expr = of_expr ?f in
       let value r = value ?f r in
@@ -1061,7 +1062,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       else SkipChildren
   end
 
-  class unifier () fundec =
+  class unifier fundec =
     let f = opt_map (fun fd -> fd.svar.vname) fundec in
     object
       inherit frama_c_inplace
@@ -1148,8 +1149,8 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     Console.debug "Started compute_regions...";
     let sccs = Analyze.condensate () in
     Console.debug "Proceeding with region analysis...";
-    visitFramacFile (new unifier () None :> frama_c_visitor) @@ Ast.get ();
-    Fixpoint.visit_until_convergence ~order:`topological (fun () f -> new unifier () @@ Some f) () sccs;
+    visitFramacFile (new unifier None :> frama_c_visitor) @@ Ast.get ();
+    Fixpoint.visit_until_convergence ~order:`topological (fun () f -> new unifier @@ Some f) () sccs;
     unify_voids None
 
   let dot_voids = dot_voids

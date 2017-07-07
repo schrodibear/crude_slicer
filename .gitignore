@@ -16,3 +16,4 @@ META.*
 .depend
 .directory
 top
+tests/ptests_config
