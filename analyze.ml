@@ -72,10 +72,11 @@ let filter_matching_kfs lvo params =
        else false)
 
 let condensate () =
+  Console.debug "Started callgraph condensation...";
   let module Cg = Callgraph.Cg in
-  Console.debug "...computing callgraph...";
+  Console.debug ~level:2 "Computing callgraph...";
   let cg = Cg.get () in
-  Console.debug "..syntactic slicing...";
+  Console.debug ~level:2 "Syntactic slicing...";
   let module H = Kernel_function.Hashtbl in
   let module Traverse = Graph.Traverse.Bfs (Cg.G) in
   let h = H.create 512 in
@@ -85,9 +86,9 @@ let condensate () =
   let module Components = Graph.Components.Make (G) in
   let g = G.create ~size:(H.length h) () in
   Cg.G.iter_edges (fun f t -> if H.mem h f && H.mem h t then G.add_edge g f t) cg;
-  Console.debug "...sccs...";
+  Console.debug ~level:2 "Sccs...";
   let r = Components.scc_list g in
-  Console.debug "...finished sccs...";
+  Console.debug ~level:3 "Finished condensation...";
   r
 
 let rec to_offset =
@@ -146,17 +147,17 @@ let cache_offsets ~offs_of_key =
         | _                    ->                                SkipChildren
     end)
     (Ast.get ());
-  Console.debug ~level:3 "Finished cache_offsets. Result is:@.@[<hov2>%a@]"
-    (pp_iter2 ~sep:";@." ~between:"@ ->@ " Info.H_field.iter
+  Console.debug ~level:3 "Finished cache_offsets. @[<2>Result is:@\n%a@]"
+    (pp_iter2 ~sep:";@\n" ~between:"@ ->@ " Info.H_field.iter
        Integer.(fun fmt (ci, ty, off) ->
-         fprintf fmt "%s, %a, %s(%LX)" (compFullName ci) pp_typ ty (to_string off) (to_int64 off))
+         fprintf fmt "@[%s, %a, %s(%LX)@]" (compFullName ci) pp_typ ty (to_string off) (to_int64 off))
        (pp_list ~sep:"" pp_off))
     offs_of_key;
 
 module Goto_handling = struct
-  module M = struct
-    module H = Stmt.Hashtbl
+  module H = Stmt.Hashtbl
 
+  module M = struct
     let all_paths ?s' s =
       let open Stmt in
       let open List in
@@ -269,9 +270,10 @@ end
 include Goto_handling.M
 
 let fill_goto_tables ~goto_vars ~stmt_vars =
+  let open Info in
   Console.debug "Started fill_goto_tables...";
-  H.clear goto_vars;
-  H.clear stmt_vars;
+  H_stmt.clear goto_vars;
+  H_stmt.clear stmt_vars;
   Globals.Functions.iter
     (fun kf ->
        match Kernel_function.get_definition kf with
@@ -279,4 +281,13 @@ let fill_goto_tables ~goto_vars ~stmt_vars =
        | fundec                                  ->
          Console.debug ~level:2 "Filling goto tables in function %s..." fundec.svar.vname;
          Cfg.cfgFun fundec;
-         ignore @@ visitFramacFunction (new goto_visitor ~goto_vars ~stmt_vars kf) fundec)
+         ignore @@ visitFramacFunction (new goto_visitor ~goto_vars ~stmt_vars kf) fundec);
+  Console.debug ~level:3 "Finished filling goto tables. \
+                          Result is:@\n@[<2>Goto vars:@\n%a@]@\n@[<2>Stmt vars:@\n%a@]"
+    (pp_iter2 ~sep:";@\n" ~between:"@ ->@ " H_stmt.iter
+       (fun fmt s -> fprintf fmt "s%d@@L%d" s.sid (fst @@ Stmt.loc s).Lexing.pos_lnum)
+       pp_varinfo)
+    goto_vars
+    (pp_iter2 ~sep:";@\n" ~between:"@ ->@ " H_stmt_conds.iter_all pp_stmt @@
+     pp_list ~pre:"[@[" ~suf:"]@]" ~sep:",@ " ~empty:"[]" pp_varinfo)
+    stmt_vars

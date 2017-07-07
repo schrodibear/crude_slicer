@@ -7,6 +7,7 @@
 (**************************************************************************)
 
 open Format
+open Pretty_utils
 open Common
 open Extlib
 
@@ -29,7 +30,7 @@ module type Reporting_bithashset = sig
   val is_empty : t -> bool
   val flag : t -> Flag.t
   val stats : unit -> Hashtbl.statistics
-  val pp : formatter -> t -> unit
+  val pp : Format.formatter -> t -> unit
 end
 
 module Make_reporting_bithashset (M : Hashed_printable) () : Reporting_bithashset with type elt = M.t =
@@ -90,9 +91,7 @@ struct
   let length (v, _) = Bv.cardinal v
   let is_empty (v, _) = Bv.is_empty v
   let flag (_, f) = f
-  let pp fmt v =
-    fprintf fmt "{@[%a@]}"
-      (pp_print_list ~pp_sep:(fun fmt () -> fprintf fmt ",@ ") M.pp) (fold List.cons v [])
+  let pp fmt = fprintf fmt "{%a}" (pp_iter ~sep:",@ " iter M.pp)
 end
 
 module type Set = sig
@@ -105,7 +104,7 @@ module type Set = sig
   val import : from:t -> t -> unit
   val flag : t -> Flag.t
   val copy : Flag.t -> t -> t
-  val pp : formatter -> t -> unit
+  val pp : Format.formatter -> t -> unit
 end
 
 type ('k, 's, _) hashmap = ..
@@ -133,7 +132,7 @@ module type Reporting_hashmap = sig
   val length : t -> int
   val flag : t -> Flag.t
   val stats : t -> Hashtbl.statistics
-  val pp : formatter -> t -> unit
+  val pp : Format.formatter -> t -> unit
 end
 
 module Make_reporting_hashmap (K : Hashed_printable) (S : Set) :
@@ -197,10 +196,5 @@ module Make_reporting_hashmap (K : Hashed_printable) (S : Set) :
   let length (h, _) = H.length h
   let flag (_, f) = f
   let stats (h, _) = H.stats h
-  let pp fmt (h, _) =
-    fprintf fmt "  [@[%a@]]"
-      (pp_print_list
-         ~pp_sep:(fun fmt () -> fprintf fmt ";@;")
-         (fun fmt (k, h) -> fprintf fmt "@[%a@ ->@ @[%a@]@]" K.pp k S.pp h))
-      (H.fold (fun k h -> List.cons (k, h)) h [])
+  let pp fmt = fst %> fprintf fmt "{%a}" (pp_iter2 ~sep:";@ " ~between:"@ <-@ " H.iter K.pp S.pp)
 end

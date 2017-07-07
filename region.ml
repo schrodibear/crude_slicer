@@ -70,10 +70,10 @@ module Representant = struct
     let pp fmttr =
       let pp fmt = Format.fprintf fmttr fmt in
       function
-      | `Global  -> pp "global"
-      | `Poly s  -> pp "poly(%s)" s
-      | `Local s -> pp "local(%s)" s
-      | `Dummy   -> pp "dummy"
+      | `Global  -> pp "^"
+      | `Poly s  -> pp "'(%s)" s
+      | `Local s -> pp "~(%s)" s
+      | `Dummy   -> pp "?"
   end
 
   type t =
@@ -211,8 +211,7 @@ module Representant = struct
     end;
     mk ~name:("(" ^ r.name ^ ", " ^ name ^ ".void)") ~typ ~kind:r.kind
 
-  let pp fmttr r =
-    Format.fprintf fmttr "{ %s : %a (%a) }" r.name pp_typ r.typ Kind.pp r.kind
+  let pp fmttr r = Format.fprintf fmttr "%a%s" Kind.pp r.kind r.name
 end
 
 module type Representant = sig
@@ -702,14 +701,14 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
           U.of_repr @@
           match typ, f with
           | TPtr (TFun (rt, _ ,_ ,_), _) , _
-            when not (isStructOrUnionType rt)               -> R.poly ("!" ^ v.vname ^ "!") v.vname typ
-          | TPtr (TFun _, _), _                             -> R.local ("!" ^ v.vname ^ "!") v.vname typ
+            when not (isStructOrUnionType rt)               -> R.poly ("!" ^ v.vname) v.vname typ
+          | TPtr (TFun _, _), _                             -> R.local ("!" ^ v.vname) v.vname typ
           | _, Some f
             when v.vformal
               && not (isStructOrUnionType typ || v.vaddrof) -> R.poly f v.vname typ
-          | _, Some f when v.vformal                        -> R.local f v.vname typ
-          | _, _ when v.vglob                               -> R.global v.vname typ
-          | _, Some f                                       -> R.local f v.vname typ
+          | _, Some f when v.vformal                        -> R.local f ("&" ^ v.vname) typ
+          | _, _ when v.vglob                               -> R.global ("&" ^ v.vname) typ
+          | _, Some f                                       -> R.local f ("&" ^ v.vname) typ
           | _                                               -> Console.fatal "Region.of_var: a local or formal \
                                                                               variable should be supplied with \
                                                                               function name: %s"
@@ -1146,7 +1145,9 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       end)
 
   let compute_regions () =
+    Console.debug "Started compute_regions...";
     let sccs = Analyze.condensate () in
+    Console.debug "Proceeding with region analysis...";
     visitFramacFile (new unifier () None :> frama_c_visitor) @@ Ast.get ();
     Fixpoint.visit_until_convergence ~order:`topological (fun () f -> new unifier () @@ Some f) () sccs;
     unify_voids None

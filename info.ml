@@ -76,7 +76,7 @@ end = struct
         (compFullName fi.fcomp) fi.fname pp_typ fi.ftype
 
   include (Fieldinfo : Hashed_ordered with type t := t)
-  let pp fmt fi = fprintf fmt "%s" fi.fname
+  let pp = pp_field
 end
 
 module type Representant = sig
@@ -276,13 +276,13 @@ module Make_writes (M : Memories) : Writes with module Memories = M = struct
   let pp fmttr =
     let pp fmt = fprintf fmttr fmt in
     function
-    | `Global_var v -> pp "%a" Global_var.pp v
+    | `Global_var v -> pp "^%a" Global_var.pp v
     | `Poly_var v   -> pp "'%a" Formal_var.pp v
     | `Local_var v  -> pp "~%a" Local_var.pp v
-    | `Global_mem m -> pp "%a" Global_mem.pp m
+    | `Global_mem m -> pp "^%a" Global_mem.pp m
     | `Poly_mem m   -> pp "'%a" Poly_mem.pp m
     | `Local_mem m  -> pp "~%a" Local_mem.pp m
-    | `Result       -> pp "!R!"
+    | `Result       -> pp "!R"
 end
 
 module type Reads_kind = sig
@@ -505,7 +505,7 @@ module Make_reads (W : Writes) (K : Reads_kind with module W = W) () :
   let is_singleton r = length r = 1
 
   let pp fmt r =
-    fprintf fmt "  @[gv:%a,@ @,pv:%a,@ @,lv:%a,@ @,gm:%a,@ @,pm:%a,@ @,lm:%a@]"
+    fprintf fmt "@[{gv:%a,@ pv:%a,@ lv:%a,@ gm:%a,@ pm:%a,@ lm:%a}@]"
       H_global_var.pp r.global_vars
       H_formal_var.pp r.poly_vars
       H_local_var.pp r.local_vars
@@ -516,9 +516,6 @@ end
 
 module Fundec = struct include Fundec let pp = pretty end
 module Stmt = struct include Stmt let pp = pretty end
-
-module H_fundec = Make_reporting_bithashset (Fundec) ()
-module H_stmt = Make_reporting_bithashset (Stmt) ()
 
 module Requires : sig
   type t
@@ -534,6 +531,9 @@ module Requires : sig
   val has_body : fundec -> t -> bool
   val has_stmt : stmt -> t -> bool
 end = struct
+  module H_fundec = Make_reporting_bithashset (Fundec) ()
+  module H_stmt = Make_reporting_bithashset (Stmt) ()
+
   type t =
     {
       bodies : H_fundec.t;
@@ -663,7 +663,7 @@ end = struct
   let flag e = e.flag
 
   let pp fmt (Some { reads = (module R); assigns = (module A); eff = e } : some) =
-    fprintf fmt "@[w:@;@[%a@];@.track:%a;@.tar:%B;@.deps:@;%a;@.RD:%B@]"
+    fprintf fmt "@[{@[<2>ass:@\n%a;@]@\n@[<2>track:@\n%a;@]@\n@[<2>tar:@\n%B;@]@\n@[<2>deps:@\n%a@]@\n@[<2>RD:%B@]}@]"
       A.pp e.assigns H_void_ptr_var.pp e.tracking e.is_target R.pp e.depends e.result_dep
 end
 
@@ -671,6 +671,22 @@ module Field_key =
   Datatype.Triple_with_collections (Compinfo) (Typ) (Datatype.Integer) (struct let module_name = "field key" end)
 
 module H_field = Field_key.Hashtbl
+module H_fundec = Fundec.Hashtbl
+module H_stmt = Stmt.Hashtbl
+module H_stmt_conds = struct
+  include Stmt.Hashtbl
+
+  let find_or_empty h k = try find_all h k with Not_found -> []
+  module Hide = struct
+    let cache = create 256 (* Work-around the value restriction and avoid re-exporting the cache *)
+    module Show = struct
+      let iter_all f h =
+        clear cache;
+        iter (const' @@ fun k -> memo cache k @@ fun k -> f k @@ find_all h k) h
+    end
+  end
+  include Hide.Show
+end
 
 type offs = [ `Field of fieldinfo | `Container_of_void of typ ] list
 
@@ -678,14 +694,6 @@ module Make (R : Representant) (U : Unifiable with type repr = R.t) () = struct
   module M = Make_memories (R) (U) ()
   module W = Make_writes (M)
   module E = Make_effect (W)
-
-  module H_fundec = Fundec.Hashtbl
-  module H_stmt = Stmt.Hashtbl
-  module H_stmt_conds = struct
-    include Stmt.Hashtbl
-
-    let find_or_empty h k = try find_all h k with Not_found -> []
-  end
 
   type nonrec offs = offs
 

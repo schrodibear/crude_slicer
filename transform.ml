@@ -89,5 +89,7 @@ module Make (Analysis : Analysis) = struct
       | _                                                                             -> DoChildren
   end
 
-  let rewrite () = visitFramacFile (new rewriter) @@ Ast.get ()
+  let rewrite () =
+    Console.debug "Started rewriting AST...";
+    visitFramacFile (new rewriter) @@ Ast.get ()
 end

@@ -53,7 +53,7 @@ module Make (I : Info) = struct
                    v#start;
                    ignore @@ visitFramacFunction (v :> frama_c_visitor) d;
                    v#finish;
-                   Console.debug ~level:3 "Resulting effect is:@.%a@." I.E.pp @@ I.get fi I.flag d))
+                   Console.debug ~level:3 "@[<2>Result is:@\n%a@]" I.E.pp @@ I.get fi I.flag d))
            fi
            scc)
       sccs

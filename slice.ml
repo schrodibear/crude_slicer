@@ -384,7 +384,7 @@ module Make (Analysis : Analysis) = struct
              List.iter (fun e -> add_from_rval e from) es;
              gassign lv from)
           lv
-      let goto s = F.import ~from:(from s) @@ A.find (w_var @@ I.H_stmt.find info.I.goto_vars s) assigns
+      let goto s = F.import ~from:(from s) @@ A.find (w_var @@ H_stmt.find info.I.goto_vars s) assigns
       let assume s e =
         let from = from s in
         add_from_rval e from;
@@ -400,7 +400,7 @@ module Make (Analysis : Analysis) = struct
           F.clear from;
           List.iter
             (fun vi -> F.add_local_var (Local_var.of_varinfo_exn vi) from)
-            (I.H_stmt_conds.find_or_empty info.I.stmt_vars s);
+            (H_stmt_conds.find_or_empty info.I.stmt_vars s);
           Stack.iter (fun from' -> F.import ~from:from' from) under;
           from
       in
@@ -533,7 +533,7 @@ module Make (Analysis : Analysis) = struct
           []
       let alloc ~loc = gassign % deref ~loc
       let stub = may_map gassign ~dft:`Not_yet
-      let goto s = decide @@ [`Local_var (Local_var.of_varinfo_exn @@ I.H_stmt.find info.I.goto_vars s)]
+      let goto s = decide @@ [`Local_var (Local_var.of_varinfo_exn @@ H_stmt.find info.I.goto_vars s)]
       let assume e =
         let r = ref [] in
         visit_rval (fun lv -> may (fun w -> r := w :: !r) @@ w_lval lv) e;
@@ -675,7 +675,7 @@ module Make (Analysis : Analysis) = struct
 
     module Fixpoint = Fixpoint.Make (I)
 
-    module H = I.H_fundec
+    module H = H_fundec
 
     let collectors, markers, initializers, filters = H.create 512, H.create 512, H.create 512, H.create 512
 
@@ -692,7 +692,9 @@ module Make (Analysis : Analysis) = struct
     let collect = Fixpoint.visit_until_convergence ~order:`topological (const @@ H.find collectors) info
     let mark =    Fixpoint.visit_until_convergence ~order:`reversed    (const @@ H.find markers) info
 
-    let init () = Globals.Functions.iter_on_fundecs (fun d -> H.find initializers d ())
+    let init () =
+      Console.debug "Started init (init_deps for every function)...";
+      Globals.Functions.iter_on_fundecs (fun d -> H.find initializers d ())
 
     let collect_labels s =
       let rec loop acc s =
@@ -776,6 +778,9 @@ let slice () =
   let module Slice = Slice.Make (struct let info = info end) in
   Slice.init ();
   let sccs = Analyze.condensate () in
+  Console.debug "Will now collect assigns and deps...";
   Slice.collect sccs;
+  Console.debug "Will now mark...";
   Slice.mark sccs;
+  Console.debug "Will now sweep...";
   Slice.sweep ()
