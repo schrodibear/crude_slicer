@@ -137,7 +137,7 @@ let pp_off fmttr =
 let cache_offsets =
   let conv n =
     let open Integer in
-    let mx = max_unsigned_number @@ theMachine.theMachine.sizeof_ptr lsl 3 in
+    let mx = add (max_unsigned_number @@ theMachine.theMachine.sizeof_ptr lsl 3) one in
     let mxpos = div mx @@ of_int 2 in
     if gt n mxpos then sub n mx else n
   in
@@ -154,10 +154,10 @@ let cache_offsets =
                 | _                    ->                                SkipChildren
       end)
       (Ast.get ());
-    Console.debug ~level:3 "Finished cache_offsets. @[<2>Result is:@\n%a@]"
-      (pp_iter2 ~sep:";@\n" ~between:"@ ->@ " Info.H_field.iter
+    Console.debug ~level:3 "Finished cache_offsets.@\n@[<2>Result is:@\n%a@]"
+      (pp_iter2 ~sep:";@]@\n" ~between:" -> " Info.H_field.iter
          Integer.(fun fmt (ci, ty, off) ->
-           fprintf fmt "@[%s, %a, %s(%LX)@]" (compFullName ci) pp_typ ty (to_string off) (to_int64 @@ conv off))
+           fprintf fmt "@[<2>@[%s, %a, %s (0x%LXh)@]" (compFullName ci) pp_typ ty (to_string off) (to_int64 @@ conv off))
          (pp_list ~sep:"" pp_off))
       offs_of_key
 

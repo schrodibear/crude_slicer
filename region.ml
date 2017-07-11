@@ -71,8 +71,8 @@ module Representant = struct
       let pp fmt = Format.fprintf fmttr fmt in
       function
       | `Global  -> pp "^"
-      | `Poly s  -> pp "'(%s)" s
-      | `Local s -> pp "~(%s)" s
+      | `Poly _  -> pp "'"
+      | `Local _ -> pp "~"
       | `Dummy   -> pp "?"
   end
 
@@ -461,7 +461,7 @@ end = functor () -> struct
       let r1 = U.repr u1 and r2 = U.repr u2 in
       if not (R.equal r1 r2) then
         let t1, t2 = map_pair Ty.normalize (r1.R.typ, r2.R.typ) in
-        if Ty.compatible t1 t2 then
+        if not (Ty.compatible t1 t2) then
           Console.fatal
             "Can't unify regions of different types: %s : %a, %s : %a"
             r1.R.name pp_typ r1.R.typ r2.R.name pp_typ r2.R.typ;
@@ -615,7 +615,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       begin match unrollType pstr, unrollType (typeOf e) with
       | TComp (ci, _, _), (TPtr _ | TArray _ as ty) when ci.cstruct ->
         begin try
-          Some (e, H_field.find I'.offs_of_key (ci, ty, c))
+          Some (e, H_field.find I'.offs_of_key (ci, Ty.deref_once ty, c))
         with
         | Not_found -> None
         end
@@ -704,8 +704,9 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
             when not (isStructOrUnionType rt)               -> R.poly ("!" ^ v.vname) v.vname typ
           | TPtr (TFun _, _), _                             -> R.local ("!" ^ v.vname) v.vname typ
           | _, Some f
-            when v.vformal
-              && not (isStructOrUnionType typ || v.vaddrof) -> R.poly f v.vname typ
+            when v.vformal &&
+                 not (isStructOrUnionType v.vtype
+                      || v.vaddrof)                         -> R.poly f v.vname typ
           | _, Some f when v.vformal                        -> R.local f ("&" ^ v.vname) typ
           | _, _ when v.vglob                               -> R.global ("&" ^ v.vname) typ
           | _, Some f                                       -> R.local f ("&" ^ v.vname) typ
@@ -855,7 +856,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
           | Const (CWStr ws)                -> `Value (value (typeOf e) @@ of_string @@ `WS ws)
           | Const (CInt64 _ | CEnum _
                   | CChr _ | CReal _ )      -> assert false
-          | Lval lv                         -> `Value (location @@ of_lval lv)
+          | Lval lv                         -> `Value (value (typeOfLval lv) @@ of_lval lv)
           | SizeOf _
           | SizeOfE _
           | SizeOfStr _
