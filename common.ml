@@ -147,23 +147,24 @@ module Ty = struct
     match typeDeepDropAllAttributes @@ unrollTypeDeep ty with
     | TVoid []
     | TInt (_, [])
-    | TFloat (_, []) as ty                 -> ty
-    | TPtr (TArray _ as ty, [])            -> TPtr (normalize @@ element_type ty, [])
-    | TPtr (ty, [])                        -> TPtr (normalize ty, [])
-    | TComp ({ cstruct = false; _ }, _, _) -> TVoid []
-    | TArray (_, _, _, []) as ty           -> TPtr (normalize @@ element_type ty, [])
-    | TFun (ty, argso, vararg, [])         -> TPtr (TFun (normalize ty,
-                                                          opt_map
-                                                            (List.map
-                                                               (fun (n, ty, _) -> n, normalize ty, []))
-                                                            argso,
-                                                          vararg,
-                                                          []),
-                                                    [])
+    | TFloat (_, []) as ty                    -> ty
+    | TPtr (TFun (ty, argso, vararg, []), [])
+    | TFun (ty, argso, vararg, [])            -> TPtr (TFun (normalize ty,
+                                                             opt_map
+                                                               (List.map
+                                                                  (fun (n, ty, _) -> n, normalize ty, []))
+                                                               argso,
+                                                             vararg,
+                                                             []),
+                                                       [])
+    | TPtr (TArray _ as ty, [])               -> TPtr (normalize @@ element_type ty, [])
+    | TPtr (ty, [])                           -> TPtr (normalize ty, [])
+    | TComp ({ cstruct = false; _ }, _, _)    -> TVoid []
+    | TArray (_, _, _, []) as ty              -> TPtr (normalize @@ element_type ty, [])
     | TComp ({ cstruct = true; _ } as ci,
-             cache, [])                    -> TComp (ci, cache, [])
-    | TEnum (ei, [])                       -> TInt (ei.ekind, [])
-    | TBuiltin_va_list []                  -> TPtr (TVoid [], [])
+             cache, [])                       -> TComp (ci, cache, [])
+    | TEnum (ei, [])                          -> TInt (ei.ekind, [])
+    | TBuiltin_va_list []                     -> TPtr (TVoid [], [])
     | TVoid            (_ :: _)
     | TInt (_,          _ :: _)
     | TFloat (_,        _ :: _)
@@ -173,7 +174,7 @@ module Ty = struct
     | TComp (_, _,      _ :: _)
     | TEnum (_,         _ :: _)
     | TBuiltin_va_list (_ :: _)
-    | TNamed _                             -> assert false
+    | TNamed _                                -> assert false
 
   let deref_once ty =
     let open Ast_info in
@@ -202,6 +203,7 @@ module Ty = struct
       | TEnum _
       | TBuiltin_va_list _ as ty  -> normalize ty, n
       | TNamed _                  -> assert false
+      | TPtr (TFun _ as ty, _)    -> normalize ty, n + 1
       | TPtr _ as ty              -> aux (n + 1) (normalize @@ pointed_type ty)
       | TArray _ as ty when n = 0 -> aux 1 (normalize @@ element_type ty)
       | TArray _ as ty            -> aux n (normalize @@ element_type ty)
@@ -213,6 +215,11 @@ module Ty = struct
   let rec ref ty n =
     if n <= 0 then ty
     else           ref (TPtr (ty, [])) (n - 1)
+
+  let rtyp_if_fun ty =
+    match[@warning "-4"] unrollType ty with
+    | TFun (rt, _, _, _) -> rt
+    | _                  -> ty
 end
 
 module Ci = struct
@@ -236,7 +243,7 @@ module Ci = struct
               (function `Field _ :: _ as l -> l | `Container_of_void _ as e :: _ -> [e] | [] -> assert false) %>
             rev)
 
-  let all_offsets ci =
+  let offsets ci =
     let open List in
     let rec do_struct path ci =
       concat_map
@@ -257,10 +264,10 @@ module Ci = struct
     and do_ci path = (if ci.cstruct then do_struct else do_union) path in
     map (map_fst rev) @@ do_ci [] ci
 
-  let all_regions ci =
+  let dots ci =
     let open Cil_datatype in
     let open List in
-    all_offsets ci |>
+    offsets ci |>
     group_by
       (fun (path1, _) (path2, _) ->
          for_all2
@@ -271,6 +278,18 @@ module Ci = struct
             | _                                              -> false)
            path1 path2) |>
     map (fst % hd)
+
+  let arrows ci =
+    let open List in
+    offsets ci |>
+    concat_map
+      (fun (path, fio) ->
+         let is_pointer_type = isPointerType % Ty.normalize in
+         match rev path, fio with
+         | path,                       Some fi when is_pointer_type fi.ftype -> [rev @@ `Arrow fi :: path]
+         | `Field fi :: _,             None    when is_pointer_type fi.ftype -> [path]
+         | `Container_of_void ty :: _, None    when is_pointer_type ty       -> [path]
+         | _                                                                 -> [])
 end
 
 module Kf = struct

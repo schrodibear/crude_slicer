@@ -409,12 +409,12 @@ end = functor () -> struct
   let dot_void =
     H'.find_or_call
       ~create:R.dot_void
-      ~call:(fun u u' -> H_t.add u (U.repr u).R.typ u' h_container_of_void)
+      ~call:(fun u' u -> H_t.add u' (U.repr u).R.typ u h_container_of_void)
       h_dot_void
   let container = H_f.find_or_call ~create:R.container ~call:(H_f.add' h_dot) h_container
   let container_of_void u ty =
     let ty = Ty.normalize ty in
-    H_t.find_or_call ~create:R.container_of_void ~call:(fun u _ u' -> H'.add u u' h_dot_void) h_container_of_void u ty
+    H_t.find_or_call ~create:R.container_of_void ~call:(fun u' _ u -> H'.add u' u h_dot_void) h_container_of_void u ty
 
   let arrows f u = H_f.iter f u h_arrow
   let derefs f u = H'.iter f u h_deref
@@ -448,14 +448,6 @@ end = functor () -> struct
             997 * R.hash r1 + R.hash r2
         end)
     in
-    let h = H.create 256 in
-    let handle1, handle2 =
-      let add h u u' = if not (H.mem h (u, u') || H.mem h (u', u)) then H.replace h (u, u') () in
-      (fun f u u' -> add h (f u) u'),
-      object
-        method f : 'k. 'k handler2 = fun f u k u' -> add h (f u k) u'
-      end
-    in
     let cache = Typ.Hashtbl.create 128 in
     let rec unify ?(max_count=3) ?(retain_cache=Typ.Hashtbl.clear cache) u1 u2 =
       let r1 = U.repr u1 and r2 = U.repr u2 in
@@ -465,7 +457,14 @@ end = functor () -> struct
           Console.fatal
             "Can't unify regions of different types: %s : %a, %s : %a"
             r1.R.name pp_typ r1.R.typ r2.R.name pp_typ r2.R.typ;
-        H.clear h;
+        let h = H.create 16 in
+        let handle1, handle2 =
+          let add h u u' = if not (H.mem h (u, u') || H.mem h (u', u)) then H.replace h (u, u') () in
+          (fun f u u' -> add h (f u) u'),
+          object
+            method f : 'k. 'k handler2 = fun f u k u' -> add h (f u k) u'
+          end
+        in
         handle_all handle1 handle2 u1 u2;
         handle_all handle1 handle2 u2 u1;
         U.unify u1 u2;
@@ -491,10 +490,12 @@ end = functor () -> struct
     then u
     else
       try
-        H'.find u map
+        let u' = H'.find u map in
+        may (unify u') clone;
+        u'
       with
       | Not_found ->
-        let u' = may_map id ~dft:(U.of_repr @@ R.template (U.repr u)) clone in
+        let u' = match clone with Some c -> c | None -> U.of_repr @@ R.template (U.repr u) in
         H'.add u u' map;
         handle_all ~handle1 ~handle2 u u';
         u'
@@ -503,9 +504,7 @@ end = functor () -> struct
 
   let duplicate ~map u = duplicate ~map u
 
-  let replay ~map regs ~on =
-    H'.clear map;
-    List.iter2 unify on (List.map (duplicate ~map) regs)
+  let replay ~map regs ~on = List.iter2 unify on (List.map (duplicate ~map) regs)
 end
 
 module type Analysis = sig
@@ -523,7 +522,7 @@ module type Analysis = sig
     |  `Value of U.t
     |  `None ] as 'a
 
-  val take : [< (fieldinfo, typ) offs | `Container of fieldinfo | `Dot_void ] list -> U.t -> U.t
+  val take : [< (fieldinfo, typ) offs | `Container of fieldinfo | `Dot_void | `Arrow of fieldinfo ] list -> U.t -> U.t
   val inv : [< ('a, 'b) offs ] list -> [> `Container of 'a | `Dot_void ] list
   val of_var : ?f:string -> varinfo -> [ `Location of _ | `Value of _  | `None ] maybe_region
   val of_string : [ `S of string | `WS of int64 list ] -> [ `Location of _ ] maybe_region
@@ -600,7 +599,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
         not (need_cast theMachine.typeOfSizeOf size_t) && isZero zero &&
         let str = Ast_info.pointed_type pstr and str' = Ast_info.pointed_type pstr' in
         match unrollType str, unrollType str' with
-        | TComp (ci, _ ,_), TComp (ci', _, _)
+        | TComp (ci, _, _), TComp (ci', _, _)
           when ci.cstruct && ci'.cstruct && Compinfo.equal ci ci' -> true
         | _ -> false
       ->
@@ -631,7 +630,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       when isCharPtrType chrptr && isPointerType (typeOf e) ->
       let ty = Ast_info.pointed_type (typeOf e) in
       begin match unrollType ty with
-      | TComp (ci, _ ,_) ->
+      | TComp (ci, _, _) ->
         begin try
           Some (e, H_field.find I'.offs_of_key (ci, uintType, c))
         with
@@ -660,6 +659,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     | `Container fi ::         offs -> take offs @@ container u fi
     | `Container_of_void ty :: offs -> take offs @@ container_of_void u ty
     | `Dot_void ::             offs -> take offs @@ dot_void u
+    | `Arrow fi ::             offs -> take offs @@ arrow u fi
 
   let inv offs =
     let rec loop acc =
@@ -689,7 +689,8 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       let open! H_v in
       memoize ~find ~replace h_var @@
       fun ?f v ->
-      if not (isStructOrUnionType v.vtype || isArrayType v.vtype || v.vaddrof || isPointerType v.vtype)
+      let typ = Ty.rtyp_if_fun v.vtype in
+      if not (isStructOrUnionType typ || isArrayType typ || v.vaddrof || isPointerType typ)
       then `None
       else
         let u =
@@ -700,9 +701,9 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
           in
           U.of_repr @@
           match typ, f with
-          | TPtr (TFun (rt, _ ,_ ,_), _) , _
-            when not (isStructOrUnionType rt)               -> R.poly ("!" ^ v.vname) v.vname typ
-          | TPtr (TFun _, _), _                             -> R.local ("!" ^ v.vname) v.vname typ
+          | TPtr (TFun (rt, _, _, _), _), _
+            when not (isStructOrUnionType rt)               -> R.poly v.vname ("!" ^ v.vname) (Ty.deref_once rt)
+          | TPtr (TFun (rt, _, _, _), _), _                 -> R.local v.vname ("!" ^ v.vname) (Ty.normalize rt)
           | _, Some f
             when v.vformal &&
                  not (isStructOrUnionType v.vtype
@@ -715,8 +716,8 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
                                                                               function name: %s"
                                                                  v.vname
         in
-        if isStructOrUnionType v.vtype || isArrayType v.vtype || v.vaddrof
-        then `Location (u, resolve_addressible v.vaddrof v.vtype u)
+        if isStructOrUnionType typ || isArrayType typ || v.vaddrof
+        then `Location (u, resolve_addressible v.vaddrof typ u)
         else `Value u
     in
     of_var ?f x
@@ -829,14 +830,14 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       then `None
       else
         let cast ty e =
-          let ty' = typeOf e in
+          let ty, ty' = map_pair Ty.deref_once (ty, typeOf e) in
           let r = of_expr e in
           if Ty.compatible ty ty' then r
           else (* Both can't be void */union since they are compatible! *)
             let r = value ty' r in
             match unrollType ty, unrollType ty' with
             | (TVoid _ | TComp ({ cstruct = false; _ }, _, _)), _  -> `Value (dot_void r)
-            | ty, (TVoid _ | TComp ({ cstruct = false; _ }, _, _)) -> `Value (container_of_void r @@ Ty.deref_once ty)
+            | ty, (TVoid _ | TComp ({ cstruct = false; _ }, _, _)) -> `Value (container_of_void r ty)
             | ty, ty' ->
               match Ci.(match_deep_first_subfield_of ty ty', match_deep_first_subfield_of ty' ty) with
               | Some offs, _                                       -> `Value (take offs r)
@@ -893,24 +894,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     let module Kf = Kernel_function in
     let h_var = H_v.create 512 in
     let maps = H_k.create 512 in
-    let unify_pointed u' u =
-      let h = H'.create () in
-      let rec unify_pointed ?(_retain_h=H'.clear h) u' u =
-        try
-          ignore @@ H'.find u' h
-        with
-        | Not_found ->
-          let open! Separation in
-          arrows (fun fi u' -> unify (arrow u fi) u') u';
-          derefs (fun u' -> unify (deref u) u') u';
-          H'.add u u h;
-          dots (fun fi u' -> unify_pointed u' @@ dot u fi) u';
-          dot_voids (fun u' -> unify_pointed u' @@ dot_void u) u';
-          containers (fun fi u' -> unify_pointed u' @@ container u fi) u';
-          containers_of_void (fun ty u' -> unify_pointed u' @@ container_of_void u ty) u'
-      in
-      unify_pointed u' u
-    in
+    let take_arrows ci = let arrows = Ci.arrows ci in fun u -> List.map (swap take @@ u) arrows in
     fun kf ->
       let params = Kf.get_formals kf in
       let retval =
@@ -918,33 +902,38 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
         then []
         else [Kf.get_vi kf]
       in
+      let f = Kf.get_name kf in
       let comp_regions vi =
-        let u', u =
+        let ty = Ty.rtyp_if_fun vi.vtype in
+        let u, u' =
           let open H_v in
-          let f = Kf.get_name kf in
           location @@ of_var ~f vi,
-          memo h_var vi (fun vi -> U.of_repr @@ R.poly f (vi.vname ^ "'") @@ Ty.normalize vi.vtype)
+          memo h_var vi (fun vi -> U.of_repr @@ R.poly f vi.vname @@ Ty.normalize ty)
         in
         let map = H_k.memo maps kf (fun _ -> H'.create ()) in
-        accomodate ~map [u'] ~on:[u];
-        unify_pointed u' u;
-        match unrollType vi.vtype with
-        | TComp (ci, _, _) -> List.map (swap take @@ u) (Ci.all_regions ci)
-        | ty -> Console.fatal "Region.Analysis.comp_regions: not a composite param, but %a" pp_typ ty
+        accomodate ~map [u] ~on:[u'];
+        match unrollType ty with
+        | TComp (ci, _, _) -> (let take_arrows = take_arrows ci in
+                               let rs = take_arrows u' in
+                               List.iter2 unify (take_arrows u) rs;
+                               rs)
+        | ty               -> Console.fatal "Region.Analysis.comp_regions: not a composite param, but %a" pp_typ ty
       in
       map_pair
         (List.concat_map
            (fun vi ->
-              match of_var vi with
-              | `Location (_, get)                ->
+              match of_var ~f vi with
+              | `Location _
+                when
+                  isStructOrUnionType @@
+                  Ty.rtyp_if_fun vi.vtype -> comp_regions vi
+              | `Location (_, get)        ->
                 begin match get () with
-                | `Value u                        -> [u]
-                | `None                           -> []
+                | `Value u                -> [u]
+                | `None                   -> []
                 end
-              | `Value u                          -> [u]
-              | `None
-                when isStructOrUnionType vi.vtype -> comp_regions vi
-              | `None                             -> []))
+              | `Value u                  -> [u]
+              | `None                     -> []))
         (retval, params)
 
   let arg_regions ?f kf lvo exprs =
@@ -955,10 +944,10 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       else
         match lvo, rtyp with
         | None,    TPtr _              -> [value ?f rtyp `None]
-        | None,    TComp (ci, _, _)    -> List.map (swap take @@ value ?f rtyp `None) (Ci.all_regions ci)
+        | None,    TComp (ci, _, _)    -> List.map (swap take @@ value ?f rtyp `None) (Ci.arrows ci)
         | None,    _                   -> []
         | Some lv, TPtr _              -> [value ?f rtyp @@ of_lval ?f lv]
-        | Some lv, TComp (ci, _, _)    -> List.map (swap take @@ location @@ of_lval ?f lv) (Ci.all_regions ci)
+        | Some lv, TComp (ci, _, _)    -> List.map (swap take @@ location @@ of_lval ?f lv) (Ci.arrows ci)
         | Some _,  _                   -> []
     in
     retr,
@@ -968,7 +957,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
          | `Value u                    -> [u]
          | `None                       ->
            match unrollType (typeOf e), e.enode with
-           | TComp (ci, _, _), Lval lv -> List.map (swap take @@ location @@ of_lval ?f lv) (Ci.all_regions ci)
+           | TComp (ci, _, _), Lval lv -> List.map (swap take @@ location @@ of_lval ?f lv) (Ci.arrows ci)
            | TComp _,          _       -> Console.fatal "Unexpected non-lvalue struct expression `%a'"
                                             pp_exp e
            | _                         -> [])
@@ -977,9 +966,9 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
   let unify_exprs ?f e1 e2 =
     let unify_comps ci lv1 lv2 =
       let u1, u2 = map_pair (location % of_lval ?f) (lv1, lv2) in
-      List.iter (fun offs -> uncurry unify @@ map_pair (take offs) (u1, u2)) (Ci.all_regions ci)
+      List.iter (fun offs -> uncurry unify @@ map_pair (take offs) (u1, u2)) (Ci.arrows ci)
     in
-    match e1.enode, e2.enode, unrollType (typeOf e1) with
+    match e1.enode, e2.enode, unrollType (Ty.rtyp_if_fun @@ typeOf e1) with
     | Lval lv1, Lval lv2, TComp (ci, _, _)    -> unify_comps ci lv1 lv2
     | _                                       ->
       match of_expr ?f e1, of_expr ?f e2 with
@@ -1017,8 +1006,8 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
              if n = 0 then
                containers_of_void u >>= fun u' ->
                begin match unrollType (U.repr u').R.typ with
-               | TComp ({ cfields = fi :: _; cstruct = true; _ }, _ ,_)  -> first_substruct fi u'
-               | TComp ({ cstruct = false; _ }, _ ,_)                    -> assert false
+               | TComp ({ cfields = fi :: _; cstruct = true; _ }, _, _)  -> first_substruct fi u'
+               | TComp ({ cstruct = false; _ }, _, _)                    -> assert false
                | _                                                       -> []
                end >>= fun u' ->
                dot_voids u' >>= fun u' ->
@@ -1085,7 +1074,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
              | Instr
                  (Call
                     (lvo,
-                     { enode = Lval (Var vi, NoOffset); _  },
+                     { enode = Lval (Var vi, NoOffset); _ },
                      args, _))
                when Kf.mem vi                                 -> replay_on_call ~stmt ?f (Globals.Functions.get vi)
                                                                    lvo args

@@ -8,7 +8,13 @@
 
 module Console = Options
 
-let () = if Options.Analysis.get () then Kernel.Constfold.off ()
+let () =
+  Cmdline.run_after_configuring_stage
+    (fun () ->
+       if Options.Analysis.get () then begin
+         Kernel.Constfold.off ();
+         Kernel.DoCollapseCallCast.off ()
+       end)
 
 let run () =
   Cil_printer.state.Printer_api.line_directive_style <- Some Printer_api.Line_preprocessor_output;

@@ -323,7 +323,7 @@ module Make (Analysis : Analysis) = struct
              let w = w_mem ?fi @@ R.take path r_lv in
              A.add_some w (r_mem ?fi @@ R.take path r_e) assigns;
              A.import_values w from assigns)
-          (Ci.all_offsets ci)
+          (Ci.offsets ci)
 
       let gassign lv ?e from =
         add_from_lval lv from;
@@ -492,7 +492,7 @@ module Make (Analysis : Analysis) = struct
           | ty                -> Console.fatal "Slicing.comp_assign: LHS is not a composite: %a : %a"
                                    pp_lval lv pp_typ ty
         in
-        List.map (fun (path, fi) -> w_mem ?fi @@ R.take path r_lv) (Ci.all_offsets ci)
+        List.map (fun (path, fi) -> w_mem ?fi @@ R.take path r_lv) (Ci.offsets ci)
 
       let gassign lv = decide @@ match w_lval lv with Some w -> [w] | None -> comp_assign lv
       let assign = gassign

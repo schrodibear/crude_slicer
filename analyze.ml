@@ -110,7 +110,7 @@ let cache_offsets =
   in
   fun ~offs_of_key ci ->
     Console.debug ~level:2 "Collecting offsets from compinfo %s..." (compFullName ci);
-    Ci.all_offsets ci |>
+    Ci.offsets ci |>
     map (fun (path, fo) -> path @ may_map (fun fi -> [`Field fi]) ~dft:[] fo) |>
     iter
       (iter_rev_prefixes @@
