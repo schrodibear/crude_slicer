@@ -44,9 +44,6 @@ module Representant = struct
                                            "Representant.Kind.choose: broken invariant: \
                                             should not try unifying regions from diff. functions: %s and %s"
                                            f1 f2
-      | `Dummy, `Dummy                ->  Console.fatal
-                                            "Representant.Kind.choose: broken invariant: \
-                                             dummy regions should be immediately unified with non-dummy ones"
       | (`Global
         | `Poly _
         | `Local _
@@ -108,10 +105,8 @@ module Representant = struct
     end;
     r
 
-  let report r1 ~is_repr_of:r2 =
+  let report _r1 ~is_repr_of:r2 =
     if isVoidType @@ fst @@ Ty.deref r2.typ then H.remove h_void_xs r2;
-    if r1.kind = `Dummy then
-      Console.fatal "Representant.report: trying to set dummy region as representant: %s of %s" r1.name r2.name;
     if r2.kind <> `Dummy then Flag.report flag
 
   let all_void_xs () =
@@ -176,7 +171,7 @@ module Representant = struct
 
   let container r fi =
     check_detached "Representant.container" fi;
-    if Ty.compatible fi.ftype r.typ then
+    if not (Ty.compatible fi.ftype r.typ) then
       Console.fatal
         "Representant.container: illegal use of `container_of': %s.%s : %a vs. %s : %a"
         fi.fname fi.fcomp.cname pp_typ fi.ftype r.name pp_typ r.typ;
@@ -538,8 +533,8 @@ module type Analysis = sig
     val iter : (U.t -> unit) -> U.t -> t -> unit
   end
   val map : stmt -> H_call.t
-  val arg_regions : ?f:string -> kernel_function -> lval option -> exp list -> U.t list * U.t list
-  val param_regions : kernel_function -> U.t list * U.t list
+  val arg_regions : ?f:string -> kernel_function -> lval option -> exp list -> U.t list
+  val param_regions : kernel_function -> U.t list
   val relevant_region : ?f:string -> U.t -> bool
 end
 
@@ -903,7 +898,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
         else [Kf.get_vi kf]
       in
       let f = Kf.get_name kf in
-      let comp_regions vi =
+      let comp_region vi =
         let ty = Ty.rtyp_if_fun vi.vtype in
         let u, u' =
           let open H_v in
@@ -916,25 +911,24 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
         | TComp (ci, _, _) -> (let take_arrows = take_arrows ci in
                                let rs = take_arrows u' in
                                List.iter2 unify (take_arrows u) rs;
-                               rs)
+                               u')
         | ty               -> Console.fatal "Region.Analysis.comp_regions: not a composite param, but %a" pp_typ ty
       in
-      map_pair
-        (List.concat_map
-           (fun vi ->
-              match of_var ~f vi with
-              | `Location _
-                when
-                  isStructOrUnionType @@
-                  Ty.rtyp_if_fun vi.vtype -> comp_regions vi
-              | `Location (_, get)        ->
-                begin match get () with
-                | `Value u                -> [u]
-                | `None                   -> []
-                end
-              | `Value u                  -> [u]
-              | `None                     -> []))
-        (retval, params)
+      List.concat_map
+        (fun vi ->
+           match of_var ~f vi with
+           | `Location _
+             when
+               isStructOrUnionType @@
+               Ty.rtyp_if_fun vi.vtype -> [comp_region vi]
+           | `Location (_, get)        ->
+             begin match get () with
+             | `Value u                -> [u]
+             | `None                   -> []
+             end
+           | `Value u                  -> [u]
+           | `None                     -> [])
+        (retval @ params)
 
   let arg_regions ?f kf lvo exprs =
     let retr =
@@ -943,24 +937,23 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       then []
       else
         match lvo, rtyp with
-        | None,    TPtr _              -> [value ?f rtyp `None]
-        | None,    TComp (ci, _, _)    -> List.map (swap take @@ value ?f rtyp `None) (Ci.arrows ci)
-        | None,    _                   -> []
-        | Some lv, TPtr _              -> [value ?f rtyp @@ of_lval ?f lv]
-        | Some lv, TComp (ci, _, _)    -> List.map (swap take @@ location @@ of_lval ?f lv) (Ci.arrows ci)
-        | Some _,  _                   -> []
+        | None,    TPtr _
+        | None,    TComp _ -> [value ?f rtyp `None]
+        | None,    _       -> []
+        | Some lv, TPtr _  -> [value ?f rtyp @@ of_lval ?f lv]
+        | Some lv, TComp _ -> [location @@ of_lval ?f lv]
+        | Some _,  _       -> []
     in
-    retr,
+    retr @
     List.concat_map
       (fun e ->
          match of_expr ?f e with
          | `Value u                    -> [u]
          | `None                       ->
            match unrollType (typeOf e), e.enode with
-           | TComp (ci, _, _), Lval lv -> List.map (swap take @@ location @@ of_lval ?f lv) (Ci.arrows ci)
-           | TComp _,          _       -> Console.fatal "Unexpected non-lvalue struct expression `%a'"
-                                            pp_exp e
-           | _                         -> [])
+           | TComp _, Lval lv -> [location @@ of_lval ?f lv]
+           | TComp _, _       -> Console.fatal "Unexpected non-lvalue struct expression `%a'" pp_exp e
+           | _                -> [])
       exprs
 
   let unify_exprs ?f e1 e2 =
@@ -1026,7 +1019,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
         (R.all_void_xs ())
 
   let replay_on_call ~stmt ?f kf lvo args =
-    let (ret_ext_regions, param_regions), (ret_int_regions, arg_regions) =
+    let param_regions, arg_regions =
       H_k.memo h_params kf param_regions, arg_regions ?f kf lvo args
     in
     let param_regions, arg_regions =
@@ -1035,7 +1028,6 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       map_pair (take @@ uncurry min @@ map_pair length pair) pair
     in
     let map = H_stmt.memo h_maps stmt (fun _ -> H'.create ()) in
-    replay ~map ret_ext_regions ~on:ret_int_regions;
     replay ~map param_regions ~on:arg_regions
 
   let expr_of_lval =

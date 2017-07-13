@@ -294,8 +294,16 @@ end
 
 module Kf = struct
   include Cil_datatype.Kf
+
   let mem vi =
     try
       ignore @@ Globals.Functions.get vi; true
     with Not_found ->                     false
+
+  let mem_definition vi =
+    try
+      Kernel_function.is_definition @@ Globals.Functions.get vi
+    with
+    | Not_found ->
+      false
 end

@@ -127,7 +127,7 @@ module Make_memory (R : Representant) (U : Unifiable with type repr = R.t) (C : 
 
   let mk ?fi u =
     let r = U.repr u in
-    if C.is_ok r then
+    if not (C.is_ok r) then
       Console.fatal "Memory.mk: wrong region (not OK): %s : %a vs. %a" (R.name r) pp_typ (R.typ r) R.Kind.pp (R.kind r);
     if isArithmeticOrPointerType (R.typ r) then
       match fi with

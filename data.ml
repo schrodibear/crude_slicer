@@ -196,5 +196,6 @@ module Make_reporting_hashmap (K : Hashed_printable) (S : Set) :
   let length (h, _) = H.length h
   let flag (_, f) = f
   let stats (h, _) = H.stats h
-  let pp fmt = fst %> fprintf fmt "{%a}" (pp_iter2 ~sep:";@ " ~between:"@ <-@ " H.iter K.pp S.pp)
+  let pp fmt =
+    fst %> fprintf fmt "{%a}" (pp_iter2 ~pre:"@[<2>" ~sep:";@]@\n@[<2>" ~suf:"@]" ~between:" <-@\n" H.iter K.pp S.pp)
 end

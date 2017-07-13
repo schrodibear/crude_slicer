@@ -32,6 +32,7 @@ int main()
   *(r.pi) = 4;
   globouter.inner.pi = 0;
   if (r.d == 2) goto out;
+  i = 0;
   __VERIFIER_error();
  out:
   free(globouter.pinner);

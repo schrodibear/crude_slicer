@@ -265,7 +265,7 @@ module Goto_handling = struct
                 ~insert:false
                 ~name:("goto_at_L" ^ string_of_int (fst @@ Stmt.loc s).Lexing.pos_lnum)
                 (Kernel_function.get_definition kf)
-                (TVoid [])
+                (TInt (IInt, []))
             in
             H.replace goto_vars s vi;
             List.iter (fun s -> H.add stmt_vars s vi) deps;
