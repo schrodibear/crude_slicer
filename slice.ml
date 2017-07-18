@@ -26,9 +26,9 @@ module Make (Analysis : Analysis) = struct
 
   let w_var vi =
     match isArithmeticOrPointerType vi.vtype, vi.vglob, vi.vformal with
-    | true, true,  false -> `Global_var (Global_var.of_varinfo_exn vi)
-    | true, false, true  -> `Poly_var   (Formal_var.of_varinfo_exn vi)
-    | true, false, false -> `Local_var  (Local_var.of_varinfo_exn vi)
+    | true, true,  false -> `Global_var (Global_var.of_varinfo vi)
+    | true, false, true  -> `Poly_var   (Formal_var.of_varinfo vi)
+    | true, false, false -> `Local_var  (Local_var.of_varinfo vi)
     | false, _,    _     -> Console.fatal
                               "Slice.w_var: broken invariant: trying to write to composite variable without region: %a"
                               pp_varinfo vi
@@ -57,7 +57,7 @@ module Make (Analysis : Analysis) = struct
     module R = struct
       include Representant
       include Analysis
-      let poly,         local,         of_var,    of_lval,    of_expr,    relevant_region,    arg_regions =
+      let poly,   local,   of_var,    of_lval,    of_expr,    relevant_region,    arg_regions =
           poly f, local f, of_var ~f, of_lval ~f, of_expr ~f, relevant_region ~f, arg_regions ~f
     end
     module U = R.U
@@ -134,7 +134,7 @@ module Make (Analysis : Analysis) = struct
            | `Location (u, _)
              when not (isStructOrUnionType vi.vtype)
                && vi.vaddrof                         -> A.add
-                                                          (w_mem u) F.K.Poly_var (Formal_var.of_varinfo_exn vi)
+                                                          (w_mem u) F.K.Poly_var (Formal_var.of_varinfo vi)
                                                           assigns
            | `Location _ | `Value _ | `None          -> ())
         args;
@@ -172,22 +172,26 @@ module Make (Analysis : Analysis) = struct
         let do_expr = ignore % visitFramacExpr (self :> frama_c_visitor) in
         let do_off = ignore % visitFramacOffset (self :> frama_c_visitor) in
         fun e ->
-          match e.enode with
-          | AddrOf  (Mem e, off)
-          | StartOf (Mem e, off) -> do_expr e; do_off off; SkipChildren
-          | Const _
-          | SizeOf _
-          | SizeOfStr _
-          | SizeOfE _
-          | AlignOf _
-          | AlignOfE _
-          | AddrOf _
-          | StartOf _            -> SkipChildren
-          | Lval _
-          | UnOp _
-          | BinOp _
-          | CastE  _
-          | Info _               -> DoChildren
+          match R.match_container_of1 e.enode, R.match_container_of2 e.enode with
+          | Some (e, _), _
+          | _,           Some (e, _) -> do_expr e;             SkipChildren
+          | None,        None        ->
+              match e.enode with
+              | AddrOf  (Mem e, off)
+              | StartOf (Mem e, off) -> do_expr e; do_off off; SkipChildren
+              | Const _
+              | SizeOf _
+              | SizeOfStr _
+              | SizeOfE _
+              | AlignOf _
+              | AlignOfE _
+              | AddrOf _
+              | StartOf _            ->                        SkipChildren
+              | Lval _
+              | UnOp _
+              | BinOp _
+              | CastE  _
+              | Info _               ->                        DoChildren
 
       method! vlval lv =
         f lv;
@@ -298,7 +302,7 @@ module Make (Analysis : Analysis) = struct
         F.iter_poly_vars   (fun v -> import_reads @@ `Poly_var v)   reads;
         F.iter_local_vars  (fun v -> import_reads @@ `Local_var v)  reads
 
-    let is_tracking_var eff v = isVoidPtrType v.vtype && I.E.is_tracking_var (Void_ptr_var.of_varinfo_exn v) eff
+    let is_tracking_var eff v = isVoidPtrType v.vtype && I.E.is_tracking_var (Void_ptr_var.of_varinfo v) eff
 
     module Collect (M : sig val from : stmt -> F.t val info : I.t val eff : (A.t, F.t) I.E.t end) = struct
       open M
@@ -405,8 +409,8 @@ module Make (Analysis : Analysis) = struct
         fun s ->
           F.clear from;
           List.iter
-            (fun vi -> F.add_local_var (Local_var.of_varinfo_exn vi) from)
-            (H_stmt_conds.find_or_empty info.I.stmt_vars s);
+            (fun vi -> F.add_local_var (Local_var.of_varinfo vi) from)
+            (H_stmt_conds.find_all info.I.stmt_vars s);
           Stack.iter (fun from' -> F.import ~from:from' from) under;
           from
       in
@@ -423,7 +427,7 @@ module Make (Analysis : Analysis) = struct
         method! vstmt =
           let start_tracking s lv v arg =
             assign s lv arg;
-            I.E.add_tracking_var (Void_ptr_var.of_varinfo_exn v) eff
+            I.E.add_tracking_var (Void_ptr_var.of_varinfo v) eff
           in
           let do_children_under e =
             let r = F.create dummy_flag in
@@ -541,9 +545,12 @@ module Make (Analysis : Analysis) = struct
                                                     (prj_write w'))
             (I.E.assigns eff')
             []
+        in
+        if I.E.is_target eff' then `Needed else decide writes
+
       let alloc ~loc = gassign % deref ~loc
       let stub = may_map gassign ~dft:`Not_yet
-      let goto s = decide @@ [`Local_var (Local_var.of_varinfo_exn @@ H_stmt.find info.I.goto_vars s)]
+      let goto s = decide @@ [`Local_var (Local_var.of_varinfo @@ H_stmt.find info.I.goto_vars s)]
       let assume e =
         let r = ref [] in
         visit_rval (fun lv -> may (fun w -> r := w :: !r) @@ w_lval lv) e;

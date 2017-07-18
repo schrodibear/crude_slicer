@@ -1055,55 +1055,62 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
 
   open Visitor
 
-  class one_function_visitor fundec = object
+  class virtual skipping_visitor = object(self)
     inherit frama_c_inplace
-    method! vfunc fd =
-      if may_map (fun fd' -> Fundec.equal fd fd') ~dft:false fundec
-      then DoChildren
-      else SkipChildren
+    method private virtual vexpr_pre : exp -> unit
+    method private virtual vexpr_post : exp -> unit
+    method! vexpr e =
+      self#vexpr_pre e;
+      match match_container_of1 e.enode, match_container_of2 e.enode with
+      | Some (e', _), _
+      | _,           Some (e', _) -> (ignore @@ visitFramacExpr (self :> frama_c_visitor) e';
+                                      self#vexpr_post e;                                      SkipChildren)
+      | None,        None         ->                                                          DoChildrenPost
+                                                                                                (tap self#vexpr_post)
+    method private virtual vstmt_post : stmt -> unit
+    method! vstmt s =
+      match s.skind with
+      | Instr (Call (lv, { enode = Lval (Var vi, NoOffset); _ }, args, _)) when Kf.mem vi ->
+        may (ignore % visitFramacLval (self :> frama_c_visitor)) lv;
+        List.iter (ignore % visitFramacExpr (self :> frama_c_visitor)) args;
+        self#vstmt_post s;
+        SkipChildren
+      | _ -> DoChildrenPost (tap self#vstmt_post)
   end
 
-  class unifier fundec =
-    let f = opt_map (fun fd -> fd.svar.vname) fundec in
+  class unifier () fundec =
+    let f = fundec.svar.vname in
     object
-      inherit frama_c_inplace
-      inherit! one_function_visitor fundec
+      inherit skipping_visitor
 
-      method! vlval lv = ignore @@ of_lval ?f lv; DoChildren
-      method! vexpr e =
-        ignore @@ of_expr ?f e;
-        DoChildrenPost
-          (tap @@ fun e ->
-           match e.enode with
-           | BinOp ((Eq | Ne), e1, e2, _) -> unify_exprs ?f e1 e2
-           | _                            -> ())
-      method! vstmt _ =
-        DoChildrenPost
-          (tap @@ fun stmt ->
-             match stmt.skind with
-             | Instr (Set (lv, e, loc))                       -> unify_exprs ?f (expr_of_lval ~loc lv) e
-             | Instr
-                 (Call
-                    (lvo,
-                     { enode = Lval (Var vi, NoOffset); _ },
-                     args, _))
-               when Kf.mem vi                                 -> replay_on_call ~stmt ?f (Globals.Functions.get vi)
-                                                                   lvo args
-             | Instr (Call (lvo, _, args, _))                 -> List.iter
-                                                                   (fun kf -> replay_on_call ~stmt ?f kf lvo args)
-                                                                   (Analyze.filter_matching_kfs lvo args)
-             | Return (Some e, loc) when has_some fundec      -> unify_exprs ?f
-                                                                   (expr_of_lval ~loc (var (the fundec).svar)) e
-             | _                                              -> ())
+      method! vlval lv = ignore @@ of_lval ~f lv; DoChildren
+      method private vexpr_pre = ignore % of_expr ~f
+      method private vexpr_post e =
+        match e.enode with
+        | BinOp ((Eq | Ne), e1, e2, _) -> unify_exprs ~f e1 e2
+        | _                            -> ()
+      method private vstmt_post stmt =
+        match stmt.skind with
+        | Instr (Set (lv, e, loc))                       -> unify_exprs ~f (expr_of_lval ~loc lv) e
+        | Instr
+            (Call
+               (lvo,
+                { enode = Lval (Var vi, NoOffset); _ },
+                args, _))
+          when Kf.mem vi                                 -> replay_on_call ~stmt ~f (Globals.Functions.get vi)
+                                                              lvo args
+        | Instr (Call (lvo, _, args, _))                 -> List.iter
+                                                              (fun kf -> replay_on_call ~stmt ~f kf lvo args)
+                                                              (Analyze.filter_matching_kfs lvo args)
+        | Return (Some e, loc)                           -> unify_exprs ~f
+                                                              (expr_of_lval ~loc @@ var fundec.svar) e
+        | _                                              -> ()
 
       method start = ()
       method finish =
-        unify_voids f;
-        may
-          (fun fd ->
-             let kf = Globals.Functions.get fd.svar in
-             H_k.replace h_params kf @@ param_regions kf)
-          fundec
+        unify_voids (Some f);
+        let kf = Globals.Functions.get fundec.svar in
+        H_k.replace h_params kf @@ param_regions kf
     end
 
   let pp =
@@ -1112,21 +1119,21 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     let pp_region_of fmttr pp_e e =
       function
       | `None            -> ()
-      | `Location (u, _) -> Format.fprintf fmttr "%a@@%a;@ " pp_e e R.pp @@ U.repr u
-      | `Value u         -> Format.fprintf fmttr "%a\\%a;@ " pp_e e R.pp @@ U.repr u
+      | `Location (u, _) -> Format.fprintf fmttr "%a\t@@\t%a;@\n" pp_e e R.pp @@ U.repr u
+      | `Value u         -> Format.fprintf fmttr "%a\t\\\t%a;@\n" pp_e e R.pp @@ U.repr u
     in
     fun fmttr fundec ->
       let f = opt_map (fun f -> f.svar.vname) fundec in
       H_l.clear h_lv;
       H_e.clear h_exp;
       let vis = object
-        inherit frama_c_inplace
-        inherit! one_function_visitor fundec
+        inherit skipping_visitor
 
         method! vlval _ =
           DoChildrenPost (tap @@ fun lv -> H_l.memo h_lv lv @@ pp_region_of fmttr pp_lval lv % of_lval ?f)
-        method! vexpr _ =
-          DoChildrenPost (tap @@ fun e -> H_e.memo h_exp e @@ pp_region_of fmttr pp_exp e % of_expr ?f)
+        method private vexpr_pre _ = ()
+        method private vexpr_post e = H_e.memo h_exp e @@ pp_region_of fmttr pp_exp e % of_expr ?f
+        method private vstmt_post _ = ()
       end in
       match fundec with
       | Some fundec -> ignore @@ visitFramacFunction vis fundec
