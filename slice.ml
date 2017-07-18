@@ -106,27 +106,7 @@ module Make (Analysis : Analysis) = struct
 
     let init_deps info () =
       let assigns = I.E.assigns @@ extract info in
-      let main = Kernel.MainFunction.get () = f in
       let open List in
-      iter
-        (fun (n, rs) ->
-           if n >= 1 then
-             iter
-               (fun r ->
-                  let u = U.of_repr r in
-                  if R.relevant_region u || main && (U.repr u).R.kind = `Global then
-                    R.dot_voids
-                      (fun u' ->
-                         R.containers_of_void
-                           (fun ty u'' ->
-                              if snd @@ Ty.deref ty = n then begin
-                                A.add_some (w_mem u)   (r_mem u'') assigns;
-                                A.add_some (w_mem u'') (r_mem u)   assigns
-                              end)
-                           u')
-                      u)
-               rs)
-        (R.all_void_xs ());
       let rv, args = Kernel_function.(get_vi C.f, get_formals C.f) in
       iter
         (fun vi ->
@@ -162,6 +142,33 @@ module Make (Analysis : Analysis) = struct
         | _                                -> ()
       in
       iter add_all @@ combine arg_tys @@ combine arg_regions param_regions
+
+    let complement_assigns assigns =
+      let open List in
+      iter
+        (fun (n, rs) ->
+           if n = 0 then
+             iter
+               (fun r ->
+                  let u = U.of_repr r in
+                  if R.relevant_region u then
+                    R.containers_of_void
+                      (fun ty' u' ->
+                         let r' = U.repr u' in
+                         R.containers_of_void
+                           (fun ty'' u'' ->
+                              let r'' = U.repr u'' in
+                              if not (R.equal r' r'')
+                                 && List.for_all isArithmeticOrPointerType [R.typ r'; R.typ r'']
+                                 && Ty.(snd @@ deref ty' = snd @@ deref ty'') then
+                                if A.mem (w_mem u') assigns || A.mem (w_mem u'') assigns then begin
+                                  A.add_some (w_mem u')  (r_mem u'') assigns;
+                                  A.add_some (w_mem u'') (r_mem u')  assigns
+                                end)
+                           u)
+                      u)
+               rs)
+        (R.all_void_xs ())
 
     let add_from_lval lv acc = may F.(fun w -> add_some (of_write w) acc) @@ w_lval lv
 
