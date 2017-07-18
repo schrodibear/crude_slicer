@@ -25,19 +25,16 @@ module Make_var (C : Criterion with type t := varinfo) : sig
   type t = private varinfo
 
   include Criterion with type t := t
-  val of_varinfo : varinfo -> t option
-  val of_varinfo_exn : varinfo -> t
+  val of_varinfo : varinfo -> t
   include Hashed_ordered_printable with type t := t
 end = struct
   type t = varinfo
 
   include C
 
-  let of_varinfo vi = if C.is_ok vi then Some vi else None
-
-  let of_varinfo_exn vi =
+  let of_varinfo vi =
     if C.is_ok vi then vi
-    else invalid_arg "Formal_var.of_varinfo_exn"
+    else               invalid_arg "Formal_var.of_varinfo"
 
   include (Varinfo : Hashed_ordered with type t := t)
   let pp = pp_varinfo
@@ -58,22 +55,17 @@ module Memory_field : sig
   type t = private fieldinfo
 
   include Criterion with type t := t
-  val of_fieldinfo : fieldinfo -> t option
-  val of_fieldinfo_exn : fieldinfo -> t
+  val of_fieldinfo : fieldinfo -> t
   include Hashed_ordered_printable with type t := t
 end = struct
   type t = fieldinfo
 
   let is_ok fi = fi.fcomp.cstruct && isArithmeticOrPointerType fi.ftype
 
-  let of_fieldinfo fi = if is_ok fi then Some fi else None
-
-  let of_fieldinfo_exn fi =
-    if is_ok fi then fi
-    else
-      Console.fatal
-        "Memory_field.of_fieldinfo_exn: not ok: %s.%s : %a"
-        (compFullName fi.fcomp) fi.fname pp_typ fi.ftype
+  let of_fieldinfo fi =
+    if is_ok fi
+    then fi
+    else Console.fatal "Memory_field.of_fieldinfo: not ok: %s.%s : %a" (compFullName fi.fcomp) fi.fname pp_typ fi.ftype
 
   include (Fieldinfo : Hashed_ordered with type t := t)
   let pp = pp_field
@@ -138,7 +130,7 @@ module Make_memory (R : Representant) (U : Unifiable with type repr = R.t) (C : 
     else
       match[@warning "-4"] unrollTypeDeep (R.typ r), fi with
       | TComp (ci, _ ,_), Some fi
-        when Compinfo.equal ci fi.fcomp -> r, Some (Memory_field.of_fieldinfo_exn fi)
+        when Compinfo.equal ci fi.fcomp -> r, Some (Memory_field.of_fieldinfo fi)
       | _,                None          -> Console.fatal
                                              "Memory.mk: improper region (with no field): %s : %a"
                                              (R.name r) pp_typ (R.typ r)
@@ -676,7 +668,6 @@ module H_stmt = Stmt.Hashtbl
 module H_stmt_conds = struct
   include Stmt.Hashtbl
 
-  let find_or_empty h k = try find_all h k with Not_found -> []
   module Hide = struct
     let cache = create 256 (* Work-around the value restriction and avoid re-exporting the cache *)
     module Show = struct
