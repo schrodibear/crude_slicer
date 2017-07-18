@@ -298,7 +298,7 @@ module Make (Analysis : Analysis) = struct
 
     let close_depends =
       let reads = F.create dummy_flag in
-      fun assigns depends ->
+      fun assigns depends result_dep ->
         F.clear reads;
         F.import ~from:depends reads;
         let import_reads w = F.import ~from:(A.find w assigns) depends in
@@ -307,7 +307,8 @@ module Make (Analysis : Analysis) = struct
         F.iter_local_mems  (fun m -> import_reads @@ `Local_mem m)  reads;
         F.iter_global_vars (fun v -> import_reads @@ `Global_var v) reads;
         F.iter_poly_vars   (fun v -> import_reads @@ `Poly_var v)   reads;
-        F.iter_local_vars  (fun v -> import_reads @@ `Local_var v)  reads
+        F.iter_local_vars  (fun v -> import_reads @@ `Local_var v)  reads;
+        if result_dep then import_reads `Result
 
     let is_tracking_var eff v = isVoidPtrType v.vtype && I.E.is_tracking_var (Void_ptr_var.of_varinfo v) eff
 
@@ -318,7 +319,8 @@ module Make (Analysis : Analysis) = struct
       let set_is_target () = I.E.set_is_target eff
 
       let add_transitive_closure () = add_transitive_closure assigns
-      let close_depends () = close_depends assigns depends
+      let complement_assigns () = complement_assigns assigns
+      let close_depends () = close_depends assigns depends (I.E.has_result_dep eff)
 
       let is_tracking_var = is_tracking_var eff
 
@@ -427,6 +429,7 @@ module Make (Analysis : Analysis) = struct
         method start = ()
         method finish =
           add_transitive_closure ();
+          complement_assigns ();
           close_depends ()
 
         inherit frama_c_inplace
@@ -497,7 +500,7 @@ module Make (Analysis : Analysis) = struct
       let assigns = I.E.assigns eff
       let depends = I.E.depends eff
 
-      let close_depends () = close_depends assigns depends
+      let close_depends () = close_depends assigns depends (I.E.has_result_dep eff)
 
       let is_tracking_var = is_tracking_var eff
 
@@ -535,11 +538,7 @@ module Make (Analysis : Analysis) = struct
         let may_push_and_cons f =
           opt_fold @@ List.cons % tap (fun w -> if F.(mem_some (of_write w) depends) then f ())
         in
-        if I.E.is_target eff'
-        then
-          `Needed
-        else
-          decide @@
+        let writes =
           A'.fold
             (fun w' _ ->
                match w', lv with
@@ -567,7 +566,7 @@ module Make (Analysis : Analysis) = struct
     let marker info =
       let eff = extract info in
       let depends = I.E.depends eff in
-      let has_result_dep = I.E.has_result_dep eff in
+      let has_result_dep () = I.E.has_result_dep eff in
       let reads = F.create dummy_flag in
       let decide =
         let decide needed = if needed then `Needed else `Not_yet in
@@ -588,11 +587,11 @@ module Make (Analysis : Analysis) = struct
           | #I.W.t  :: xs -> mem_result xs
         in
         function
-        | []                                -> `Not_yet
-        | [`Result] when has_result_dep     -> `Needed
-        | [`Result]                         -> `Not_yet
-        | [#I.W.readable as w]              -> single w
-        | (l : [< I.W.t] list)              -> decide (has_result_dep && mem_result l || intersects l)
+        | []                               -> `Not_yet
+        | [`Result] when has_result_dep () -> `Needed
+        | [`Result]                        -> `Not_yet
+        | [#I.W.readable as w]             -> single w
+        | (l : [< I.W.t] list)             -> decide (has_result_dep () && mem_result l || intersects l)
       in
       let module Mark = Mark (struct let decide, info, eff = decide, info, eff end) in
       let open Mark in
