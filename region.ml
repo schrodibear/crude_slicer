@@ -1004,7 +1004,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
   let unify_voids =
     let open List in
     let containers_of_void = reify containers_of_void (fun add _ u -> add u) in
-    let first_substruct fi = reify arrows (fun add fi' u -> if Fieldinfo.equal fi fi' then add u) in
+    let first_substruct fi = reify dots (fun add fi' u -> if Fieldinfo.equal fi fi' then add u) in
     let derefs = reify derefs (@@) in
     let dot_voids = reify dot_voids (@@) in
     fun f ->
@@ -1018,17 +1018,20 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
                | TComp ({ cfields = fi :: _; cstruct = true; _ }, _, _)  -> first_substruct fi u'
                | TComp ({ cstruct = false; _ }, _, _)                    -> assert false
                | _                                                       -> []
-               end >>= fun u' ->
-               dot_voids u' >>= fun u' ->
+               end >>=
+               dot_voids >>= fun u' ->
                [unify u u']
              else
-               containers_of_void u >>= fun u' ->
+               dot_voids u >>=                             (* u  :: void *...   *)
+               containers_of_void >>= fun u' ->            (* u' :: t    *...   *)
                let ty', n' = Ty.deref (U.repr u').R.typ in
-               (if n' = n then [u'] else []) >>= fun u' ->
-               derefs u' >>= fun u' ->
-               derefs u >>= fun u ->
-               containers_of_void u >>= fun u ->
-               let ty'', n'' = Ty.deref (U.repr u).R.typ in
+               (if n' = n then [u'] else []) >>=           (* u' :: t    *... ? *)
+               derefs >>= fun u' ->                        (* u' :: t     ...   *)
+               derefs u >>= fun u ->                       (* u  :: void  ...   *)
+               (if isVoidType (U.repr u).R.typ
+                then                 containers_of_void u
+                else dot_voids u >>= containers_of_void  ) >>= fun u ->  (* u :: t' ... *)
+               let ty'', n'' = Ty.deref (U.repr u).R.typ in              (* t == t' ?   *)
                if n'' = n' - 1 && Ty.compatible ty' ty'' then [unify u u'] else []
            in
            List.iter (on (relevant_region ?f) unify % U.of_repr) rs)
