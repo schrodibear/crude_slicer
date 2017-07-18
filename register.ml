@@ -12,6 +12,7 @@ let () =
   Cmdline.run_after_configuring_stage
     (fun () ->
        if Options.Analysis.get () then begin
+         Kernel.Machdep.set "gcc_x86_64";
          Kernel.Constfold.off ();
          Kernel.DoCollapseCallCast.off ()
        end)
