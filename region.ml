@@ -6,7 +6,7 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@warning "-4-6"]
+[@@@warning "-4-6-48"]
 
 open Cil
 open Cil_types
@@ -65,12 +65,12 @@ module Representant = struct
       | `Dummy,   `Dummy                          -> `Any
 
     let pp fmttr =
-      let pp fmt = Format.fprintf fmttr fmt in
+      Format.fprintf fmttr %
       function
-      | `Global  -> pp "^"
-      | `Poly _  -> pp "'"
-      | `Local _ -> pp "~"
-      | `Dummy   -> pp "?"
+      | `Global  -> "^"
+      | `Poly _  -> "'"
+      | `Local _ -> "~"
+      | `Dummy   -> "?"
   end
 
   type t =
@@ -116,7 +116,7 @@ module Representant = struct
            let open List in
            function
            | []                           -> rev_append l [n, [r]]
-           | (n', rs) :: es when n' = n   -> rev_append l @@ (n', r :: rs) :: es
+           | (n', rs) :: es   when n' = n -> rev_append l @@ (n', r :: rs) :: es
            | n', _ as e :: es when n' < n -> insert r n (e :: l) es
            | _ :: _ as es                 -> rev_append l @@ (n, [r]) :: es
          in
@@ -166,15 +166,14 @@ module Representant = struct
   let dot r fi =
     check_field "Representant.dot" r fi;
     check_detached "Representant.dot" fi;
-    let typ = let typ = fi.ftype in if isArrayType typ then Ast_info.element_type typ else typ in
-    mk ~name:(r.name ^ "." ^ fi.fname) ~typ ~kind:r.kind
+    mk ~name:(r.name ^ "." ^ fi.fname) ~typ:(Ty.unbracket fi.ftype) ~kind:r.kind
 
   let container r fi =
     check_detached "Representant.container" fi;
-    if not (Ty.compatible fi.ftype r.typ) then
+    if not Ty.(compatible (unbracket fi.ftype) r.typ) then
       Console.fatal
         "Representant.container: illegal use of `container_of': %s.%s : %a vs. %s : %a"
-        fi.fname fi.fcomp.cname pp_typ fi.ftype r.name pp_typ r.typ;
+        fi.fcomp.cname fi.fname pp_typ fi.ftype r.name pp_typ r.typ;
     if not fi.fcomp.cstruct then
       Console.fatal "Representant.container: container should be a structure: %s" fi.fcomp.cname;
     mk
@@ -280,8 +279,9 @@ module type Hashmap = sig
   val add : U.t -> U.t -> t -> unit
   val add' : t -> U.t -> U.t -> unit
   val find : U.t -> t -> U.t
-  val find_or_call : create:(R.t -> R.t) -> call:(U.t -> U.t -> unit) -> t -> U.t -> U.t
+  val find_or_call : create:(R.t -> R.t) -> call:(U.t -> U.t -> unit) -> t -> U.t -> [> `Old | `New] * U.t
   val iter : (U.t -> unit) -> U.t -> t -> unit
+  val iter_all : (U.t -> U.t -> unit) -> t -> unit
   val clear : t -> unit
 end
 
@@ -298,14 +298,15 @@ module Make_hashmap (R : Representant) (U : Unifiable with type repr = R.t) :
   let find u h = H.find h (U.repr u)
   let find_or_call ~create ~call h u =
     try
-      find u h
+      `Old, find u h
     with
     | Not_found ->
       let u' = U.of_repr @@ create (U.repr u) in
       add u u' h;
       call u' u;
-      u'
+      `New, u'
   let iter f u h = try f (H.find h (U.repr u)) with Not_found -> ()
+  let iter_all f h = H.iter (f % U.of_repr) h
   let clear h = H.clear h
 end
 
@@ -318,7 +319,8 @@ module type Pair_hashmap = sig
   val add : U.t -> K.t -> U.t -> t -> unit
   val add' : t -> U.t -> K.t -> U.t -> unit
   val find : U.t -> K.t -> t -> U.t
-  val find_or_call : create:(R.t -> K.t -> R.t) -> call:(U.t -> K.t -> U.t -> unit) -> t -> U.t -> K.t -> U.t
+  val find_or_call :
+    create:(R.t -> K.t -> R.t) -> call:(U.t -> K.t -> U.t -> unit) -> t -> U.t -> K.t -> [> `Old | `New] * U.t
   val iter : (K.t -> U.t -> unit) -> U.t -> t -> unit
   val clear : t -> unit
 end
@@ -343,18 +345,18 @@ module Make_pair_hashmap (R : Representant) (U : Unifiable with type repr = R.t)
   let add u k v (h, ks) =
     let r = U.repr u in
     H.replace h (r, k) v;
-    H_k.add ks r k
+    if not (List.exists (K.equal k) @@ H_k.find_all ks r) then H_k.add ks r k
   let add' h u k v = add u k v h
   let find u k (h, _) = H.find h (U.repr u, k)
   let find_or_call ~create ~call h u k =
     try
-      find u k h
+      `Old, find u k h
     with
     | Not_found ->
       let u' = U.of_repr @@ create (U.repr u) k in
       add u k u' h;
       call u' k u;
-      u'
+      `New, u'
   let iter f u (h, ks) =
     let r = U.repr u in
     List.iter (fun k -> f k @@ H.find h (r, k)) (H_k.find_all ks r)
@@ -380,16 +382,15 @@ module Separation : functor () -> sig
   val containers : (fieldinfo -> U.t -> unit) -> U.t -> unit
   val containers_of_void : (typ -> U.t -> unit) -> U.t -> unit
   val unify : U.t -> U.t -> unit
-  val duplicate : map:H'.t -> U.t -> U.t
-  val accomodate : map:H'.t -> U.t list -> on:U.t list -> unit
-  val replay : map:H'.t -> U.t list -> on:U.t list -> unit
+  val reflect : map:H'.t -> U.t -> U.t -> unit
+  val constrain : map:H'.t -> by:U.t list -> U.t list -> unit
 end = functor () -> struct
   module R = Representant
   module U = Make_unifiable (R) ()
 
   module H_f = Make_pair_hashmap (R) (U) (Fieldinfo)
   module H_t = Make_pair_hashmap (R) (U) (Typ)
-  module H' = Make_hashmap (R) (U)
+  module H'  = Make_hashmap (R) (U)
 
   let h_arrow = H_f.create ()
   let h_deref = H'.create ()
@@ -409,7 +410,10 @@ end = functor () -> struct
   let container = H_f.find_or_call ~create:R.container ~call:(H_f.add' h_dot) h_container
   let container_of_void u ty =
     let ty = Ty.normalize ty in
-    H_t.find_or_call ~create:R.container_of_void ~call:(fun u' _ u -> H'.add u' u h_dot_void) h_container_of_void u ty
+    if isVoidType ty then
+      `Old, u
+    else
+      H_t.find_or_call ~create:R.container_of_void ~call:(fun u' _ u -> H'.add u' u h_dot_void) h_container_of_void u ty
 
   let arrows f u = H_f.iter f u h_arrow
   let derefs f u = H'.iter f u h_deref
@@ -418,18 +422,7 @@ end = functor () -> struct
   let containers f u = H_f.iter f u h_container
   let containers_of_void f u = H_t.iter f u h_container_of_void
 
-  type 'k handler2 = (U.t -> 'k -> U.t) -> U.t -> 'k -> U.t -> unit
-
-  let handle_all ~handle1 ~(handle2:< f : 'k. 'k handler2; ..>) u1 u2 =
-    let handle2 f u k u' = handle2#f f u k u' in
-    H_f.iter (handle2 arrow u2) u1 h_arrow;
-    H'.iter (handle1 deref u2) u1 h_deref;
-    H_f.iter (handle2 dot u2) u1 h_dot;
-    H'.iter (handle1 dot_void u2) u1 h_dot_void;
-    H_f.iter (handle2 container u2) u1 h_container;
-    H_t.iter (handle2 container_of_void u2) u1 h_container_of_void
-
-  let unify u1 u2 =
+  let rec unify =
     let module T = Typ.Hashtbl in
     let module H =
       Hashtbl.Make
@@ -443,8 +436,39 @@ end = functor () -> struct
             997 * R.hash r1 + R.hash r2
         end)
     in
-    let cache = Typ.Hashtbl.create 128 in
-    let rec unify ?(max_count=3) ?(retain_cache=Typ.Hashtbl.clear cache) u1 u2 =
+    let olds = H'.create () in
+    let loops = T.create 128 in
+    let maxd = Options.Region_depth.get () in
+    let reflect2 d h f u2 k u1' =
+      match f u2 k with
+      | `Old, u2' when (try  R.equal
+                               (U.repr u2')
+                               (U.repr @@ H'.find u1' olds)
+                        with Not_found -> false)                    -> ()
+      | `Old, u2' when not H.(mem h (u1', u2') || mem h (u2', u1')) -> H.replace h (u1', u2') ()
+      | `Old, _                                                     -> ()
+      | `New, u2'                                                   ->
+        match H'.find u1' olds with
+        | u2''                                                      -> U.unify u2' u2''
+        | exception Not_found                                       ->
+          if d >= maxd then
+            match T.find loops @@ Ty.normalize (U.repr u1').R.typ with
+            | u2''                                                  -> U.unify u2' u2''
+            | exception Not_found                                   -> H.replace h (u1', u2') ()
+          else                                                         H.replace h (u1', u2') ()
+    in
+    let reflect1 d h f u2 = reflect2 d h (const' f) u2 () in
+    let reflect_all d h u1 =
+      let reflect1 = reflect1 d h and reflect2 f = reflect2 d h f in
+      fun u2 ->
+        H_f.iter (reflect2 arrow u2)             u1 h_arrow;
+        H'.iter  (reflect1 deref u2)             u1 h_deref;
+        H_f.iter (reflect2 dot u2)               u1 h_dot;
+        H'.iter  (reflect1 dot_void u2)          u1 h_dot_void;
+        H_f.iter (reflect2 container u2)         u1 h_container;
+        H_t.iter (reflect2 container_of_void u2) u1 h_container_of_void
+    in
+    fun ?(unify_=true) ?map ?(depth=0) ?(continue=H'.clear olds; T.clear loops) u1 u2 ->
       let r1 = U.repr u1 and r2 = U.repr u2 in
       if not (R.equal r1 r2) then
         let t1, t2 = map_pair Ty.normalize (r1.R.typ, r2.R.typ) in
@@ -452,54 +476,41 @@ end = functor () -> struct
           Console.fatal
             "Can't unify regions of different types: %s : %a, %s : %a"
             r1.R.name pp_typ r1.R.typ r2.R.name pp_typ r2.R.typ;
+        H'.add u1 u2 olds;
+        H'.add u2 u1 olds;
         let h = H.create 16 in
-        let handle1, handle2 =
-          let add h u u' = if not (H.mem h (u, u') || H.mem h (u', u)) then H.replace h (u, u') () in
-          (fun f u u' -> add h (f u) u'),
-          object
-            method f : 'k. 'k handler2 = fun f u k u' -> add h (f u k) u'
-          end
-        in
-        handle_all handle1 handle2 u1 u2;
-        handle_all handle1 handle2 u2 u1;
-        U.unify u1 u2;
-        let u = U.of_repr (U.repr u1) in
-        let clone =
-          let self count = T.replace cache t1 (u, count + 1); u in
-          match T.find cache t1 with
-          | _, count when count < max_count -> self count
-          | clone, _ -> clone
-          | exception Not_found -> self 0
-        in
-        H.iter (fun (u, u') () -> unify ~max_count ~retain_cache u u') h;
-        unify ~max_count ~retain_cache u clone
-    in
-    unify ~max_count:(Options.Region_depth.get ()) u1 u2
+        reflect_all depth h u1 u2;
+        reflect_all depth h u2 u1;
+        if unify_ || r1.R.kind = `Global || r2.R.kind = `Global then U.unify u1 u2;
+        T.add loops t1 u1;
+        H.iter (fun (u, u') () -> ignore @@ unify ~unify_ ~depth:(depth + 1) ~continue u u') h;
+        if depth = 0 then may H'.(fun map -> iter_all (add' map) olds) map
 
-  let rec duplicate ~map ?clone u =
-    let handle1 f u u' = ignore @@ duplicate ~map ~clone:(f u) u'
-    and handle2 = object
-      method f : 'k. 'k handler2 = fun f u k u' -> ignore @@ duplicate ~map ~clone:(f u k) u'
-    end in
-    if (U.repr u).R.kind = `Global
-    then u
-    else
-      try
-        let u' = H'.find u map in
-        may (unify u') clone;
-        u'
-      with
-      | Not_found ->
-        let u' = match clone with Some c -> c | None -> U.of_repr @@ R.template (U.repr u) in
-        H'.add u u' map;
-        handle_all ~handle1 ~handle2 u u';
-        u'
+  let reflect ~map u u' = unify ~unify_:false ~map u u'
 
-  let accomodate ~map regs ~on = List.iter2 (fun clone -> ignore % duplicate ~map ~clone) on regs
+  let unify u1 u2 = unify u1 u2
 
-  let duplicate ~map u = duplicate ~map u
+  let constrain ~map ~by us =
+    List.map
+      (fun u ->
+         let u' =
+           try                              H'.find u map
+           with Not_found ->
+             if (U.repr u).R.kind = `Global
+             then                           u
+             else                           U.of_repr @@ R.template @@ U.repr u
+         in
+         reflect ~map u u';
+         u')
+      by |>
+    List.iter2 unify us
 
-  let replay ~map regs ~on = List.iter2 unify on (List.map (duplicate ~map) regs)
+  let arrow = snd %% arrow
+  let deref = snd % deref
+  let dot = snd %% dot
+  let dot_void = snd % dot_void
+  let container = snd %% container
+  let container_of_void = snd %% container_of_void
 end
 
 module type Analysis = sig
@@ -604,9 +615,10 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
   let match_container_of2 =
     function
     | BinOp ((PlusPI | IndexPI),
-             { enode  = CastE (pstr, _, e); _ },
-             { enode = Const (CInt64 (c, IULongLong, _)); _ }, _)   ->
-      begin match unrollType pstr, unrollType (typeOf e) with
+             { enode = CastE (pstr, _, e); _ },
+             { enode = Const (CInt64 (c, (IULongLong | IULong), _)); _ }, _)
+      when isPointerType pstr ->
+      begin match unrollType @@ Ast_info.pointed_type pstr, unrollType (typeOf e) with
       | TComp (ci, _, _), (TPtr _ | TArray _ as ty) when ci.cstruct ->
         begin try
           Some (e, H_field.find I'.offs_of_key (ci, Ty.deref_once ty, c))
@@ -621,7 +633,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     function
     | BinOp ((PlusPI | IndexPI),
              { enode = CastE (chrptr, _, e); _ },
-             { enode = Const (CInt64 (c, IULongLong, _)); _ }, _)
+             { enode = Const (CInt64 (c, (IULongLong | IULong), _)); _ }, _)
       when isCharPtrType chrptr && isPointerType (typeOf e) ->
       let ty = Ast_info.pointed_type (typeOf e) in
       begin match unrollType ty with
@@ -696,9 +708,12 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
           in
           U.of_repr @@
           match typ, f with
-          | TPtr (TFun (rt, _, _, _), _), _
-            when not (isStructOrUnionType rt)               -> R.poly v.vname ("!" ^ v.vname) (Ty.deref_once rt)
-          | TPtr (TFun (rt, _, _, _), _), _                 -> R.local v.vname ("!" ^ v.vname) (Ty.normalize rt)
+          | TPtr (TFun (rt, _, _, _), _), Some f
+            when not (isStructOrUnionType rt) &&
+                 String.equal v.vname f                     -> R.poly v.vname v.vname (Ty.deref_once rt)
+          | TPtr (TFun (rt, _, _, _), _), Some f
+            when String.equal v.vname f                     -> R.local v.vname ("!" ^ v.vname) (Ty.normalize rt)
+          | TPtr (TFun _, _), _                             -> R.global v.vname typ
           | _, Some f
             when v.vformal &&
                  not (isStructOrUnionType v.vtype
@@ -821,13 +836,16 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       let of_lval = of_lval ?f in
       let of_expr = of_expr ?f in
       let value r = value ?f r in
-      if not @@ isPointerType @@ typeOf e
-      then `None
+      if not @@ isPointerType @@ Ty.rtyp_if_fun @@ typeOf e
+      then
+        `None
       else
         let cast ty e =
           let ty, ty' = map_pair Ty.deref_once (ty, typeOf e) in
           let r = of_expr e in
-          if Ty.compatible ty ty' then r
+          if Ty.compatible ty ty'
+          then
+            r
           else (* Both can't be void */union since they are compatible! *)
             let r = value ty' r in
             match unrollType ty, unrollType ty' with
@@ -837,9 +855,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
               match Ci.(match_deep_first_subfield_of ty ty', match_deep_first_subfield_of ty' ty) with
               | Some offs, _                                       -> `Value (take offs r)
               | _,         Some offs                               -> `Value (take (inv offs) r)
-              | _                                                  -> `Value (container_of_void
-                                                                                (dot_void r)
-                                                                                (Ty.deref_once ty))
+              | _                                                  -> `Value (container_of_void (dot_void r) ty)
 
         in
         match match_container_of1 e.enode, match_container_of2 e.enode, match_dot e.enode with
@@ -906,7 +922,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
           memo h_var vi (fun vi -> U.of_repr @@ R.poly f vi.vname @@ Ty.normalize ty)
         in
         let map = H_k.memo maps kf (fun _ -> H'.create ()) in
-        accomodate ~map [u] ~on:[u'];
+        reflect ~map u u';
         match unrollType ty with
         | TComp (ci, _, _) -> (let take_arrows = take_arrows ci in
                                let rs = take_arrows u' in
@@ -1028,7 +1044,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       map_pair (take @@ uncurry min @@ map_pair length pair) pair
     in
     let map = H_stmt.memo h_maps stmt (fun _ -> H'.create ()) in
-    replay ~map param_regions ~on:arg_regions
+    constrain ~map ~by:param_regions arg_regions
 
   let expr_of_lval =
     let cache = H_l.create 4096 in
@@ -1148,5 +1164,3 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
 
   let param_regions kf = H_k.memo h_params kf param_regions
 end
-
-
