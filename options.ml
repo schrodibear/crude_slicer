@@ -63,7 +63,7 @@ module Region_depth =
       let option_name = "-region_depth"
       let help = "Specify how many regions of the same type can should be retained if a region cycle is detected"
       let arg_name = ""
-      let default = 3
+      let default = 10
     end)
 
 module Builtin_expect_regexp =
