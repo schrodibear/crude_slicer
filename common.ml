@@ -190,6 +190,7 @@ module Ty = struct
     | TBuiltin_va_list _ as ty -> normalize ty
     | TNamed _                 -> assert false
 
+  let unbracket ty = if isArrayType ty then Ast_info.element_type ty else ty
 
   let deref =
     let rec aux n ty =
@@ -248,18 +249,20 @@ module Ci = struct
     let rec do_struct path ci =
       concat_map
         (fun fi ->
-           match[@warning "-4"] unrollType fi.ftype with
-           | TComp (ci, _, _)  -> do_ci (`Field fi :: path) ci
-           | _ when fi.faddrof -> [`Field fi :: path, None]
-           | _                 -> [path, Some fi])
+           match[@warning "-4"] unrollType @@ Ty.unbracket fi.ftype with
+           | TComp (ci, _, _)            -> do_ci (`Field fi :: path) ci
+           | _ when fi.faddrof ||
+                    isArrayType fi.ftype -> [`Field fi :: path, None]
+           | _                           -> [path, Some fi])
         ci.cfields
     and do_union path ci =
       concat_map
         (fun fi ->
            let container_of_void ty = `Container_of_void ty in
-           match[@warning "-4"] unrollType fi.ftype with
-           | TComp (ci, _, _) as ty -> do_ci (container_of_void ty :: path) ci
-           | ty                     -> [container_of_void ty :: path, None])
+           match[@warning "-4"] unrollType @@ Ty.unbracket fi.ftype with
+           | TComp ({ cstruct = false; _ } as ci, _, _)       -> do_union path ci
+           | TComp ({ cstruct = true;  _ } as ci, _, _) as ty -> do_struct (container_of_void ty :: path) ci
+           | ty                                               -> [container_of_void ty :: path, None])
         ci.cfields
     and do_ci path = (if ci.cstruct then do_struct else do_union) path in
     map (map_fst rev) @@ do_ci [] ci
