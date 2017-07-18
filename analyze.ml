@@ -189,7 +189,7 @@ module Goto_handling = struct
     let add_closure h =
       let open List in
       let rec add_closure s =
-        H.add h s ();
+        H.replace h s ();
         s.succs |>
         filter (not % H.mem h) |>
         iter add_closure
