@@ -1139,6 +1139,16 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       | Some fundec -> ignore @@ visitFramacFunction vis fundec
       | None        -> visitFramacFile vis (Ast.get ())
 
+  let init_var ?f vi { init } =
+    let rec loop lv =
+      function
+      | SingleInit e        -> unify_exprs ?f (expr_of_lval ~loc:e.eloc lv) e
+      | CompoundInit (_, l) -> List.iter (fun (off, init) -> loop (addOffsetLval off lv) init) l
+    in
+    may (loop @@ var vi) init
+
+  let init_globals () = Globals.Vars.iter init_var
+
   module Fixpoint =
     Fixpoint.Make
       (struct
@@ -1157,8 +1167,8 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     Console.debug "Started compute_regions...";
     let sccs = Analyze.condensate () in
     Console.debug "Proceeding with region analysis...";
-    visitFramacFile (new unifier None :> frama_c_visitor) @@ Ast.get ();
-    Fixpoint.visit_until_convergence ~order:`topological (fun () f -> new unifier @@ Some f) () sccs;
+    init_globals ();
+    Fixpoint.visit_until_convergence ~order:`topological (new unifier) () sccs;
     unify_voids None
 
   let dot_voids = dot_voids
