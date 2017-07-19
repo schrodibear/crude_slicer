@@ -449,6 +449,45 @@ end = functor () -> struct
   let containers f u = H_f.iter f u h_container
   let containers_of_void f u = H_t.iter f u h_container_of_void
 
+  let assert_stratification =
+    let check s u1 u2 =
+      let r1, r2 = U.(repr u1, repr u2) in
+      let k1, k2 = R.(kind r1, kind r2) in
+      match k1, k2 with
+      | `Global,  `Global
+      | `Poly _,  `Global
+      | `Local _, `Global      -> ()
+      | `Poly f, `Poly f'
+        when String.equal f f' -> ()
+      | `Local f,(`Poly f'
+                 | `Local f')
+        when String.equal f f' -> ()
+      | `Dummy,   _
+      | _,        `Dummy       -> Console.fatal "Separation.stratification: leftover dummy region: %a is %s of %a"
+                                    R.pp r1 s R.pp r2
+      | _                      -> Console.fatal "Separation.stratification: stratification violation: %a is %s of %a"
+                                    R.pp r1 s R.pp r2
+    in
+    let visited = H'.create () in
+    fun u ->
+      let rec loop s u u' =
+        let open Format in
+        try
+          ignore @@ H'.find u' visited
+        with Not_found ->
+          check s u u';
+          H'.add u' u' visited;
+          arrows             (fun fi -> loop (asprintf "`%a' pointer field" pp_field fi) u')   u';
+          derefs             (loop "deref" u')                                                 u';
+          dots               (fun fi -> loop (asprintf "`%a' composite field" pp_field fi) u') u';
+          dot_voids          (loop "(void *) cast" u')                                         u';
+          containers         (fun fi -> loop (asprintf "`%s.%a' container"
+                                                (compFullName fi.fcomp) pp_field fi) u')       u';
+          containers_of_void (fun ty -> loop (asprintf "(%a *) cast" pp_typ ty) u')            u'
+      in
+      H'.clear visited;
+      loop "self reference" u u
+
   let rec unify =
     let module T = Typ.Hashtbl in
     let module H =
@@ -1178,12 +1217,35 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
 
   let init_globals () = Globals.Vars.iter init_var
 
+  let pp_globals fmttr = Globals.Vars.iter (fun vi _ -> pp_region_of fmttr pp_varinfo vi @@ of_var vi)
+
+  let assert_stratification =
+    let assert_stratification vi =
+      match of_var vi with
+      | `Location (u, _) | `Value u -> assert_stratification u
+      | `None                       -> ()
+    in
+    fun () ->
+      visitFramacFile
+        (object
+          inherit frama_c_inplace
+          method! vglob_aux =
+            function
+            | GVar (vi, _, _)
+            | GVarDecl (vi,  _) -> assert_stratification vi; SkipChildren
+            | _                 ->                           DoChildren
+          method! vfunc f =
+            List.(iter (iter assert_stratification) [f.sformals; f.slocals]);
+            SkipChildren
+        end)
+        (Ast.get ())
+
   module Fixpoint =
     Fixpoint.Make
       (struct
         module E = struct
           type some = fundec
-          let pp fmttr fundec = pp fmttr (Some fundec)
+          let pp = pp
         end
 
         type t = unit
