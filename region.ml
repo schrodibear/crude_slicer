@@ -1181,31 +1181,29 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
         H_k.replace h_params kf @@ param_regions kf
     end
 
+  let pp_region_of fmttr pp_e e =
+    function
+    | `None            -> ()
+    | `Location (u, _) -> Format.fprintf fmttr "%a\t@@\t%a;@\n" pp_e e R.pp @@ U.repr u
+    | `Value u         -> Format.fprintf fmttr "%a\t\\\t%a;@\n" pp_e e R.pp @@ U.repr u
+
   let pp =
     let h_lv = H_l.create 1024 in
     let h_exp = H_e.create 1024 in
-    let pp_region_of fmttr pp_e e =
-      function
-      | `None            -> ()
-      | `Location (u, _) -> Format.fprintf fmttr "%a\t@@\t%a;@\n" pp_e e R.pp @@ U.repr u
-      | `Value u         -> Format.fprintf fmttr "%a\t\\\t%a;@\n" pp_e e R.pp @@ U.repr u
-    in
     fun fmttr fundec ->
-      let f = opt_map (fun f -> f.svar.vname) fundec in
+      let f = fundec.svar.vname in
       H_l.clear h_lv;
       H_e.clear h_exp;
       let vis = object
         inherit skipping_visitor
 
         method! vlval _ =
-          DoChildrenPost (tap @@ fun lv -> H_l.memo h_lv lv @@ pp_region_of fmttr pp_lval lv % of_lval ?f)
+          DoChildrenPost (tap @@ fun lv -> H_l.memo h_lv lv @@ pp_region_of fmttr pp_lval lv % of_lval ~f)
         method private vexpr_pre _ = ()
-        method private vexpr_post e = H_e.memo h_exp e @@ pp_region_of fmttr pp_exp e % of_expr ?f
+        method private vexpr_post e = H_e.memo h_exp e @@ pp_region_of fmttr pp_exp e % of_expr ~f
         method private vstmt_post _ = ()
       end in
-      match fundec with
-      | Some fundec -> ignore @@ visitFramacFunction vis fundec
-      | None        -> visitFramacFile vis (Ast.get ())
+      ignore @@ visitFramacFunction vis fundec
 
   let init_var ?f vi { init } =
     let rec loop lv =
