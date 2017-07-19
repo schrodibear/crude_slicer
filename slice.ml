@@ -301,7 +301,7 @@ module Make (Analysis : Analysis) = struct
       fun assigns depends result_dep ->
         F.clear reads;
         F.import ~from:depends reads;
-        let import_reads w = F.import ~from:(A.find w assigns) depends in
+        let import_reads w = if A.mem w assigns then F.import ~from:(A.find w assigns) depends in
         F.iter_global_mems (fun m -> import_reads @@ `Global_mem m) reads;
         F.iter_poly_mems   (fun m -> import_reads @@ `Poly_mem m)   reads;
         F.iter_local_mems  (fun m -> import_reads @@ `Local_mem m)  reads;
