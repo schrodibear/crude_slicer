@@ -384,9 +384,36 @@ module Separation : functor () -> sig
   val unify : U.t -> U.t -> unit
   val reflect : map:H'.t -> U.t -> U.t -> unit
   val constrain : map:H'.t -> by:U.t list -> U.t list -> unit
+
+  val switch : string option -> unit
+  val assert_stratification : U.t -> unit
 end = functor () -> struct
   module R = Representant
-  module U = Make_unifiable (R) ()
+
+  let current = ref None
+
+  let switch fo = current := fo
+
+  module U = struct
+    include Make_unifiable (R) ()
+
+    let unify =
+      let check ~intruder:u' u =
+        match (repr u).R.kind with
+        | `Local f | `Poly f
+          when
+            opt_equal String.equal !current (Some f) -> ()
+        | `Local f | `Poly f as k                    -> Console.fatal "Separation.unify: locality violation: \
+                                                                       an outer region %a leaked into a `%a' region %a \
+                                                                       of function %s"
+                                                          R.pp (repr u') R.Kind.pp k R.pp (repr u) f
+        | `Global | `Dummy     -> ()
+      in
+      fun u1 u2 ->
+        check ~intruder:u1 u2;
+        check ~intruder:u2 u1;
+        unify u1 u2
+  end
 
   module H_f = Make_pair_hashmap (R) (U) (Fieldinfo)
   module H_t = Make_pair_hashmap (R) (U) (Typ)
@@ -1081,6 +1108,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
 
   class unifier () fundec =
     let f = fundec.svar.vname in
+    let () = switch (Some f) in
     object
       inherit skipping_visitor
 
@@ -1168,9 +1196,14 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     Console.debug "Started compute_regions...";
     let sccs = Analyze.condensate () in
     Console.debug "Proceeding with region analysis...";
+    switch None;
     init_globals ();
     Fixpoint.visit_until_convergence ~order:`topological (new unifier) () sccs;
-    unify_voids None
+    switch None;
+    unify_voids None;
+    Console.debug ~level:3 "@[<2>Global result is:@\n%t@]" pp_globals;
+    Console.debug "Finished compute_regions, will now check stratification invariants...";
+    assert_stratification ()
 
   let dot_voids = dot_voids
   let containers_of_void = containers_of_void
