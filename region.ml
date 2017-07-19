@@ -491,6 +491,7 @@ end = functor () -> struct
   let unify u1 u2 = unify u1 u2
 
   let constrain ~map ~by us =
+    H'.clear map;
     List.map
       (fun u ->
          let u' =
