@@ -157,7 +157,8 @@ let cache_offsets =
     Console.debug ~level:3 "Finished cache_offsets.@\n@[<2>Result is:@\n%a@]"
       (pp_iter2 ~sep:";@]@\n" ~between:" -> " Info.H_field.iter
          Integer.(fun fmt (ci, ty, off) ->
-           fprintf fmt "@[<2>@[%s, %a, %s (0x%LXh)@]" (compFullName ci) pp_typ ty (to_string off) (to_int64 @@ conv off))
+           fprintf fmt "@[<2>@[%s, %a, %s (0x%LXh)@]"
+             (compFullName ci) pp_typ ty (to_string off) (to_int64 @@ conv off))
          (pp_list ~sep:"" pp_off))
       offs_of_key
 
@@ -175,11 +176,11 @@ module Goto_handling = struct
         | _        ->
           may_map (fun s' -> if equal cs s then [s'] else []) ~dft:[] s' @ cs.succs |>
           filter
-            (fun s' ->
+            (fun cs' ->
                let rec mem_succ =
                  function
                  | [] | [_]            -> false
-                 | x :: (y :: _ as xs) -> equal s x && equal s' y || mem_succ xs
+                 | x :: (y :: _ as xs) -> equal cs y && equal cs' x || mem_succ xs
                in
                not @@ mem_succ path) |>
           concat_map (all_paths % cons' path)
