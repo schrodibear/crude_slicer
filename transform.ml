@@ -89,7 +89,30 @@ module Make (Analysis : Analysis) = struct
       | _                                                                             -> DoChildren
   end
 
+  let unique_param_names =
+    let name n = "arg" ^ string_of_int n in
+    let rec next vis n =
+      let n = n + 1 in
+      let name = name n in
+      if List.exists (fun vi -> String.equal vi.vname name) vis
+      then next vis n
+      else n
+    in
+    fun () ->
+      Globals.Functions.iter
+        (fun kf ->
+           let vis = Kernel_function.get_formals kf in
+           ignore @@
+           List.fold_left
+             (fun acc vi ->
+                if vi.vname = "" then
+                  vi.vname <- name acc;
+                next vis acc)
+             (next vis 0)
+             vis)
+
   let rewrite () =
     Console.debug "Started rewriting AST...";
+    unique_param_names ();
     visitFramacFile (new rewriter) @@ Ast.get ()
 end
