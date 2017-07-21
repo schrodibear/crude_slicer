@@ -859,23 +859,26 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     of_string x
   and fresh =
     let counter = ref ~-1 in
-    fun ?f ty ->
+    fun ?(dummy=false) ?f ty ->
       incr counter;
       let name = "fresh#" ^ string_of_int !counter in
       let ty = Ty.deref_once ty in
       U.of_repr @@
-      match f with
-      | Some f -> R.local f name ty
-      | None   -> R.global name ty
-  and value : 'a. ?f:_ -> _ -> ([< `Location of _ | `Value of _ | `None ] as 'a) -> _ = fun ?f ty ->
+      if dummy then
+        R.dummy name ty
+      else
+        match f with
+        | Some f -> R.local f name ty
+        | None   -> R.global name ty
+  and value : 'a. ?dummy:_ -> ?f:_ -> _ -> ([< `Location of _ | `Value of _ | `None ] as 'a) -> _ = fun ?dummy ?f ty ->
     function
     | `Location (_, get) ->
       begin match get () with
       | `Value u         -> u
-      | `None            -> fresh ?f ty
+      | `None            -> fresh ?dummy ?f ty
       end
     | `Value u           -> u
-    | `None              -> fresh ?f ty
+    | `None              -> fresh ?dummy ?f ty
   and location =
     function
     | `Location (u, _)     -> u
@@ -942,13 +945,14 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
         `None
       else
         let cast ty e =
-          let ty, ty' = map_pair Ty.deref_once (ty, typeOf e) in
+          let ty' = let ty' = typeOf e in if isIntegralType ty' then ty else ty' in
+          let ty, ty' = map_pair Ty.deref_once (ty, ty') in
           let r = of_expr e in
           if Ty.compatible ty ty'
           then
-            r
+            `Value (value (TPtr (ty, [])) r)
           else (* Both can't be void */union since they are compatible! *)
-            let r = value ty' r in
+            let r = value (TPtr (ty', [])) r in
             match unrollType ty, unrollType ty' with
             | (TVoid _ | TComp ({ cstruct = false; _ }, _, _)), _  -> `Value (dot_void r)
             | ty, (TVoid _ | TComp ({ cstruct = false; _ }, _, _)) -> `Value (container_of_void r ty)
@@ -1055,9 +1059,9 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       else
         match lvo, rtyp with
         | None,    TPtr _
-        | None,    TComp _ -> [value ?f rtyp `None]
+        | None,    TComp _ -> [value ~dummy:true ?f rtyp `None]
         | None,    _       -> []
-        | Some lv, TPtr _  -> [value ?f rtyp @@ of_lval ?f lv]
+        | Some lv, TPtr _  -> [value ~dummy:true ?f rtyp @@ of_lval ?f lv]
         | Some lv, TComp _ -> [location @@ of_lval ?f lv]
         | Some _,  _       -> []
     in
