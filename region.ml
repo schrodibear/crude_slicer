@@ -803,12 +803,13 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     |  `Value of U.t ] as 'a
 
   let retvar, is_retvar =
+    let h_to_retvar = H_v.create 1024 in
     let h_retvars = H_v.create 1024 in
     (fun vi ->
-       H_v.memo h_retvars vi @@
+       H_v.memo h_to_retvar vi @@
        fun vi ->
        let vi = copyVarinfo vi @@ "!" ^ vi.vname in
-       H_v.replace h_retvars vi vi;
+       H_v.replace h_retvars vi ();
        vi),
     H_v.mem h_retvars
 
@@ -821,7 +822,8 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       let retvar = is_retvar v in
       let vaddrof = v.vaddrof && not retvar in
       let typ = Ty.rtyp_if_fun v.vtype in
-      if not (isStructOrUnionType typ || isArrayType typ || vaddrof || isPointerType typ)
+      if not (isStructOrUnionType typ || isArrayType typ || vaddrof || isPointerType typ ||
+              isFunctionType v.vtype && not retvar)
       then
         `None
       else
@@ -854,7 +856,9 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
           | false, _,       Some f when v.vformal          -> R.poly   f v.vname         typ'
           | false, _,       Some f                         -> R.local  f v.vname         typ'
         in
-        if isStructOrUnionType typ || isArrayType typ || vaddrof
+        if isFunctionType v.vtype && not retvar
+        then `Location (u, fun () -> `Value u)
+        else if isStructOrUnionType typ || (isArrayType typ && not v.vformal) || vaddrof
         then `Location (u, resolve_addressible v.vaddrof typ u)
         else `Value u
     in
