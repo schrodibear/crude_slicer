@@ -775,43 +775,59 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     |  `None
     |  `Value of U.t ] as 'a
 
+  let retvar, is_retvar =
+    let h_retvars = H_v.create 1024 in
+    (fun vi ->
+       H_v.memo h_retvars vi @@
+       fun vi ->
+       let vi = copyVarinfo vi @@ "!" ^ vi.vname in
+       H_v.replace h_retvars vi vi;
+       vi),
+    H_v.mem h_retvars
+
   (* Also used to retrieve return regions, only use from the inside(!) *)
   let rec of_var ?f x =
     let of_var =
       let open! H_v in
       memoize ~find ~replace h_var @@
       fun ?f v ->
+      let retvar = is_retvar v in
+      let vaddrof = v.vaddrof && not retvar in
       let typ = Ty.rtyp_if_fun v.vtype in
-      if not (isStructOrUnionType typ || isArrayType typ || v.vaddrof || isPointerType typ)
-      then `None
+      if not (isStructOrUnionType typ || isArrayType typ || vaddrof || isPointerType typ)
+      then
+        `None
       else
         let u =
-          let typ =
-            if (v.vaddrof && not @@ isArrayType v.vtype) || isStructOrUnionType v.vtype
-            then Ty.normalize v.vtype
-            else Ty.deref_once v.vtype
+          let typ' =
+            if (vaddrof && not @@ isArrayType typ) || isStructOrUnionType typ
+            then Ty.normalize typ
+            else Ty.deref_once typ
           in
           U.of_repr @@
-          match typ, f with
-          | TPtr (TFun (rt, _, _, _), _), Some f
-            when not (isStructOrUnionType rt) &&
-                 String.equal v.vname f                     -> R.poly v.vname v.vname (Ty.deref_once rt)
-          | TPtr (TFun (rt, _, _, _), _), Some f
-            when String.equal v.vname f                     -> R.local v.vname ("!" ^ v.vname) (Ty.normalize rt)
-          | TPtr (TFun _, _), _                             -> R.global v.vname typ
-          | _, Some f
-            when v.vformal &&
-                 not (isStructOrUnionType v.vtype
-                      || v.vaddrof)                         -> R.poly f v.vname typ
-          | _, Some f when v.vformal                        -> R.local f ("&" ^ v.vname) typ
-          | _, _ when v.vglob                               -> R.global ("&" ^ v.vname) typ
-          | _, Some f                                       -> R.local f ("&" ^ v.vname) typ
-          | _                                               -> Console.fatal "Region.of_var: a local or formal \
-                                                                              variable should be supplied with \
-                                                                              function name: %s"
-                                                                 v.vname
+          match retvar, Ty.normalize typ, f with
+          | true,  TComp _, Some f                         -> R.local  f ("!" ^ f)       typ'
+          | true,  _,       Some f                         -> R.poly   f f               typ'
+          | true,  _,       None                           -> Console.fatal "Retvar requested from global scope: %a"
+                                                                pp_varinfo v
+
+          | false, _,       _      when (isFunctionType
+                                           v.vtype)        -> R.global   v.vname         v.vtype
+
+          | false, TComp _, _      when v.vglob            -> R.global   ("&" ^ v.vname) typ'
+          | false, _,       _      when v.vglob && vaddrof -> R.global   ("&" ^ v.vname) typ'
+          | false, _,       _      when v.vglob            -> R.global   v.vname         typ'
+          | false, _,       None                           -> Console.fatal
+                                                                "Non-global variable outside any function: %a"
+                                                                pp_varinfo v
+
+          | false, TComp _, Some f                         -> R.local  f ("&" ^ v.vname) typ'
+          | false, _,       Some f when vaddrof            -> R.local  f ("&" ^ v.vname) typ'
+
+          | false, _,       Some f when v.vformal          -> R.poly   f v.vname         typ'
+          | false, _,       Some f                         -> R.local  f v.vname         typ'
         in
-        if isStructOrUnionType typ || isArrayType typ || v.vaddrof
+        if isStructOrUnionType typ || isArrayType typ || vaddrof
         then `Location (u, resolve_addressible v.vaddrof typ u)
         else `Value u
     in
@@ -993,10 +1009,10 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     let take_arrows ci = let arrows = Ci.arrows ci in fun u -> List.map (swap take @@ u) arrows in
     fun kf ->
       let params = Kf.get_formals kf in
-      let retval =
+      let retvar =
         if isVoidType @@ Kf.get_return_type kf
         then []
-        else [Kf.get_vi kf]
+        else [retvar @@ Kf.get_vi kf]
       in
       let f = Kf.get_name kf in
       let comp_region vi =
@@ -1029,7 +1045,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
              end
            | `Value u                  -> [u]
            | `None                     -> [])
-        (retval @ params)
+        (retvar @ params)
 
   let arg_regions ?f kf lvo exprs =
     let retr =
@@ -1189,7 +1205,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
                                                               (fun kf -> replay_on_call ~stmt ~f kf lvo args)
                                                               (Analyze.filter_matching_kfs lvo args)
         | Return (Some e, loc)                           -> unify_exprs ~f
-                                                              (expr_of_lval ~loc @@ var fundec.svar) e
+                                                              (expr_of_lval ~loc @@ var @@ retvar @@ fundec.svar) e
         | _                                              -> ()
 
       method start = ()
