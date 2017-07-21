@@ -1108,17 +1108,30 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
            | _                -> [])
       exprs
 
-  let unify_exprs ?f e1 e2 =
-    let unify_comps ci lv1 lv2 =
+  let unify_exprs =
+    let unify_comps ?f ci lv1 lv2 =
       let u1, u2 = map_pair (location % of_lval ?f) (lv1, lv2) in
-      List.iter (fun offs -> uncurry unify @@ map_pair (take offs) (u1, u2)) (Ci.arrows ci)
+      List.iter (fun offs -> uncurry unify @@ map_pair (take offs) (u1, u2)) (Ci.arrows ci);
+      List.iter (fun offs -> ignore @@ map_pair (take offs) (u1, u2)) (Ci.dots ci)
     in
-    match e1.enode, e2.enode, unrollType (Ty.rtyp_if_fun @@ typeOf e1) with
-    | Lval lv1, Lval lv2, TComp (ci, _, _)    -> unify_comps ci lv1 lv2
-    | _                                       ->
-      match of_expr ?f e1, of_expr ?f e2 with
-      | `Value u1, `Value u2                  -> unify u1 u2
-      | _                                     -> ()
+    let bump_comp ?f ci e =
+      match of_expr ?f e with
+      | `Value u -> List.iter (fun offs -> ignore @@ take offs u) (Ci.dots ci)
+      | `None    -> ()
+    in
+    fun ?f e1 e2 ->
+      let ty = Ty.rtyp_if_fun @@ typeOf e1 in
+      match e1.enode, e2.enode, unrollType ty with
+      | Lval lv1, Lval lv2, TComp (ci, _, _)    -> unify_comps ?f ci lv1 lv2
+      | _                                       ->
+        begin match (stripCasts e2).enode, Ty.deref_once ty with
+        | Lval (Var vi, NoOffset), TComp (ci, _, _)
+          when isVoidPtrType vi.vtype               -> bump_comp ?f ci e1
+        | _                                         -> ()
+        end;
+        match of_expr ?f e1, of_expr ?f e2 with
+        | `Value u1, `Value u2                  -> unify u1 u2
+        | _                                     -> ()
 
   let relevant_region ?f u =
     if has_some f then
