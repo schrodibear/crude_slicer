@@ -1287,8 +1287,8 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
   let pp_globals fmttr = Globals.Vars.iter (fun vi _ -> pp_region_of fmttr pp_varinfo vi @@ of_var vi)
 
   let assert_stratification =
-    let assert_stratification vi =
-      match of_var vi with
+    let assert_stratification ?f vi =
+      match of_var ?f vi with
       | `Location (u, _) | `Value u -> assert_stratification u
       | `None                       -> ()
     in
@@ -1302,7 +1302,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
             | GVarDecl (vi,  _) -> assert_stratification vi; SkipChildren
             | _                 ->                           DoChildren
           method! vfunc f =
-            List.(iter (iter assert_stratification) [f.sformals; f.slocals]);
+            List.(iter (iter @@ assert_stratification ~f:f.svar.vname) [f.sformals; f.slocals]);
             SkipChildren
         end)
         (Ast.get ())
