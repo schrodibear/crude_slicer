@@ -264,7 +264,7 @@ module Ci = struct
            | TComp ({ cstruct = true;  _ } as ci, _, _) as ty -> do_struct (container_of_void ty :: path) ci
            | ty                                               -> [container_of_void ty :: path, None])
         ci.cfields
-    and do_ci path = (if ci.cstruct then do_struct else do_union) path in
+    and do_ci path ci = (if ci.cstruct then do_struct else do_union) path ci in
     map (map_fst rev) @@ do_ci [] ci
 
   let dots ci =
@@ -273,6 +273,7 @@ module Ci = struct
     offsets ci |>
     group_by
       (fun (path1, _) (path2, _) ->
+         length path1 = length path2 &&
          for_all2
            (curry @@
             function
