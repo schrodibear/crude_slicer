@@ -590,7 +590,7 @@ end = functor () -> struct
           if unify_ || r1.R.kind = `Global || r2.R.kind = `Global then U.unify u1 u2;
           T.add loops (r1.R.kind, t1) u1;
           T.add loops (r2.R.kind, t2) u2;
-          H.iter (fun (u, u') () -> ignore @@ unify ~unify_ ~depth:(depth + 1) ~continue u u') h;
+          H.iter (fun (u, u') () -> unify ~unify_ ~depth:(depth + 1) ~continue u u') h;
           if depth = 0 then may H'.(fun map -> iter_all (add' map) olds) map
 
   let reflect ~map u u' = unify ~unify_:false ~map u u'
