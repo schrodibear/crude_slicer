@@ -152,7 +152,7 @@ module Representant = struct
       when ci.cstruct && Compinfo.equal ci fi.fcomp -> ()
     | ty                                            -> Console.fatal
                                                          "%s: not a struct with field %s.%s: %a"
-                                                         f fi.fname fi.fcomp.cname pp_typ ty
+                                                         f fi.fcomp.cname fi.fname pp_typ ty
 
   let arrow r fi =
     check_field "Representant.arrow" r fi;
@@ -591,27 +591,31 @@ end = functor () -> struct
           T.add loops (r1.R.kind, t1) u1;
           T.add loops (r2.R.kind, t2) u2;
           H.iter (fun (u, u') () -> unify ~unify_ ~depth:(depth + 1) ~continue u u') h;
-          if depth = 0 then may H'.(fun map -> iter_all (add' map) olds) map
+          if depth = 0 then
+            may (fun map -> H'.iter_all (fun u u' -> if (U.repr u).R.kind <> `Dummy then H'.add u u' map) olds) map
 
   let reflect ~map u u' = unify ~unify_:false ~map u u'
 
   let unify u1 u2 = unify u1 u2
 
-  let constrain ~map ~by us =
-    H'.clear map;
-    List.map
-      (fun u ->
-         let u' =
-           try                              H'.find u map
-           with Not_found ->
-             if (U.repr u).R.kind = `Global
-             then                           u
-             else                           U.of_repr @@ R.template @@ U.repr u
-         in
-         reflect ~map u u';
-         u')
-      by |>
-    List.iter2 unify us
+  let constrain =
+    let map' = H'.create () in
+    fun ~map ~by us ->
+      H'.clear map';
+      List.map
+        (fun u ->
+           let u' =
+             try                              H'.find u map'
+             with Not_found ->
+               if (U.repr u).R.kind = `Global
+               then                           u
+               else                           U.of_repr @@ R.template @@ U.repr u
+           in
+           reflect ~map:map' u u';
+           u')
+        by |>
+      tap (fun _ -> H'.(iter_all (add' map) map')) |>
+      List.iter2 unify us
 
   let arrow = snd %% arrow
   let deref = snd % deref
