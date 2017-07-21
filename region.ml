@@ -402,20 +402,28 @@ end = functor () -> struct
 
   let switch fo = current := fo
 
+  let check_region r =
+    match r.R.kind with
+    | `Local f | `Poly f
+      when
+        may_map ~dft:false
+          (String.equal f) !current -> Ok ()
+    | `Local f | `Poly f as k       -> Error (k, f)
+    | `Global | `Dummy              -> Ok ()
+
   module U = struct
     include Make_unifiable (R) ()
 
     let unify =
       let check ~intruder:u' u =
-        match (repr u).R.kind with
-        | `Local f | `Poly f
-          when
-            opt_equal String.equal !current (Some f) -> ()
-        | `Local f | `Poly f as k                    -> Console.fatal "Separation.unify: locality violation: \
-                                                                       an outer region %a leaked into a `%a' region %a \
-                                                                       of function %s"
-                                                          R.pp (repr u') R.Kind.pp k R.pp (repr u) f
-        | `Global | `Dummy     -> ()
+        let r = repr u in
+        if not (R.equal r @@ repr u') then
+          match check_region r with
+          | Ok    ()     -> ()
+          | Error (k, f) -> Console.fatal "Separation.unify: locality violation: \
+                                           an outer region %a leaked into a \
+                                           `%a' region %a of function %s"
+                              R.pp (repr u') R.Kind.pp k R.pp r f
       in
       fun u1 u2 ->
         check ~intruder:u1 u2;
@@ -450,6 +458,21 @@ end = functor () -> struct
     else
       H_t.find_or_call ~create:R.container_of_void ~call:(fun u' _ u -> H'.add u' u h_dot_void) h_container_of_void u ty
 
+  let check2 f u k =
+    match f u k with
+    | `Old, _ as r                    -> r
+    | `New, u as r                    ->
+      match check_region (U.repr u) with
+      | Ok    ()                      -> r
+      | Error (k, f)                  -> Console.fatal "Separation.check: locality violation: \
+                                                        a `%a' region %a was created in function %s"
+                                           R.Kind.pp k R.pp (U.repr u) f
+
+  let check1 f u = check2 (const' f) u ()
+
+  let arrow,        deref,        dot,        container,        dot_void,        container_of_void =
+      check2 arrow, check1 deref, check2 dot, check2 container, check1 dot_void, check2 container_of_void
+
   let arrows f u = H_f.iter f u h_arrow
   let derefs f u = H'.iter f u h_deref
   let dots f u = H_f.iter f u h_dot
@@ -465,10 +488,10 @@ end = functor () -> struct
       | `Global,  `Global
       | `Poly _,  `Global
       | `Local _, `Global      -> ()
-      | `Poly f, `Poly f'
+      | `Poly f,  `Poly f'
         when String.equal f f' -> ()
-      | `Local f,(`Poly f'
-                 | `Local f')
+      | `Local f, (`Poly f'
+                  | `Local f')
         when String.equal f f' -> ()
       | `Dummy,   _
       | _,        `Dummy       -> Console.fatal "Separation.stratification: leftover dummy region: %a is %s of %a"
