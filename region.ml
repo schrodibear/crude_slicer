@@ -35,6 +35,14 @@ module Representant = struct
                    | `Local _
                    | `Dummy)    -> false
 
+    let hash =
+      let open! Datatype in
+      function
+      | `Global  -> 1
+      | `Poly f  -> 5 * String.hash f + 2
+      | `Local f -> 5 * String.hash f + 3
+      | `Dummy   -> 4
+
     let choose k1 k2 =
       begin match k1, k2 with
       | (`Poly f1
@@ -161,7 +169,7 @@ module Representant = struct
     if not (isStructOrUnionType fi.ftype || isArrayType fi.ftype || fi.faddrof) then
       Console.fatal
         "%s: not a struct/union, array or addressed field: %s.%s : %a (&: %B)"
-        f fi.fname fi.fcomp.cname pp_typ fi.ftype fi.faddrof
+        f fi.fcomp.cname fi.fname pp_typ fi.ftype fi.faddrof
 
   let dot r fi =
     check_field "Representant.dot" r fi;
@@ -489,7 +497,14 @@ end = functor () -> struct
       loop "self reference" u u
 
   let rec unify =
-    let module T = Typ.Hashtbl in
+    let module T =
+      Hashtbl.Make
+        (struct
+          type t = R.Kind.t * typ
+          let equal (k1, ty1) (k2, ty2) = R.Kind.equal k1 k2 && Typ.equal ty1 ty2
+          let hash (k, ty) = 104729 * R.Kind.hash k + Typ.hash ty
+        end)
+    in
     let module H =
       Hashtbl.Make
         (struct
@@ -505,52 +520,55 @@ end = functor () -> struct
     let olds = H'.create () in
     let loops = T.create 128 in
     let maxd = Options.Region_depth.get () in
-    let reflect2 d h f u2 k u1' =
-      match f u2 k with
-      | `Old, u2' when (try  R.equal
-                               (U.repr u2')
-                               (U.repr @@ H'.find u1' olds)
-                        with Not_found -> false)                    -> ()
-      | `Old, u2' when not H.(mem h (u1', u2') || mem h (u2', u1')) -> H.replace h (u1', u2') ()
-      | `Old, _                                                     -> ()
-      | `New, u2'                                                   ->
-        match H'.find u1' olds with
-        | u2''                                                      -> U.unify u2' u2''
-        | exception Not_found                                       ->
-          if d >= maxd then
-            match T.find loops @@ Ty.normalize (U.repr u1').R.typ with
-            | u2''                                                  -> U.unify u2' u2''
-            | exception Not_found                                   -> H.replace h (u1', u2') ()
-          else                                                         H.replace h (u1', u2') ()
-    in
-    let reflect1 d h f u2 = reflect2 d h (const' f) u2 () in
-    let reflect_all d h u1 =
-      let reflect1 = reflect1 d h and reflect2 f = reflect2 d h f in
-      fun u2 ->
-        H_f.iter (reflect2 arrow u2)             u1 h_arrow;
-        H'.iter  (reflect1 deref u2)             u1 h_deref;
-        H_f.iter (reflect2 dot u2)               u1 h_dot;
-        H'.iter  (reflect1 dot_void u2)          u1 h_dot_void;
-        H_f.iter (reflect2 container u2)         u1 h_container;
-        H_t.iter (reflect2 container_of_void u2) u1 h_container_of_void
-    in
-    fun ?(unify_=true) ?map ?(depth=0) ?(continue=H'.clear olds; T.clear loops) u1 u2 ->
-      let r1 = U.repr u1 and r2 = U.repr u2 in
-      if not (R.equal r1 r2) then
-        let t1, t2 = map_pair Ty.normalize (r1.R.typ, r2.R.typ) in
-        if not (Ty.compatible t1 t2) then
-          Console.fatal
-            "Can't unify regions of different types: %s : %a, %s : %a"
-            r1.R.name pp_typ r1.R.typ r2.R.name pp_typ r2.R.typ;
-        H'.add u1 u2 olds;
-        H'.add u2 u1 olds;
-        let h = H.create 16 in
-        reflect_all depth h u1 u2;
-        reflect_all depth h u2 u1;
-        if unify_ || r1.R.kind = `Global || r2.R.kind = `Global then U.unify u1 u2;
-        T.add loops t1 u1;
-        H.iter (fun (u, u') () -> ignore @@ unify ~unify_ ~depth:(depth + 1) ~continue u u') h;
-        if depth = 0 then may H'.(fun map -> iter_all (add' map) olds) map
+    fun ?(unify_=true) ->
+      let reflect2 d h f u2 k u1' =
+        match f u2 k with
+        | `Old, u2' when (try  R.equal
+                                 (U.repr u2')
+                                 (U.repr @@ H'.find u1' olds)
+                          with Not_found -> false)                    -> ()
+        | `Old, u2' when not H.(mem h (u1', u2') || mem h (u2', u1')) -> H.replace h (u1', u2') ()
+        | `Old, _                                                     -> ()
+        | `New, u2'                                                   ->
+          match H'.find u1' olds with
+          | u2''                                                      -> U.unify u2' u2''
+          | exception Not_found                                       ->
+            let r2' = U.repr u2' in
+            if unify_ && d >= maxd then
+              match T.find loops (r2'.R.kind, Ty.normalize r2'.R.typ) with
+              | u2''                                                  -> U.unify u2' u2''
+              | exception Not_found                                   -> H.replace h (u1', u2') ()
+            else                                                         H.replace h (u1', u2') ()
+      in
+      let reflect1 d h f u2 = reflect2 d h (const' f) u2 () in
+      let reflect_all d h u1 =
+        let reflect1 = reflect1 d h and reflect2 f = reflect2 d h f in
+        fun u2 ->
+          H_f.iter (reflect2 arrow u2)             u1 h_arrow;
+          H'.iter  (reflect1 deref u2)             u1 h_deref;
+          H_f.iter (reflect2 dot u2)               u1 h_dot;
+          H'.iter  (reflect1 dot_void u2)          u1 h_dot_void;
+          H_f.iter (reflect2 container u2)         u1 h_container;
+          H_t.iter (reflect2 container_of_void u2) u1 h_container_of_void
+      in
+      fun ?map ?(depth=0) ?(continue=H'.clear olds; T.clear loops) u1 u2 ->
+        let r1 = U.repr u1 and r2 = U.repr u2 in
+        if not (R.equal r1 r2) then
+          let t1, t2 = map_pair Ty.normalize (r1.R.typ, r2.R.typ) in
+          if not (Ty.compatible t1 t2) then
+            Console.fatal
+              "Can't unify regions of different types: %s : %a, %s : %a"
+              r1.R.name pp_typ r1.R.typ r2.R.name pp_typ r2.R.typ;
+          H'.add u1 u2 olds;
+          H'.add u2 u1 olds;
+          let h = H.create 16 in
+          reflect_all depth h u1 u2;
+          reflect_all depth h u2 u1;
+          if unify_ || r1.R.kind = `Global || r2.R.kind = `Global then U.unify u1 u2;
+          T.add loops (r1.R.kind, t1) u1;
+          T.add loops (r2.R.kind, t2) u2;
+          H.iter (fun (u, u') () -> ignore @@ unify ~unify_ ~depth:(depth + 1) ~continue u u') h;
+          if depth = 0 then may H'.(fun map -> iter_all (add' map) olds) map
 
   let reflect ~map u u' = unify ~unify_:false ~map u u'
 
