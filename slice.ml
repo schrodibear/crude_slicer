@@ -450,8 +450,12 @@ module Make (Analysis : Analysis) = struct
           in
           fun s ->
             match s.skind with
+            | Instr (Set ((Var v, NoOffset as lv), e, _))
+              when isVoidPtrType v.vtype
+                && is_var_sating is_tracking_var e                       -> start_tracking s lv v e;      SkipChildren
             | Instr (Set (lv, e, _))
-              when is_var_sating is_tracking_var e                       -> alloc s lv e;                 SkipChildren
+              when is_var_sating is_tracking_var e
+                && not (isVoidPtrType @@ typeOfLval lv)                  -> alloc s lv e;                 SkipChildren
             | Instr (Set (lv, e, _))                                     -> assign s lv e;                SkipChildren
             | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _))
               when Options.Target_functions.mem vi.vname                 -> reach_target s;               SkipChildren
@@ -630,7 +634,8 @@ module Make (Analysis : Analysis) = struct
           let block b = stmts b.bstmts in
           match s.skind with
           | Instr (Set (lv, e, loc))
-            when is_var_sating is_tracking_var e                        -> stmt @@ alloc ~loc lv
+            when is_var_sating is_tracking_var e
+              && not (isVoidPtrType @@ typeOfLval lv)                   -> stmt @@ alloc ~loc lv
           | Instr (Set (lv, _, _))                                      -> stmt @@ assign lv
           | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _))
             when Options.Target_functions.mem vi.vname                  -> mark (Some vi); SkipChildren
