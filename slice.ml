@@ -87,11 +87,14 @@ module Make (Analysis : Analysis) = struct
                                   pp_lval lv
         in
         match lastOffset off with
-        | Field (fi, NoOffset) -> unless_comp fi.ftype R.(fun () -> w_mem ~fi @@ location @@ of_lval lv)
-        | Field _              -> assert false
-        | Index (_, NoOffset)  -> deref_mem R.(location @@ of_lval lv)
-        | Index _              -> assert false
-        | NoOffset             -> no_offset ()
+        | Field (fi, NoOffset)
+          when fi.faddrof
+             || not fi.fcomp.cstruct -> unless_comp fi.ftype R.(fun () -> w_mem @@ location @@ of_lval lv)
+        | Field (fi, NoOffset)       -> unless_comp fi.ftype R.(fun () -> w_mem ~fi @@ location @@ of_lval lv)
+        | Field _                    -> assert false
+        | Index (_, NoOffset)        -> deref_mem R.(location @@ of_lval lv)
+        | Index _                    -> assert false
+        | NoOffset                   -> no_offset ()
 
     let unwrap (I.E.Some { reads = (module F'); assigns = (module A'); eff }) : (A.t, F.t) I.E.t =
       match F'.W, A'.W with
@@ -475,14 +478,12 @@ module Make (Analysis : Analysis) = struct
             | Instr (Call (lv,
                            { enode = Lval (Var _, NoOffset) },
                            args, _))                                     -> stub s ?lv args;              SkipChildren
-            | Instr (Call (lv, _, args, _))                              -> List.iter
-                                                                              (fun kf ->
-                                                                                 call
-                                                                                   s
-                                                                                   ?lv
-                                                                                   kf)
-                                                                              (Analyze.filter_matching_kfs
-                                                                                 lv args);                SkipChildren
+            | Instr (Call (lv, _, args, _))                              ->
+              let kfs = Analyze.filter_matching_kfs lv args in
+              begin match kfs with
+              | []                                                       -> stub s ?lv args;              SkipChildren
+              | kfs                                                      -> List.iter (call s ?lv) kfs;   SkipChildren
+              end
             | Instr (Asm _ | Skip _ | Code_annot _)                      ->                               SkipChildren
             | Return (e, _)                                              -> return s e;                   SkipChildren
             | Goto _ | AsmGoto _ | Break _ | Continue _                  -> goto s;                       SkipChildren
@@ -653,13 +654,18 @@ module Make (Analysis : Analysis) = struct
                                                                                 (Globals.Functions.get vi))
           | Instr (Call (lv,
                          { enode = Lval (Var _, NoOffset) }, _, _))     -> stmt @@ stub lv
-          | Instr (Call (lv, _, args, _))                               -> at_least_one
-                                                                             (fun kf ->
-                                                                                match call s ?lv kf with
-                                                                                | `Needed ->
-                                                                                  Some (Kernel_function.get_vi kf)
-                                                                                | `Not_yet -> None)
-                                                                             (Analyze.filter_matching_kfs lv args)
+          | Instr (Call (lv, _, args, _))                               ->
+            let kfs = Analyze.filter_matching_kfs lv args in
+            begin match kfs with
+            | []                                                       -> stmt @@ stub lv
+            | kfs                                                      -> at_least_one
+                                                                            (fun kf ->
+                                                                               match call s ?lv kf with
+                                                                               | `Needed ->
+                                                                                 Some (Kernel_function.get_vi kf)
+                                                                               | `Not_yet -> None)
+                                                                             kfs
+            end
           | Instr (Asm _ | Skip _ | Code_annot _)                       -> SkipChildren
           | Return (e, _)                                               -> stmt @@ return e
           | Goto _ | AsmGoto _ | Break _ | Continue _                   -> stmt @@ goto s
