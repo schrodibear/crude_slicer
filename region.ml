@@ -546,24 +546,25 @@ end = functor () -> struct
             997 * R.hash r1 + R.hash r2
         end)
     in
-    let olds = H'.create () in
+    let map' = H'.create () in
     let loops = T.create 128 in
     let maxd = Options.Region_depth.get () in
-    fun ?(unify_=true) ->
+    fun ?(mode=`Unify) ->
+      let map = match mode with `Unify -> map' | `Reflect map -> map in
       let reflect2 d h f u2 k u1' =
         match f u2 k with
         | `Old, u2' when (try  R.equal
                                  (U.repr u2')
-                                 (U.repr @@ H'.find u1' olds)
+                                 (U.repr @@ H'.find u1' map)
                           with Not_found -> false)                    -> ()
         | `Old, u2' when not H.(mem h (u1', u2') || mem h (u2', u1')) -> H.replace h (u1', u2') ()
         | `Old, _                                                     -> ()
         | `New, u2'                                                   ->
-          match H'.find u1' olds with
+          match H'.find u1' map with
           | u2''                                                      -> U.unify u2' u2''
           | exception Not_found                                       ->
             let r2' = U.repr u2' in
-            if unify_ && d >= maxd then
+            if mode = `Unify && d >= maxd then
               match T.find loops (r2'.R.kind, Ty.normalize r2'.R.typ) with
               | u2''                                                  -> U.unify u2' u2''; H.replace h (u1', u2') ()
               | exception Not_found                                   -> H.replace h (u1', u2') ()
@@ -580,34 +581,31 @@ end = functor () -> struct
           H_f.iter (reflect2 container u2)         u1 h_container;
           H_t.iter (reflect2 container_of_void u2) u1 h_container_of_void
       in
-      fun ?map ?(depth=0) ?(continue=H'.clear olds; T.clear loops) u1 u2 ->
+      fun ?(depth=0) ?(continue=H'.clear map'; T.clear loops) u1 u2 ->
         let r1 = U.repr u1 and r2 = U.repr u2 in
-        if unify_     && not (R.equal r1 r2)
-        || not unify_ && not (H'.mem u1 olds)
+        if not (match mode with `Unify -> R.equal r1 r2 | `Reflect _ -> H'.mem u1 map)
         then
           let t1, t2 = map_pair Ty.normalize (r1.R.typ, r2.R.typ) in
           if not (Ty.compatible t1 t2) then
             Console.fatal
               "Can't unify regions of different types: %s : %a, %s : %a"
               r1.R.name pp_typ r1.R.typ r2.R.name pp_typ r2.R.typ;
-          H'.add u1 u2 olds;
-          H'.add u2 u1 olds;
+          H'.add u1 u2 map;
           let h = H.create 16 in
           reflect_all depth h u1 u2;
-          if unify_ || r1.R.kind = `Global || r2.R.kind = `Global then begin
+          if mode = `Unify || r1.R.kind = `Global || r2.R.kind = `Global then begin
+            H'.add u2 u1 map;
             reflect_all depth h u2 u1;
             U.unify u1 u2
           end;
           let k1 = r1.R.kind, t1 and k2 = r2.R.kind, t2 in
           T.add loops k1 u1;
           T.add loops k2 u2;
-          H.iter (fun (u, u') () -> unify ~unify_ ~depth:(depth + 1) ~continue u u') h;
+          H.iter (fun (u, u') () -> unify ~mode ~depth:(depth + 1) ~continue u u') h;
           T.remove loops k1;
-          T.remove loops k2;
-          if depth = 0 then
-            may (fun map -> H'.iter_all (fun u u' -> if (U.repr u).R.kind <> `Dummy then H'.add u u' map) olds) map
+          T.remove loops k2
 
-  let reflect ~map u ~on:u' = unify ~unify_:false ~map u u'
+  let reflect ~map u ~on:u' = unify ~mode:(`Reflect map) u u'
 
   let unify u1 u2 = unify u1 u2
 
@@ -627,8 +625,8 @@ end = functor () -> struct
            reflect ~map:map' u ~on:u';
            u')
         by |>
-      tap (fun _ -> H'.(iter_all (add' map) map')) |>
-      List.iter2 unify us
+      List.iter2 unify us;
+      H'.(iter_all (add' map) map')
 
   let arrow = snd %% arrow
   let deref = snd % deref
