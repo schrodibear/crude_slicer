@@ -19,73 +19,92 @@ open Extlib
 open Format
 open! Common
 
-let get_addressed_kfs =
-  let module H = Kernel_function.Hashtbl in
+let memo f =
   let cache = ref None in
   fun () ->
-    let fill () =
-      let o =
-        object(self)
-          val mutable result = H.create 16
-          method private add kf = H.replace result kf ()
-          method get = H.fold (const' List.cons) result []
-
-          inherit frama_c_inplace
-          method! vinst =
-            let avoid_direct_call lv args =
-              may (ignore % visitFramacLval (self :> frama_c_visitor)) lv;
-              List.iter (ignore % visitFramacExpr (self :> frama_c_visitor)) args;
-              SkipChildren
-            in
-            function[@warning "-4"]
-            | Call (lv, { enode = Lval (Var vi, NoOffset); _ }, args, _)
-              when Kf.mem vi                                             -> avoid_direct_call lv args
-            | Call _ | Set _ | Asm _ | Skip _ | Code_annot _             -> DoChildren
-          method! vvrbl vi =
-            begin match Globals.Functions.get vi with
-            | kf                  -> self#add kf
-            | exception Not_found -> ()
-            end;
-            SkipChildren
-        end
-      in
-      Visitor.visitFramacFileSameGlobals (o :> frama_c_visitor) @@ Ast.get ();
-      o#get
-    in
     match !cache with
     | None ->
-      let r = fill () in
+      let r = f () in
       cache := Some r;
       r
     | Some r -> r
 
-let filter_matching_kfs lvo params =
-  let ltyp = may_map typeOfLval ~dft:voidType lvo in
-  let open Kernel_function in
+let get_addressed_kfs =
+  let module H = Kernel_function.Hashtbl in
+  memo @@
+  fun () ->
+  let o =
+    object(self)
+      val mutable result = H.create 16
+      method private add kf = H.replace result kf ()
+      method get = H.fold (const' List.cons) result []
+
+      inherit frama_c_inplace
+      method! vinst =
+        let avoid_direct_call lv args =
+          may (ignore % visitFramacLval (self :> frama_c_visitor)) lv;
+          List.iter (ignore % visitFramacExpr (self :> frama_c_visitor)) args;
+          SkipChildren
+        in
+        function
+          [@warning "-4"]
+        | Call (lv, { enode = Lval (Var vi, NoOffset); _ }, args, _)
+          when Kf.mem vi                                             -> avoid_direct_call lv args
+        | Call _ | Set _ | Asm _ | Skip _ | Code_annot _             -> DoChildren
+      method! vvrbl vi =
+        begin match Globals.Functions.get vi with
+        | kf                  -> self#add kf
+        | exception Not_found -> ()
+        end;
+        SkipChildren
+    end
+  in
+  Visitor.visitFramacFileSameGlobals (o :> frama_c_visitor) @@ Ast.get ();
+  o#get
+
+let callee_approx e =
   let open List in
   get_addressed_kfs () |>
-  filter
-    (fun kf ->
-       let rt, tformals = get_return_type kf, map (fun vi -> vi.vtype) @@ get_formals kf in
-       if is_definition kf && length tformals = length params
-       then for_all2 (not %% need_cast) (rt :: tformals) (ltyp :: map typeOf params)
-       else false)
+  let ty = typeOf e in
+  filter (fun kf -> not @@ need_cast (Kernel_function.get_vi kf).vtype ty)
 
-let condensate () =
+module Cg = Graph.Imperative.Digraph.Concrete (Kernel_function)
+
+let get_cg =
+  memo @@
+  fun () ->
+  let g = Cg.create () in
+  visitFramacFile
+    (object(self)
+      inherit frama_c_inplace
+      method! vinst i =
+        let kf = the self#current_kf in
+        begin match[@ warning "-4"] i with
+        | Call (_, { enode = Lval (Var vi, NoOffset); _ }, _, _)
+          when Kf.mem vi                                            -> Cg.add_edge g kf (Globals.Functions.get vi)
+        | Call (_, e, _, _)                                         -> List.iter (Cg.add_edge g kf) (callee_approx e)
+        | _                                                         -> ()
+        end;
+        SkipChildren
+    end)
+  (Ast.get ());
+  g
+
+let condensate =
+  memo @@
+  fun () ->
   Console.debug "Started callgraph condensation...";
-  let module Cg = Callgraph.Cg in
   Console.debug ~level:2 "Computing callgraph...";
-  let cg = Cg.get () in
+  let cg = get_cg () in
   Console.debug ~level:2 "Syntactic slicing...";
   let module H = Kernel_function.Hashtbl in
-  let module Traverse = Graph.Traverse.Bfs (Cg.G) in
+  let module Traverse = Graph.Traverse.Bfs (Cg) in
   let h = H.create 512 in
   let main = Globals.Functions.find_by_name @@ Kernel.MainFunction.get () in
   Traverse.iter_component (fun v -> H.replace h v ()) cg main;
-  let module G = Graph.Imperative.Digraph.Concrete (Kernel_function) in
-  let module Components = Graph.Components.Make (G) in
-  let g = G.create ~size:(H.length h) () in
-  Cg.G.iter_edges (fun f t -> if H.mem h f && H.mem h t then G.add_edge g f t) cg;
+  let module Components = Graph.Components.Make (Cg) in
+  let g = Cg.create ~size:(H.length h) () in
+  Cg.iter_edges (fun f t -> if H.mem h f && H.mem h t then Cg.add_edge g f t) cg;
   Console.debug ~level:2 "Sccs...";
   let r = Components.scc_list g in
   Console.debug ~level:3 "Finished condensation...";
