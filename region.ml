@@ -651,6 +651,7 @@ module type Analysis = sig
 
   val take : [< (fieldinfo, typ) offs | `Container of fieldinfo | `Dot_void | `Arrow of fieldinfo ] list -> U.t -> U.t
   val inv : [< ('a, 'b) offs ] list -> [> `Container of 'a | `Dot_void ] list
+  val retvar : varinfo -> varinfo
   val of_var : ?f:string -> varinfo -> [ `Location of _ | `Value of _  | `None ] maybe_region
   val of_string : [ `S of string | `WS of int64 list ] -> [ `Location of _ ] maybe_region
   val of_lval : ?f:string -> lval -> [ `Location of _ | `Value of _  | `None ] maybe_region
@@ -665,7 +666,7 @@ module type Analysis = sig
     val iter : (U.t -> unit) -> U.t -> t -> unit
   end
   val map : stmt -> H_call.t
-  val arg_regions : ?f:string -> kernel_function -> lval option -> exp list -> U.t list
+  val arg_regions : stmt -> ?f:string -> kernel_function -> lval option -> exp list -> U.t list
   val param_regions : kernel_function -> U.t list
   val relevant_region : ?f:string -> U.t -> bool
 end
@@ -899,26 +900,23 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     of_string x
   and fresh =
     let counter = ref ~-1 in
-    fun ?(dummy=false) ?f ty ->
+    fun ?f ty ->
       incr counter;
       let name = "fresh#" ^ string_of_int !counter in
       let ty = Ty.deref_once ty in
       U.of_repr @@
-      if dummy then
-        R.dummy name ty
-      else
-        match f with
-        | Some f -> R.local f name ty
-        | None   -> R.global name ty
-  and value : 'a. ?dummy:_ -> ?f:_ -> _ -> ([< `Location of _ | `Value of _ | `None ] as 'a) -> _ = fun ?dummy ?f ty ->
+      match f with
+      | Some f -> R.local f name ty
+      | None   -> R.global name ty
+  and value : 'a. ?f:_ -> _ -> ([< `Location of _ | `Value of _ | `None ] as 'a) -> _ = fun ?f ty ->
     function
     | `Location (_, get) ->
       begin match get () with
       | `Value u         -> u
-      | `None            -> fresh ?dummy ?f ty
+      | `None            -> fresh ?f ty
       end
     | `Value u           -> u
-    | `None              -> fresh ?dummy ?f ty
+    | `None              -> fresh ?f ty
   and location =
     function
     | `Location (u, _)     -> u
@@ -1091,31 +1089,38 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
            | `None                     -> [])
         (retvar @ params)
 
-  let arg_regions ?f kf lvo exprs =
-    let retr =
-      let rtyp = Ty.normalize @@ Kernel_function.get_return_type kf in
-      if isVoidType rtyp
-      then []
-      else
-        match lvo, rtyp with
-        | None,    TPtr _
-        | None,    TComp _ -> [value ~dummy:true ?f rtyp `None]
-        | None,    _       -> []
-        | Some lv, TPtr _  -> [value ~dummy:true ?f rtyp @@ of_lval ?f lv]
-        | Some lv, TComp _ -> [location @@ of_lval ?f lv]
-        | Some _,  _       -> []
-    in
-    retr @
-    List.concat_map
-      (fun e ->
-         match of_expr ?f e with
-         | `Value u                    -> [u]
-         | `None                       ->
-           match unrollType (typeOf e), e.enode with
-           | TComp _, Lval lv -> [location @@ of_lval ?f lv]
-           | TComp _, _       -> Console.fatal "Unexpected non-lvalue struct expression `%a'" pp_exp e
-           | _                -> [])
-      exprs
+  let arg_regions  =
+    let h_dummies = H_stmt.create 32 in
+    fun s ?f kf lvo exprs ->
+      let retr =
+        let rtyp = Ty.normalize @@ Kernel_function.get_return_type kf in
+        if isVoidType rtyp
+        then []
+        else
+          let memo =
+            function
+            | `None -> H_stmt.memo h_dummies s @@ fun _ -> value ?f rtyp `None
+            | r     -> value ?f rtyp r
+          in
+          match lvo, rtyp with
+          | None,    TPtr _
+          | None,    TComp _ -> [memo `None]
+          | None,    _       -> []
+          | Some lv, TPtr _  -> [memo @@ of_lval ?f lv]
+          | Some lv, TComp _ -> [location @@ of_lval ?f lv]
+          | Some _,  _       -> []
+      in
+      retr @
+      List.concat_map
+        (fun e ->
+           match of_expr ?f e with
+           | `Value u                    -> [u]
+           | `None                       ->
+             match unrollType (typeOf e), e.enode with
+             | TComp _, Lval lv -> [location @@ of_lval ?f lv]
+             | TComp _, _       -> Console.fatal "Unexpected non-lvalue struct expression `%a'" pp_exp e
+             | _                -> [])
+        exprs
 
   let unify_exprs =
     let unify_comps ?f ci lv1 lv2 =
@@ -1197,7 +1202,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
 
   let replay_on_call ~stmt ?f kf lvo args =
     let param_regions, arg_regions =
-      H_k.memo h_params kf param_regions, arg_regions ?f kf lvo args
+      H_k.memo h_params kf param_regions, arg_regions stmt ?f kf lvo args
     in
     let param_regions, arg_regions =
       let open! List in

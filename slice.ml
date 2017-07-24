@@ -110,7 +110,7 @@ module Make (Analysis : Analysis) = struct
     let init_deps info () =
       let assigns = I.E.assigns @@ extract info in
       let open List in
-      let rv, args = Kernel_function.(get_vi C.f, get_formals C.f) in
+      let rv, args = Kernel_function.(R.retvar @@ get_vi C.f, get_formals C.f) in
       iter
         (fun vi ->
            match R.of_var vi with
@@ -122,7 +122,7 @@ module Make (Analysis : Analysis) = struct
            | `Location _ | `Value _ | `None          -> ())
         args;
       let param_regions, arg_regions =
-        (R.param_regions C.f, R.arg_regions C.f (Some (var rv)) (map evar args)) |>
+        (R.param_regions C.f, R.arg_regions dummyStmt C.f (Some (var rv)) (map evar args)) |>
         if isStructOrUnionType @@ Ty.rtyp_if_fun rv.vtype
         then
           function
@@ -482,8 +482,8 @@ module Make (Analysis : Analysis) = struct
             | Instr (Call (lv,
                            { enode = Lval (Var _, NoOffset) },
                            args, _))                                     -> stub s ?lv args;              SkipChildren
-            | Instr (Call (lv, _, args, _))                              ->
-              let kfs = Analyze.filter_matching_kfs lv args in
+            | Instr (Call (lv, e, args, _))                              ->
+              let kfs = Analyze.callee_approx e in
               begin match kfs with
               | []                                                       -> stub s ?lv args;              SkipChildren
               | kfs                                                      -> List.iter (call s ?lv) kfs;   SkipChildren
@@ -659,8 +659,8 @@ module Make (Analysis : Analysis) = struct
                                                                                 (Globals.Functions.get vi))
           | Instr (Call (lv,
                          { enode = Lval (Var _, NoOffset) }, _, _))     -> stmt @@ stub lv
-          | Instr (Call (lv, _, args, _))                               ->
-            let kfs = Analyze.filter_matching_kfs lv args in
+          | Instr (Call (lv, e, _, _))                                  ->
+            let kfs = Analyze.callee_approx e in
             begin match kfs with
             | []                                                       -> stmt @@ stub lv
             | kfs                                                      -> at_least_one
