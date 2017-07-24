@@ -286,6 +286,7 @@ module type Hashmap = sig
   val create : unit -> t
   val add : U.t -> U.t -> t -> unit
   val add' : t -> U.t -> U.t -> unit
+  val mem : U.t -> t -> bool
   val find : U.t -> t -> U.t
   val find_or_call : create:(R.t -> R.t) -> call:(U.t -> U.t -> unit) -> t -> U.t -> [> `Old | `New] * U.t
   val iter : (U.t -> unit) -> U.t -> t -> unit
@@ -303,6 +304,7 @@ module Make_hashmap (R : Representant) (U : Unifiable with type repr = R.t) :
   let create () = H.create 4096
   let add u v h = H.replace h (U.repr u) v
   let add' h u v = add u v h
+  let mem u h = H.mem h (U.repr u)
   let find u h = H.find h (U.repr u)
   let find_or_call ~create ~call h u =
     try
@@ -390,7 +392,7 @@ module Separation : functor () -> sig
   val containers : (fieldinfo -> U.t -> unit) -> U.t -> unit
   val containers_of_void : (typ -> U.t -> unit) -> U.t -> unit
   val unify : U.t -> U.t -> unit
-  val reflect : map:H'.t -> U.t -> U.t -> unit
+  val reflect : map:H'.t -> U.t -> on:U.t -> unit
   val constrain : map:H'.t -> by:U.t list -> U.t list -> unit
 
   val switch : string option -> unit
@@ -559,7 +561,7 @@ end = functor () -> struct
             let r2' = U.repr u2' in
             if unify_ && d >= maxd then
               match T.find loops (r2'.R.kind, Ty.normalize r2'.R.typ) with
-              | u2''                                                  -> U.unify u2' u2''
+              | u2''                                                  -> U.unify u2' u2''; H.replace h (u1', u2') ()
               | exception Not_found                                   -> H.replace h (u1', u2') ()
             else                                                         H.replace h (u1', u2') ()
       in
@@ -576,7 +578,9 @@ end = functor () -> struct
       in
       fun ?map ?(depth=0) ?(continue=H'.clear olds; T.clear loops) u1 u2 ->
         let r1 = U.repr u1 and r2 = U.repr u2 in
-        if not (R.equal r1 r2) then
+        if unify_     && not (R.equal r1 r2)
+        || not unify_ && not (H'.mem u1 olds)
+        then
           let t1, t2 = map_pair Ty.normalize (r1.R.typ, r2.R.typ) in
           if not (Ty.compatible t1 t2) then
             Console.fatal
@@ -586,15 +590,20 @@ end = functor () -> struct
           H'.add u2 u1 olds;
           let h = H.create 16 in
           reflect_all depth h u1 u2;
-          reflect_all depth h u2 u1;
-          if unify_ || r1.R.kind = `Global || r2.R.kind = `Global then U.unify u1 u2;
-          T.add loops (r1.R.kind, t1) u1;
-          T.add loops (r2.R.kind, t2) u2;
+          if unify_ || r1.R.kind = `Global || r2.R.kind = `Global then begin
+            reflect_all depth h u2 u1;
+            U.unify u1 u2
+          end;
+          let k1 = r1.R.kind, t1 and k2 = r2.R.kind, t2 in
+          T.add loops k1 u1;
+          T.add loops k2 u2;
           H.iter (fun (u, u') () -> unify ~unify_ ~depth:(depth + 1) ~continue u u') h;
+          T.remove loops k1;
+          T.remove loops k2;
           if depth = 0 then
             may (fun map -> H'.iter_all (fun u u' -> if (U.repr u).R.kind <> `Dummy then H'.add u u' map) olds) map
 
-  let reflect ~map u u' = unify ~unify_:false ~map u u'
+  let reflect ~map u ~on:u' = unify ~unify_:false ~map u u'
 
   let unify u1 u2 = unify u1 u2
 
@@ -611,7 +620,7 @@ end = functor () -> struct
                then                           u
                else                           U.of_repr @@ R.template @@ U.repr u
            in
-           reflect ~map:map' u u';
+           reflect ~map:map' u ~on:u';
            u')
         by |>
       tap (fun _ -> H'.(iter_all (add' map) map')) |>
@@ -1058,7 +1067,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
           memo h_var vi (fun vi -> U.of_repr @@ R.poly f vi.vname @@ Ty.normalize ty)
         in
         let map = H_k.memo maps kf (fun _ -> H'.create ()) in
-        reflect ~map u u';
+        reflect ~map u ~on:u';
         match unrollType ty with
         | TComp (ci, _, _) -> (let take_arrows = take_arrows ci in
                                let rs = take_arrows u' in
@@ -1249,9 +1258,9 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
                 args, _))
           when Kf.mem vi                                 -> replay_on_call ~stmt ~f (Globals.Functions.get vi)
                                                               lvo args
-        | Instr (Call (lvo, _, args, _))                 -> List.iter
+        | Instr (Call (lvo, e, args, _))                 -> List.iter
                                                               (fun kf -> replay_on_call ~stmt ~f kf lvo args)
-                                                              (Analyze.filter_matching_kfs lvo args)
+                                                              (Analyze.callee_approx e)
         | Return (Some e, loc)                           -> unify_exprs ~f
                                                               (expr_of_lval ~loc @@ var @@ retvar @@ fundec.svar) e
         | _                                              -> ()
