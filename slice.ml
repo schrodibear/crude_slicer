@@ -146,7 +146,7 @@ module Make (Analysis : Analysis) = struct
       in
       iter add_all @@ combine arg_tys @@ combine arg_regions param_regions
 
-    let complement_assigns assigns =
+    let complement assigns depends =
       let open List in
       iter
         (fun (n, rs) ->
@@ -163,11 +163,16 @@ module Make (Analysis : Analysis) = struct
                               let r'' = U.repr u'' in
                               if not (R.equal r' r'')
                                  && List.for_all isArithmeticOrPointerType [R.typ r'; R.typ r'']
-                                 && Ty.(snd @@ deref ty' = snd @@ deref ty'') then
+                                 && Ty.(snd @@ deref ty' = snd @@ deref ty'') then begin
                                 if A.mem (w_mem u') assigns || A.mem (w_mem u'') assigns then begin
                                   A.add_some (w_mem u')  (r_mem u'') assigns;
                                   A.add_some (w_mem u'') (r_mem u')  assigns
-                                end)
+                                end;
+                                if F.mem_some (r_mem u') depends || F.mem_some (r_mem u'') depends then begin
+                                  F.add_some (r_mem u') depends;
+                                  F.add_some (r_mem u'') depends;
+                                end
+                              end)
                            u)
                       u)
                rs)
@@ -322,7 +327,7 @@ module Make (Analysis : Analysis) = struct
       let set_is_target () = I.E.set_is_target eff
 
       let add_transitive_closure () = add_transitive_closure assigns
-      let complement_assigns () = complement_assigns assigns
+      let complement () = complement assigns depends
       let close_depends () = close_depends assigns depends (I.E.has_result_dep eff)
 
       let is_tracking_var = is_tracking_var eff
@@ -432,8 +437,8 @@ module Make (Analysis : Analysis) = struct
         method start = ()
         method finish =
           add_transitive_closure ();
-          complement_assigns ();
-          close_depends ()
+          close_depends ();
+          complement ()
 
         inherit frama_c_inplace
 
@@ -505,6 +510,7 @@ module Make (Analysis : Analysis) = struct
       let assigns = I.E.assigns eff
       let depends = I.E.depends eff
 
+      let complement () = complement assigns depends
       let close_depends () = close_depends assigns depends (I.E.has_result_dep eff)
 
       let is_tracking_var = is_tracking_var eff
@@ -601,7 +607,9 @@ module Make (Analysis : Analysis) = struct
       let module Mark = Mark (struct let decide, info, eff = decide, info, eff end) in
       let open Mark in
       object
-        method start = close_depends ()
+        method start =
+          close_depends ();
+          complement ()
         method finish = ()
 
         inherit frama_c_inplace
