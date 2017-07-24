@@ -219,14 +219,14 @@ end
 module type Representant = sig
   module Kind : sig type t end
   type t
-  val equal : t -> t -> bool
-  val hash : t -> int
   val choose : t -> t -> [> `First | `Second | `Any ]
 
   val name : t -> string
   val report : t -> is_repr_of:t -> unit
 
   val flag : Flag.t
+
+  include Hashed_printable with type t := t
 end
 
 module type Unifiable = sig
@@ -235,6 +235,8 @@ module type Unifiable = sig
   val of_repr : repr -> t
   val unify : t -> t -> unit
   val repr : t -> repr
+
+  val pp : Format.formatter -> t -> unit
 end
 
 module Make_unifiable (R : Representant) () : Unifiable with type repr = R.t = struct
@@ -277,6 +279,8 @@ module Make_unifiable (R : Representant) () : Unifiable with type repr = R.t = s
       match choice with
       | `First  -> set r1 ~as_repr_of:r2
       | `Second -> set r2 ~as_repr_of:r1
+
+  let pp fmt = Format.fprintf fmt "%a" R.pp % repr
 end
 
 module type Hashmap = sig
