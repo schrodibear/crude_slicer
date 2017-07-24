@@ -55,7 +55,9 @@ struct outer *get_outer___(void **b)
   return ((struct outer *)*((int **)b) + 0xFFFFFFFFFFFFFFD8UL);
 }
 
-char s[] = "UFFFFFF";
+char ss[] = "UFFFFFF";
+char *s = ss;
+char s1[] = "sdfsdfsdfs";
 
 int test(int p)
 {
