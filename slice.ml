@@ -631,11 +631,8 @@ module Make (Analysis : Analysis) = struct
             end;
             SkipChildren
           in
-          let at_least_one f l =
-            begin match List.find_map f l with
-            | Some _ as vi -> mark vi
-            | None         -> ()
-            end;
+          let try_all f l =
+            List.(iter (mark % some) @@ concat_map f l);
             SkipChildren
           in
           let stmts stmts = if List.exists (fun s -> I.E.has_stmt_req s eff) stmts then I.E.add_stmt_req s eff in
@@ -671,12 +668,11 @@ module Make (Analysis : Analysis) = struct
             let kfs = Analyze.callee_approx e in
             begin match kfs with
             | []                                                       -> stmt @@ stub lv
-            | kfs                                                      -> at_least_one
+            | kfs                                                      -> try_all
                                                                             (fun kf ->
                                                                                match call s ?lv kf with
-                                                                               | `Needed ->
-                                                                                 Some (Kernel_function.get_vi kf)
-                                                                               | `Not_yet -> None)
+                                                                               | `Needed  -> [Kernel_function.get_vi kf]
+                                                                               | `Not_yet -> [])
                                                                              kfs
             end
           | Instr (Asm _ | Skip _ | Code_annot _)                       -> SkipChildren
