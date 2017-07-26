@@ -734,10 +734,12 @@ module Make (Analysis : Analysis) = struct
       Console.debug "Started init (init_deps for every function)...";
       Globals.Functions.iter_on_fundecs (fun d -> H.find initializers d ())
 
+    let is_named = function Label _ -> true | _ -> false
+
     let collect_labels s =
       let rec loop acc s =
         let open List in
-        fold_right Label.Set.add (filter (function Label _ -> true | _ -> false) s.labels) acc |>
+        fold_right Label.Set.add (filter is_named s.labels) acc |>
         fold_left' loop @@
         match s.skind with
         | If (_, b1, b2, _)        ->  b1.bstmts @ b2.bstmts
@@ -748,6 +750,19 @@ module Make (Analysis : Analysis) = struct
         | _                        ->  []
       in
       Label.Set.(elements @@ loop (of_list s.labels) s)
+
+    let shrink_block b =
+      let rec loop acc ss =
+        match ss, acc with
+        | [],                                               acc -> List.rev acc
+        | { skind = Instr (Skip _); labels = []; _ } :: ss, acc -> loop acc ss
+
+        | s :: ss,
+          ({ skind = Instr (Skip _); _ } as s') :: acc          ->(s.labels <- s'.labels @ s.labels;
+                                                                   loop (s :: acc) ss)
+        | s :: ss,                                          acc -> loop (s :: acc) ss
+      in
+      b.bstmts <- loop [] b.bstmts
 
     class sweeper () =
       let required_bodies, main_filter =
@@ -786,6 +801,8 @@ module Make (Analysis : Analysis) = struct
             else                   ChangeTo { s with skind = Instr (Skip (Stmt.loc s)); labels = collect_labels s }
           else                     DoChildren
 
+        method! vblock _ = DoChildrenPost (tap shrink_block)
+
         method! vglob_aux g =
           match g, main_filter with
           | GFun (f, _), _ when not (H.mem required_bodies f) ->                                   ChangeTo []
@@ -793,9 +810,39 @@ module Make (Analysis : Analysis) = struct
           | _                                                 ->                                   DoChildren
       end
 
+    module H_lab = Label.Hashtbl
+
+    class cfg_fixupper () =
+      let h_labs = H_lab.create 1024 in
+      let update sr = sr := H_lab.find h_labs List.(hd @@ filter is_named !sr.labels) in
+      let vis = object
+        inherit frama_c_inplace
+        method! vstmt s =
+          begin match s.skind with
+          | Goto (sr, _)                    -> update sr
+          | AsmGoto (_, _, _, _, _, srs, _) -> List.iter update srs
+          | _                               -> ()
+          end;
+          DoChildren
+      end in
+      object
+        inherit frama_c_inplace
+
+        method! vfunc _ =
+          H_lab.clear h_labs;
+          DoChildrenPost (tap @@ ignore % visitFramacFunction vis)
+
+        method! vstmt s =
+          List.iter (fun l -> H_lab.replace h_labs l s) s.labels;
+          DoChildren
+      end
+
     let sweep () =
       let file = Ast.get () in
       visitFramacFile (new sweeper ()) file;
+      visitFramacFile (new cfg_fixupper ()) file;
+      Cfg.clearFileCFG ~clear_id:false file;
+      Cfg.computeFileCFG file;
       Rmtmps.removeUnusedTemps
         ~isRoot:(function GFun (f, _) when f.svar.vname = Kernel.MainFunction.get () -> true | _ -> false)
         file
