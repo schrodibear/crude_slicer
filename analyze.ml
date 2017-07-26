@@ -222,7 +222,6 @@ module Goto_handling = struct
       let r = H.create 64 in
       let separators = H.create 8 in
       let cache = H.create 64 in
-      let independant = H.create 64 in
       fun s s' ->
         let all_paths = all_paths ~s' s in
         H.clear separators;
@@ -237,12 +236,11 @@ module Goto_handling = struct
                H.filter_map_inplace (fun s () -> if H.mem cache s then Some () else None) separators)
             ps
         end;
-        H.remove separators s;
-        H.iter (const' @@ add_closure independant) separators;
         H.clear r;
+        H.iter (H.add r) separators;
         add_closure r s;
         add_closure r s';
-        H.iter (const' @@ H.remove r) independant;
+        H.iter (const' @@ H.remove r) separators;
         H.fold (const' cons) r []
 
     class goto_visitor ~goto_vars ~stmt_vars kf =
