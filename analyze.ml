@@ -168,10 +168,11 @@ let cache_offsets =
       (object
         inherit frama_c_inplace
         method! vglob_aux =
-          function[@warning "-4"]
-                | GCompTag (ci, _)
-                | GCompTagDecl (ci, _) -> cache_offsets ~offs_of_key ci; SkipChildren
-                | _                    ->                                SkipChildren
+          function
+            [@warning "-4"]
+          | GCompTag (ci, _)
+          | GCompTagDecl (ci, _) -> cache_offsets ~offs_of_key ci; SkipChildren
+          | _                    ->                                SkipChildren
       end)
       (Ast.get ());
     Console.debug ~level:3 "Finished cache_offsets.@\n@[<2>Result is:@\n%a@]"
