@@ -365,7 +365,7 @@ module Make (Analysis : Analysis) = struct
           (fun e ->
              add_from_rval e from;
              match unrollType @@ typeOf e with
-             | TComp _ -> comp_assign (var @@ Kernel_function.get_vi C.f) e from
+             | TComp _ -> comp_assign (var @@ R.retvar @@ Kernel_function.get_vi C.f) e from
              | _       -> A.import_values `Result from assigns)
           eo
       let reach_target s =
