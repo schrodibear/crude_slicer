@@ -1069,10 +1069,10 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
         let map = H_k.memo maps kf (fun _ -> H'.create ()) in
         reflect ~map u ~on:u';
         match unrollType ty with
-        | TComp (ci, _, _) -> (let take_arrows = take_arrows ci in
-                               let rs = take_arrows u' in
-                               List.iter2 unify (take_arrows u) rs;
-                               u')
+        | TComp (ci, _, _) ->(let take_arrows = take_arrows ci in
+                              let rs = take_arrows u' in
+                              List.iter2 unify (take_arrows u) rs;
+                              u')
         | ty               -> Console.fatal "Region.Analysis.comp_regions: not a composite param, but %a" pp_typ ty
       in
       List.concat_map
