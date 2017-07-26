@@ -296,6 +296,41 @@ end
 
 include Goto_handling.M
 
+let hack_cfg =
+  let has_jumps s =
+    let vis = object
+      inherit frama_c_inplace
+
+      method! vstmt s =
+        begin match[@warning "-4"] s.skind with
+        | AsmGoto _
+        | Goto _
+        | Break _
+        | Continue _  -> raise Exit
+        | _           -> ()
+        end;
+        DoChildren
+    end in
+    try ignore @@ visitFramacStmt vis s; false
+    with Exit ->                         true
+  in
+  ignore %
+  visitFramacFunction
+    (object
+      inherit frama_c_inplace
+
+      method! vstmt s =
+        match[@warning "-4"] s.skind with
+        | If (_, ({ bstmts = s1 :: _; _ } as b1), b2, _) when not (has_jumps s) ->
+          (last b1.bstmts).succs <-
+            (match b2.bstmts with
+             | s :: _ -> [s]
+             | []     -> List.filter (not % Stmt.equal s1) s.succs);
+          s.succs <- [s1];
+          DoChildren
+        | _ -> DoChildren
+    end)
+
 let fill_goto_tables ~goto_vars ~stmt_vars =
   let open Info in
   Console.debug "Started fill_goto_tables...";
@@ -307,8 +342,10 @@ let fill_goto_tables ~goto_vars ~stmt_vars =
        | exception Kernel_function.No_Definition -> ()
        | fundec                                  ->
          Console.debug ~level:2 "Filling goto tables in function %s..." fundec.svar.vname;
-         (* Cfg.cfgFun fundec; *) (* Already computed by default in current Frama-C *)
-         ignore @@ visitFramacFunction (new goto_visitor ~goto_vars ~stmt_vars kf) fundec);
+         hack_cfg fundec;
+         ignore @@ visitFramacFunction (new goto_visitor ~goto_vars ~stmt_vars kf) fundec;
+         Cfg.clearCFGinfo ~clear_id:false fundec;
+         Cfg.cfgFun fundec);
   Console.debug ~level:3 "Finished filling goto tables. \
                           Result is:@\n@[<2>Goto vars:@\n%a@]@\n@[<2>Stmt vars:@\n%a@]"
     (pp_iter2 ~sep:";@\n" ~between:"@ ->@ " H_stmt.iter
