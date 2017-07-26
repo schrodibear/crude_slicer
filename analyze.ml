@@ -255,6 +255,7 @@ module Goto_handling = struct
             ignore @@ visitFramacStmt (self :> frama_c_visitor) s
           in
           let rec loop =
+            let next = next in
             function
             | []                  -> ()
             | [s]                 -> visit s next
