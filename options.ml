@@ -48,6 +48,16 @@ module Alloc_functions =
                                      "ldv_malloc"; "ldv_zalloc"; "ldv_init_zalloc"]
     end)
 
+module Required_bodies =
+  Filled_string_set
+    (struct
+      let option_name = "-required_bodies"
+      let help = "Special functions (allocation, error, assume...), which nontheless require implementations"
+      let arg_name = ""
+      let default =
+        Datatype.String.Set.of_list ["ldv_error"; "ldv_malloc"; "ldv_zalloc"; "ldv_init_zalloc"]
+    end)
+
 module Assume_functions =
   Filled_string_set
     (struct

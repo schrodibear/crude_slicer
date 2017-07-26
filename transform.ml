@@ -82,11 +82,25 @@ module Make (Analysis : Analysis) = struct
             not (need_cast ty ty')              -> ChangeDoChildrenPost (mkBinOp ~loc op e1 e2, id)
         | _                                     -> DoChildren
 
-    method! vinst =
+    method! vstmt s =
+      match s.skind with
+      | Instr (Call (Some lv,
+                     { enode =
+                         Lval (Var { vname; _ }, NoOffset); _ },
+                     [e; _], loc))
+        when Str.string_match builtin_expect vname 0             -> s.skind <- Instr (Set (lv, e, loc)); DoChildren
+      | _                                                        ->                                      DoChildren
+
+    method! vglob_aux =
       function
-      | Call (Some lv, { enode = Lval (Var { vname; _ }, NoOffset); _ }, [e; _], loc)
-        when Str.string_match builtin_expect vname 0                                  -> ChangeTo [Set (lv, e, loc)]
-      | _                                                                             -> DoChildren
+      | GFun (f, _)
+        when Options.Required_bodies.mem f.svar.vname         -> DoChildren
+      | GFun ({ svar = { vname; _ } as svar; sspec; _ }, loc)
+        when Options.(Alloc_functions.mem  vname ||
+                      Assume_functions.mem vname ||
+                      Target_functions.mem vname)             -> ChangeTo [GFunDecl (sspec, svar, loc)]
+      | _                                                     -> DoChildren
+
   end
 
   let unique_param_names =
