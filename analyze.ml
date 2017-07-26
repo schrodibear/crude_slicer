@@ -74,6 +74,8 @@ let get_cg =
   memo @@
   fun () ->
   let g = Cg.create () in
+  let main = Globals.Functions.find_by_name @@ Kernel.MainFunction.get () in
+  Cg.add_vertex g main;
   visitFramacFile
     (object(self)
       inherit frama_c_inplace
@@ -88,19 +90,18 @@ let get_cg =
         SkipChildren
     end)
   (Ast.get ());
-  g
+  g, main
 
 let condensate =
   memo @@
   fun () ->
   Console.debug "Started callgraph condensation...";
   Console.debug ~level:2 "Computing callgraph...";
-  let cg = get_cg () in
+  let cg, main = get_cg () in
   Console.debug ~level:2 "Syntactic slicing...";
   let module H = Kernel_function.Hashtbl in
   let module Traverse = Graph.Traverse.Bfs (Cg) in
   let h = H.create 512 in
-  let main = Globals.Functions.find_by_name @@ Kernel.MainFunction.get () in
   Traverse.iter_component (fun v -> H.replace h v ()) cg main;
   let module Components = Graph.Components.Make (Cg) in
   let g = Cg.create ~size:(H.length h) () in
