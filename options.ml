@@ -71,9 +71,20 @@ module Region_depth =
   Int
     (struct
       let option_name = "-region_depth"
-      let help = "Specify how many regions of the same type can should be retained if a region cycle is detected"
+      let help = "Specify how many regions of the same kind and type should be retained on a region graph path \
+                  before producing a loop during instantiation of polymorphic regions"
       let arg_name = ""
-      let default = 10
+      let default = 4
+    end)
+
+module Region_count =
+  Int
+    (struct
+      let option_name = "-region_count"
+      let help = "Specify how many regions of the same kind and type should be retained in the entire region \
+                 subgraph (before producing a loop) during unification"
+      let arg_name = ""
+      let default = 16
     end)
 
 module Builtin_expect_regexp =

@@ -17,10 +17,9 @@ open Cil_printer
 open Visitor
 
 open Info
-open Region
 open! Common
 
-module Make (Analysis : Analysis) = struct
+module Make (Analysis : Region.Analysis) = struct
 
   module I = Analysis.I
 
@@ -55,12 +54,12 @@ module Make (Analysis : Analysis) = struct
     let f = Kernel_function.get_name C.f
 
     module R = struct
-      include Representant
+      include Analysis.R
       include Analysis
-      let poly,   local,   of_var,    of_lval,    of_expr,    relevant_region,    arg_regions =
-          poly f, local f, of_var ~f, of_lval ~f, of_expr ~f, relevant_region ~f, arg_regions ~f
+      let of_var,    of_lval,    of_expr,    relevant_region,    arg_regions =
+          of_var ~f, of_lval ~f, of_expr ~f, relevant_region ~f, arg_regions ~f
     end
-    module U = R.U
+    module U = Analysis.U
 
     let w_mem ?fi u =
       match (U.repr u).R.kind with
@@ -239,7 +238,7 @@ module Make (Analysis : Analysis) = struct
 
     let prj_poly_mem s =
       let map = R.map s in
-      fun acc m -> F.add_some (I.M.Poly_mem.prj ~find:(fun u -> R.H_call.find u map) ~mk:r_mem m) acc
+      fun acc m -> F.add_some (I.M.Poly_mem.prj ~find:(fun u -> R.H_map.find u map) ~mk:r_mem m) acc
 
     let prj_reads (type t) (module F' : I.E.Reads with type t = t) s params =
       let prj_poly_var = prj_poly_var s params in
@@ -255,7 +254,7 @@ module Make (Analysis : Analysis) = struct
       | `Global_var _
       | `Global_mem _ as w -> Some w
       | `Poly_mem m        -> I.M.Poly_mem.prj
-                                ~find:(fun u -> R.H_call.find u @@ R.map s)
+                                ~find:(fun u -> R.H_map.find u @@ R.map s)
                                 ~mk:(fun ?fi u -> Some (w_mem ?fi u))
                                 m
       | `Result            -> opt_bind w_lval lv
@@ -719,7 +718,7 @@ module Make (Analysis : Analysis) = struct
     let () =
       Globals.Functions.iter_on_fundecs
         (fun d ->
-           let I.E.Some { reads = (module F); assigns = (module A); _ } = I.get info Representant.flag d in
+           let I.E.Some { reads = (module F); assigns = (module A); _ } = I.get info Analysis.R.flag d in
            let module L = Make_local (struct let f = Globals.Functions.get d.svar end) (F) (A) in
            H.replace collectors d @@ L.collector info;
            H.replace markers d @@ L.marker info;
