@@ -712,7 +712,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       | NoOffset                              -> None
       | Field (fi, off) when fi.fcomp.cstruct -> match_offset ~acc:(`Field fi :: acc) off
       | Field (fi, off)                       -> match_offset
-                                                   ~acc:(`Container_of_void (Ty.normalize fi.ftype) :: acc)
+                                                   ~acc:(`Container_of_void Ty.(normalize @@ unbracket fi.ftype) :: acc)
                                                    off
       | Index _                               -> None
     in
@@ -949,7 +949,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
         `Location (u, fun () -> `None)
       in
       let union_field fi =
-        let u = container_of_void (location (of_lval lv')) fi.ftype in
+        let u = container_of_void (location (of_lval lv')) (Ty.unbracket fi.ftype) in
         `Location (u,
                    if isArrayType fi.ftype        then fun () -> `Value u
                    else if isPointerType fi.ftype then fun () -> deref u

@@ -228,9 +228,11 @@ module Ci = struct
     let rec loop acc typ =
       if Ty.compatible typ typ' then Some (List.rev acc)
       else
-        let union fields = List.find_map (fun fi -> loop (`Container_of_void fi.ftype :: acc) fi.ftype) fields in
+        let union fields =
+          List.find_map (fun fi -> let ty = Ty.unbracket fi.ftype in loop (`Container_of_void ty :: acc) ty) fields
+        in
         match[@warning "-4"] unrollType typ with
-        | TComp ({ cstruct = true; cfields = fi :: _; _ }, _, _) -> loop (`Field fi :: acc) fi.ftype
+        | TComp ({ cstruct = true; cfields = fi :: _; _ }, _, _) -> loop (`Field fi :: acc) (Ty.unbracket fi.ftype)
         | TComp ({ cstruct = true; cfields = []; _ }, _, _)      -> None
         | TComp ({ cstruct = false; cfields; _ }, _, _)          -> union cfields
         | _                                                      -> None
