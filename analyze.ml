@@ -119,6 +119,23 @@ let rec to_offset =
 
 let cache_offsets =
   let open List in
+  let module H = Hashtbl.Make
+      (struct
+        type t = Info.offs
+        let rec hash =
+          function
+          | []                          -> 1
+          | `Field fi :: os             -> 7 * hash os + Fieldinfo.hash fi
+          | `Container_of_void ty :: os -> 13 * hash os + Typ.hash ty
+        let rec equal p1 p2 =
+          match p1, p2 with
+          | [],                            []                                                         -> true
+          | `Field fi1             :: os1, `Field fi2             :: os2 when Fieldinfo.equal fi1 fi2 -> equal os1 os2
+          | `Container_of_void ty1 :: os1, `Container_of_void ty2 :: os2 when Typ.equal ty1 ty2       -> equal os1 os2
+          | _                                                                                         -> false
+      end)
+  in
+  let h = H.create 4096 in
   let negate off = Integer.(rem (neg off) @@ add (max_unsigned_number @@ theMachine.theMachine.sizeof_ptr lsl 3) one) in
   let iter_rev_prefixes f =
     let rec loop acc =
@@ -130,23 +147,26 @@ let cache_offsets =
   in
   fun ~offs_of_key ci ->
     Console.debug ~level:2 "Collecting offsets from compinfo %s..." (compFullName ci);
+    H.clear h;
     Ci.offsets ci |>
     map (fun (path, fo) -> path @ may_map (fun fi -> [`Field fi]) ~dft:[] fo) |>
     iter
       (iter_rev_prefixes @@
        fun rev_path ->
-       let path = rev rev_path in
-       match rev_path with
-       | []                                            -> ()
-       | (`Container_of_void _ | `Field _ as off) :: _ ->
-         let ty =
-           match off with
-           | `Container_of_void ty -> Ty.normalize ty
-           | `Field fi             -> Ty.normalize fi.ftype
-         in
-         let off = Integer.of_int @@ fst (bitsOffset (TComp (ci, empty_size_cache (), [])) (to_offset path)) lsr 3 in
-         Info.H_field.replace offs_of_key (ci, ty, off) path;
-         Info.H_field.replace offs_of_key (ci, ty, negate off) path)
+       if not (H.mem h rev_path) then
+         let path = rev rev_path in
+         H.replace h rev_path ();
+         match rev_path with
+         | []                                            -> ()
+         | (`Container_of_void _ | `Field _ as off) :: _ ->
+           let ty =
+             match off with
+             | `Container_of_void ty -> Ty.normalize ty
+             | `Field fi             -> Ty.normalize fi.ftype
+           in
+           let off = Integer.of_int @@ fst (bitsOffset (TComp (ci, empty_size_cache (), [])) (to_offset path)) lsr 3 in
+           Info.H_field.replace offs_of_key (ci, ty, off) path;
+           Info.H_field.replace offs_of_key (ci, ty, negate off) path)
 
 let pp_off fmttr =
   let pp fmt = fprintf fmttr fmt in
