@@ -137,12 +137,11 @@ module Make (Analysis : Analysis) = struct
       in
       let add_all (ty, (au, pu)) =
         match unrollType ty with
-        | TComp (ci, _, _) when ci.cstruct -> iter
-                                                (fun fi ->
-                                                   if not fi.faddrof && isArithmeticOrPointerType fi.ftype then
-                                                     A.add_some (w_mem ~fi au) (r_mem ~fi pu) assigns)
-                                                ci.cfields
-        | _                                -> ()
+        | TComp (ci, _, _) -> List.iter
+                                (fun (path, fi) ->
+                                   A.add_some (w_mem ?fi @@ R.take path au) (r_mem ?fi @@ R.take path pu) assigns)
+                                (Ci.offsets ci)
+        | _                -> ()
       in
       iter add_all @@ combine arg_tys @@ combine arg_regions param_regions
 
