@@ -551,7 +551,8 @@ end = functor () -> struct
     { reflect2 : 'k. 'h -> ('u -> 'k -> 'fl * 'u) -> 'u -> 'k -> 'u -> unit }
     constraint 'x = < u : 'u; h : 'h; fl : 'fl; .. >
 
-  let traverse ~symm ~guard ~pre ~reflect2 ~post =
+  let traverse
+      ~symm ?(guard=fun _ _ -> true) ?(pre=const ignore) ~reflect2 ?(update=const ignore) ?(post=const ignore) =
     let reflect_all h =
       let reflect1 f u2 = reflect2.reflect2 h (const' f) u2 () and reflect2 f = reflect2.reflect2 h f in
       fun u1 u2 ->
@@ -573,7 +574,7 @@ end = functor () -> struct
         reflect_all h u1 u2;
         if symm then reflect_all h u2 u1;
         pre u1 u2;
-        H_uu.iter loop h;
+        H_uu.iter (fun u1' u2' -> loop u1' u2'; update u1 u2) h;
         post u1 u2
     in
     loop
@@ -628,8 +629,10 @@ end = functor () -> struct
     val add : U.t -> t -> unit
     val remove : U.t -> t -> unit
     val replace : U.t -> t -> unit
+    val update : U.t -> t -> unit
     val find : U.t -> t -> U.t * int
     val clear : t -> unit
+    val maxl : int
     val maxd : int
     val maxc : int
   end = struct
@@ -641,17 +644,37 @@ end = functor () -> struct
         end)
     type t = (U.t * int) H.t
     open! H
+    let maxl = Options.Region_length.get ()
     let maxd = Options.Region_depth.get ()
     let maxc = Options.Region_count.get ()
     let create () = create 128
-    let key u = let r = U.repr u in r.R.kind, r.R.typ
-    let update add u h =
+    let key u = let r = U.repr u in r.R.kind, Ty.normalize r.R.typ
+    let derefable ty =
+      match unrollType ty with
+      | TPtr (TFun _, _)   -> false
+      | TPtr _
+      | TArray _
+      | TComp _
+      | TBuiltin_va_list _ -> true
+      | TVoid _
+      | TInt _
+      | TFloat _
+      | TFun _
+      | TEnum _            -> false
+      | TNamed _           -> assert false
+    let put add u h =
+      let _, ty as k = key u in
+      if derefable ty then
+        match find h k with
+        | _, d                -> add h k (u, d + 1)
+        | exception Not_found -> add h k (u, 0)
+    let update u h =
       let k = key u in
       match find h k with
-      | _, d                -> add h k (u, d + 1)
-      | exception Not_found -> add h k (u, 0)
-    let add = update add
-    let replace = update replace
+      | _, d                -> add h k (u, d)
+      | exception Not_found -> ()
+    let add = put add
+    let replace = put replace
     let remove u h = remove h (key u)
     let find u h = find h (key u)
     let clear = clear
@@ -674,7 +697,7 @@ end = functor () -> struct
                                                     U.unify u2' u2'')
           | exception Not_found                  ->
             match H_l.find u2' loops with
-            | u2'', d when d >= H_l.maxd         ->(R.demote (U.repr u2');
+            | u2'', d when d >= H_l.maxl         ->(R.demote (U.repr u2');
                                                     U.unify u2' u2'';
                                                     add u1' u2'')
             | _                                  -> add u1' u2'
@@ -686,7 +709,6 @@ end = functor () -> struct
         H_map.add u1 u2 map;
         traverse
           ~symm:false
-          ~guard:(fun _ _ -> true)
           ~pre:(fun u1 u2 ->
             H_l.add u2 loops;
             if (U.repr u1).R.kind = `Global then H_map.add u1 u1 map)
@@ -697,6 +719,7 @@ end = functor () -> struct
   let unify =
     let loops = H_l.create () in
     let queued = H_uu.create () in
+    let depth = ref 0 in
     let reflect2 h f u2 k u1' =
       let add u1' u2' =
         if not H_uu.(mem u1' u2' queued || mem u2' u1' queued) then begin
@@ -705,28 +728,35 @@ end = functor () -> struct
         end
       in
       match f u2 k with
-      | `Old, u2'                     -> add u1' u2'
-      | `New, u2'                     ->
+      | `Old, u2'                         -> add u1' u2'
+      | `New, u2'                         ->
         match H_l.find u2' loops with
-        | u2'', d when d >= H_l.maxc  ->(R.demote (U.repr u2');
-                                         U.unify u2' u2'';
-                                         add u1' u2'')
-        | _                           -> add u1' u2'
-        | exception Not_found         -> add u1' u2'
+        | u2'', c when c >= H_l.maxc
+                    || !depth >= H_l.maxd ->(R.demote (U.repr u2');
+                                             U.unify u2' u2'';
+                                             add u1' u2'')
+        | _                               -> add u1' u2'
+        | exception Not_found             -> add u1' u2'
     in
     let reflect2 = { reflect2 } in
+    let diff_kind u1 u2 = not R.(Kind.equal (U.repr u1).kind (U.repr u2).kind) in
     fun u1 u2 ->
       H_l.clear loops;
       H_uu.clear queued;
+      depth := 0;
       traverse
         ~symm:true
         ~guard:(fun u1 u2 -> not U.(R.equal (repr u1) @@ repr u2))
         ~pre:(fun u1 u2 ->
           H_l.replace u1 loops;
-          H_l.replace u2 loops;
+          if diff_kind u1 u2 then H_l.replace u2 loops;
+          incr depth;
           U.unify u1 u2)
         ~reflect2
-        ~post:(const ignore)
+        ~update:(fun u1 u2 ->
+          H_l.update u1 loops;
+          if diff_kind u1 u2 then H_l.update u2 loops)
+        ~post:(fun _ _ -> decr depth)
         u1 u2
 
   let reflect ~map u ~on:u' =
