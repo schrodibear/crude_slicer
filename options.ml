@@ -74,7 +74,7 @@ module Region_length =
       let help = "Specify how many regions of the same kind and type should be retained on a region graph path \
                   before producing a loop during instantiation of polymorphic regions"
       let arg_name = ""
-      let default = 6
+      let default = 3
     end)
 
 module Region_depth =
@@ -83,7 +83,7 @@ module Region_depth =
       let option_name = "-region_depth"
       let help = "Specify bound on graph depth for unification"
       let arg_name = ""
-      let default = 4
+      let default = 3
     end)
 
 module Region_count =
@@ -93,7 +93,7 @@ module Region_count =
       let help = "Specify how many regions of the same kind and type should be retained in the entire region \
                  subgraph (before producing a loop) during unification"
       let arg_name = ""
-      let default = 48
+      let default = 9
     end)
 
 module Builtin_expect_regexp =
