@@ -137,8 +137,8 @@ module Make_memory (R : Representant) (U : Unifiable with type repr = R.t) (C : 
       | _,                Some fi       -> Console.fatal
                                              "Memory.mk: improper combination of region and field: \
                                               %s : %a and %s.%s : %a"
-                                             (R.name r) pp_typ
-                                             (R.typ r) (compFullName fi.fcomp) fi.fname pp_typ fi.ftype
+                                             (R.name r) pp_typ (R.typ r)
+                                             (compFullName fi.fcomp) fi.fname pp_typ fi.ftype
 
   let prj ~find ~mk (r, fi : t) = mk ?fi:(fi :> fieldinfo option) @@ find @@ U.of_repr r
 
