@@ -626,7 +626,8 @@ end = functor () -> struct
     in
     let rec loop u1 u2 =
       if guard u1 u2 then
-        let t1, t2 = map_pair (Ty.normalize % R.typ % U.repr) (u1, u2) in
+        let r1, r2 = U.(repr u1, repr u2) in
+        let t1, t2 = map_pair (Ty.normalize % R.typ) (r1, r2) in
         if not (Ty.compatible t1 t2) then
           Console.fatal
             "Separation.traverse: encountered regions of different types: %a : %a, %a : %a"
@@ -635,7 +636,7 @@ end = functor () -> struct
         reflect_all h u1 u2;
         if symm then reflect_all h u2 u1;
         pre u1 u2;
-        H_uu.iter (fun u1' u2' -> loop u1' u2'; update u1 u2) h;
+        H_uu.iter (fun u1' u2' -> loop u1' u2'; update r1 r2) h;
         post u1 u2
     in
     loop
@@ -690,7 +691,7 @@ end = functor () -> struct
     val add : U.t -> t -> unit
     val remove : U.t -> t -> unit
     val replace : U.t -> t -> unit
-    val update : U.t -> t -> unit
+    val update : R.t -> t -> unit
     val find : U.t -> t -> U.t * int
     val clear : t -> unit
     val maxl : int
@@ -729,7 +730,8 @@ end = functor () -> struct
         match find h k with
         | _, d                -> add h k (u, d + 1)
         | exception Not_found -> add h k (u, 0)
-    let update u h =
+    let update r h =
+      let u = U.of_repr r in
       let k = key u in
       match find h k with
       | _, d                -> add h k (u, d)
@@ -800,7 +802,7 @@ end = functor () -> struct
         | exception Not_found             -> add u1' u2'
     in
     let reflect2 = { reflect2 } in
-    let diff_kind u1 u2 = not R.(Kind.equal (U.repr u1).kind (U.repr u2).kind) in
+    let diff_kind r1 r2 = not R.(Kind.equal r1.kind r2.kind) in
     fun u1 u2 ->
       depth := 0;
       traverse
@@ -808,13 +810,13 @@ end = functor () -> struct
         ~guard:(fun u1 u2 -> not U.(R.equal (repr u1) @@ repr u2))
         ~pre:(fun u1 u2 ->
           H_l.replace u1 loops;
-          if diff_kind u1 u2 then H_l.replace u2 loops;
+          if U.(diff_kind (repr u1) @@ repr u2) then H_l.replace u2 loops;
           incr depth;
           U.unify u1 u2)
         ~reflect2
-        ~update:(fun u1 u2 ->
-          H_l.update u1 loops;
-          if diff_kind u1 u2 then H_l.update u2 loops)
+        ~update:(fun r1 r2 ->
+          H_l.update r1 loops;
+          if diff_kind r1 r2 then H_l.update r2 loops)
         ~post:(fun _ _ -> decr depth)
         u1 u2;
       H_l.clear loops;
