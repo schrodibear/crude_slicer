@@ -35,7 +35,9 @@ module Make (Analysis : Region.Analysis) = struct
                               "Slice.w_var: broken invariant: inconsistent varinfo: %a: .vglob=%B, .vformal=%B"
                               pp_varinfo vi  glob frml
 
-  let unless_comp ty f = if not (isStructOrUnionType @@ Ty.normalize ty) then Some (f ()) else None
+  let unless_comp ty f =
+    let ty = Ty.normalize ty in
+    if not (isStructOrUnionType ty || isVoidType ty) then Some (f ()) else None
 
   let deref ~loc lv = Mem (new_exp ~loc @@ Lval lv), NoOffset
 
@@ -451,7 +453,9 @@ module Make (Analysis : Region.Analysis) = struct
               when Options.Alloc_functions.mem vi.vname                  ->
               begin match lvo with
               | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype  -> start_tracking s lv v arg;    SkipChildren
-              | Some lv                                                  -> alloc s lv arg;               SkipChildren
+              | Some lv when not (isVoidPtrType @@ typeOfLval lv)        -> alloc s lv arg;               SkipChildren
+              (* Unsound! Struct fields to be supported as tracking fields! *)
+              | Some _                                                   ->                               SkipChildren
               | None                                                     ->                               SkipChildren
               end;
             | Instr (Call (_,
@@ -629,8 +633,9 @@ module Make (Analysis : Region.Analysis) = struct
             when Options.Alloc_functions.mem vi.vname                   ->
             begin match lv with
             | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype   -> stmt ~vi @@ assign lv
-            | Some lv                                                   -> stmt ~vi @@ alloc ~loc lv
-            | None                                                      -> SkipChildren
+            | Some lv  when not (isVoidPtrType @@ typeOfLval lv)        -> stmt ~vi @@ alloc ~loc lv
+              (* Unsound! Struct fields to be supported as tracking fields! *)
+            | Some _ | None                                             -> SkipChildren
             end;
           | Instr (Call (_,
                          { enode = Lval (Var vi, NoOffset) }, [e], _))
