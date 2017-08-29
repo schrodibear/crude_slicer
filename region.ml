@@ -1402,7 +1402,13 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       match e1.enode, e2.enode, unrollType ty with
       | Lval lv1, Lval lv2, TComp (ci, _, _)    -> unify_comps ?f ci lv1 lv2
       | _                                       ->
-        begin match (stripCasts e2).enode, Ty.deref_once ty with
+        let norm ty =
+          match unrollType ty with
+          | TPtr _   -> unrollType @@ Ast_info.pointed_type ty
+          | TArray _ -> unrollType @@ Ast_info.element_type ty
+          | ty       -> ty
+        in
+        begin match (stripCasts e2).enode, norm ty with
         | Lval (Var vi, NoOffset), TComp (ci, _, _)
           when isVoidPtrType vi.vtype               -> bump_comp ?f ci e1
         | _                                         -> ()
