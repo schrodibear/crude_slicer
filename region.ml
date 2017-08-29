@@ -892,6 +892,7 @@ module type Analysis = sig
   val arg_regions : stmt -> ?f:string -> kernel_function -> lval option -> exp list -> U.t list
   val param_regions : kernel_function -> U.t list
   val relevant_region : ?f:string -> U.t -> bool
+  val initial_deps : kernel_function -> ((I.offs * fieldinfo option) list * U.t * U.t) list
 
   val clear : unit -> unit
 end
@@ -1356,6 +1357,35 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
              | _                -> [])
         exprs
 
+  let initial_deps kf =
+    let open List in
+    let rv, args = Kernel_function.(retvar @@ get_vi kf, get_formals kf) in
+    let param_regions, arg_regions =
+      (param_regions kf, arg_regions dummyStmt kf (Some (var rv)) (map evar args)) |>
+      if isStructOrUnionType @@ Ty.rtyp_if_fun rv.vtype
+      then
+        function
+        | re :: prs, ri :: ars -> ri :: prs, re :: ars
+        | [], _ | _, []        -> Console.fatal "Analysis.initial_deps: broken invariant: no composite return region"
+      else
+        id
+    in
+    let arg_tys =
+      Ty.rtyp_if_fun rv.vtype :: map (fun vi -> vi.vtype) args |>
+      filter (fun ty -> isStructOrUnionType ty || isPointerType ty || isArrayType ty)
+    in
+    let filter (ty, (au, pu)) =
+      match unrollType ty with
+      | TComp (ci, _, _) -> [Ci.offsets ci, au, pu]
+      | _                -> []
+    in
+    concat_map filter @@ combine arg_tys @@ combine arg_regions param_regions
+
+  let bump_param_regions kf =
+    List.iter
+      (fun (offs, au, pu) -> List.iter (fun (path, _) -> ignore @@ take path au; ignore @@ take path pu) offs)
+      (initial_deps kf)
+
   let unify_exprs =
     let unify_comps ?f ci lv1 lv2 =
       let u1, u2 = map_pair (location % of_lval ?f) (lv1, lv2) in
@@ -1509,7 +1539,8 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       method finish =
         unify_voids (Some f);
         let kf = Globals.Functions.get fundec.svar in
-        H_k.replace h_params kf @@ param_regions kf
+        H_k.replace h_params kf @@ param_regions kf;
+        bump_param_regions kf
     end
 
   let pp_region_of fmttr pp_e e =

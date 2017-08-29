@@ -109,7 +109,6 @@ module Make (Analysis : Region.Analysis) = struct
     let init_deps info () =
       let assigns = I.E.assigns @@ extract info in
       let open List in
-      let rv, args = Kernel_function.(R.retvar @@ get_vi C.f, get_formals C.f) in
       iter
         (fun vi ->
            match R.of_var vi with
@@ -119,30 +118,13 @@ module Make (Analysis : Region.Analysis) = struct
                                                           (w_mem u) F.K.Poly_var (Formal_var.of_varinfo vi)
                                                           assigns
            | `Location _ | `Value _ | `None          -> ())
-        args;
-      let param_regions, arg_regions =
-        (R.param_regions C.f, R.arg_regions dummyStmt C.f (Some (var rv)) (map evar args)) |>
-        if isStructOrUnionType @@ Ty.rtyp_if_fun rv.vtype
-        then
-          function
-          | re :: prs, ri :: ars -> ri :: prs, re :: ars
-          | [], _ | _, []        -> Console.fatal "Slice.init_deps: broken invariant: no composite return region"
-        else
-          id
-      in
-      let arg_tys =
-        Ty.rtyp_if_fun rv.vtype :: map (fun vi -> vi.vtype) args |>
-        filter (fun ty -> isStructOrUnionType ty || isPointerType ty || isArrayType ty)
-      in
-      let add_all (ty, (au, pu)) =
-        match unrollType ty with
-        | TComp (ci, _, _) -> List.iter
-                                (fun (path, fi) ->
-                                   A.add_some (w_mem ?fi @@ R.take path au) (r_mem ?fi @@ R.take path pu) assigns)
-                                (Ci.offsets ci)
-        | _                -> ()
-      in
-      iter add_all @@ combine arg_tys @@ combine arg_regions param_regions
+        (Kernel_function.get_formals C.f);
+      iter
+        (fun (offs, au, pu) ->
+           iter
+             (fun (path, fi) -> A.add_some (w_mem ?fi @@ R.take path au) (r_mem ?fi @@ R.take path pu) assigns)
+             offs)
+        (R.initial_deps C.f)
 
     let complement assigns depends =
       let open List in
@@ -728,9 +710,15 @@ module Make (Analysis : Region.Analysis) = struct
     let collect = Fixpoint.visit_until_convergence ~order:`topological (const @@ H.find collectors) info
     let mark =    Fixpoint.visit_until_convergence ~order:`reversed    (const @@ H.find markers) info
 
-    let init () =
+    let init sccs =
       Console.debug "Started init (init_deps for every function)...";
-      Globals.Functions.iter_on_fundecs (fun d -> H.find initializers d ())
+      Kernel_function.(
+        List.iter
+          (fun kf ->
+             match get_definition kf with
+             | d                       -> H.find initializers d ()
+             | exception No_Definition -> ())
+          (List.flatten sccs))
 
     let is_named = function Label _ -> true | _ -> false
 
@@ -863,8 +851,8 @@ let slice () =
   Region_analysis.compute_regions ();
   let module Slice = Make (Region_analysis) in
   let module Slice = Slice.Make (struct let info = info end) in
-  Slice.init ();
   let sccs = Analyze.condensate () in
+  Slice.init sccs;
   Console.debug "Will now collect assigns and deps...";
   Slice.collect sccs;
   Console.debug "Will now mark...";
