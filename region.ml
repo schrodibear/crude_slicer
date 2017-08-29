@@ -817,7 +817,7 @@ module type Analysis = sig
   val match_dot : exp_node -> (exp * Info.offs) option
 
   type ('a, 'b) offs = [ `Field of 'a | `Container_of_void of 'b ]
-  type 'a maybe_region =
+  type +'a maybe_region =
     [< `Location of U.t * (unit -> [ `None | `Value of U.t ])
     |  `Value of U.t
     |  `None ] as 'a
@@ -980,7 +980,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       replace h x r;
       r
 
-  type 'a maybe_region =
+  type +'a maybe_region =
     [< `Location of U.t * (unit -> [ `None | `Value of U.t ])
     |  `None
     |  `Value of U.t ] as 'a
