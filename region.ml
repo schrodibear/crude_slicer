@@ -98,40 +98,12 @@ module Representant = struct
   let compare r1 r2 = String.compare r1.name r2.name
   let choose r1 r2 = Kind.choose r1.kind r2.kind
 
-  let flag = Flag.create "convergence"
-
   module H = Hashtbl.Make (struct type nonrec t = t let equal, hash = equal, hash end)
 
-  let h_void_xs = H.create 512
 
   let mk ~name ~typ ~kind =
     let typ = Ty.normalize typ in
-    let r = { name; typ; kind } in
-    if kind <> `Dummy then begin
-      Flag.report flag;
-      let ty, n = Ty.deref typ in
-      if isVoidType ty then H.replace h_void_xs r n
-    end;
-    r
-
-  let report _r1 ~is_repr_of:r2 =
-    if isVoidType @@ fst @@ Ty.deref r2.typ then H.remove h_void_xs r2;
-    if r2.kind <> `Dummy then Flag.report flag
-
-  let all_void_xs () =
-    H.fold
-      (fun r n ->
-         let rec insert r n l =
-           let open List in
-           function
-           | []                           -> rev_append l [n, [r]]
-           | (n', rs) :: es   when n' = n -> rev_append l @@ (n', r :: rs) :: es
-           | n', _ as e :: es when n' < n -> insert r n (e :: l) es
-           | _ :: _ as es                 -> rev_append l @@ (n, [r]) :: es
-         in
-         insert r n [])
-      h_void_xs
-      []
+    { name; typ; kind }
 
   let global name typ = mk ~name ~typ ~kind:`Global
   let poly fname name typ = mk ~name:(fname ^ "::" ^ name) ~typ ~kind:(`Poly fname)
@@ -365,8 +337,50 @@ module Make_pair_hashmap (R : Representant) (U : Unifiable with type repr = R.t)
   let clear (h, ks) = H.clear h; H_k.clear ks
 end
 
+module type Representant_intf = sig
+  module Kind : sig
+    type t = [ `Global | `Poly of string  | `Local of string | `Dummy ]
+    val equal : [< t] -> [< t ] -> bool
+    val hash : [< t] -> int
+    val pp : Format.formatter -> [< t ] -> unit
+  end
+
+  type t = private
+    {
+      id   : int;
+      name : string;
+      typ  : typ;
+      mutable kind : Kind.t
+    }
+
+  val name : t -> string
+  val typ : t -> typ
+  val kind : t -> Kind.t
+  val equal : t -> t -> bool
+  val hash : t -> int
+  val compare : t -> t -> int
+  val flag : Flag.t
+  val all_void_xs : unit -> (int * t list) list
+  val pp : Format.formatter -> t -> unit
+end
+
+module type Representant_full = sig
+  include Representant_intf with type t = Representant.t
+  include Representant with module Kind := Kind and type t := t
+  val global : string -> typ -> t
+  val poly : string -> string -> typ -> t
+  val local : string -> string -> typ -> t
+  val demote : t -> unit
+  val arrow : t -> fieldinfo -> t
+  val deref : t -> t
+  val dot : t -> fieldinfo -> t
+  val container : t -> fieldinfo -> t
+  val dot_void : t -> t
+  val container_of_void : t -> typ -> t
+end
+
 module Separation : functor () -> sig
-  module R = Representant
+  module R : Representant_full
   module U : Unifiable with type repr = R.t
   module H' : Hashmap with module R := R and module U := U
 
@@ -397,7 +411,46 @@ module Separation : functor () -> sig
   val switch : string option -> unit
   val assert_stratification : U.t -> unit
 end = functor () -> struct
-  module R = Representant
+  module R = struct
+    include Representant
+
+    let flag = Flag.create "convergence"
+
+    let h_void_xs = H.create 2048
+
+    let mk r =
+      let typ = Ty.normalize r.typ in
+      if r.kind <> `Dummy then begin
+        Flag.report flag;
+        let ty, n = Ty.deref typ in
+        if isVoidType ty then H.replace h_void_xs r n
+      end;
+      r
+
+    let report _r1 ~is_repr_of:r2 =
+      if isVoidType @@ fst @@ Ty.deref r2.typ then H.remove h_void_xs r2;
+      if r2.kind <> `Dummy then Flag.report flag
+
+    let all_void_xs () =
+      H.fold
+        (fun r n ->
+           let rec insert r n l =
+             let open List in
+             function
+             | []                           -> rev_append l [n, [r]]
+             | (n', rs) :: es   when n' = n -> rev_append l @@ (n', r :: rs) :: es
+             | n', _ as e :: es when n' < n -> insert r n (e :: l) es
+             | _ :: _ as es                 -> rev_append l @@ (n, [r]) :: es
+           in
+           insert r n [])
+        h_void_xs
+        []
+
+    let     global,        poly,        local =
+      mk %% global, mk %%% poly, mk %%% local
+    let     arrow,      deref,       dot,       container,      dot_void,       container_of_void =
+      mk %% arrow, mk % deref, mk %% dot, mk %% container, mk % dot_void, mk %% container_of_void
+  end
 
   let current = ref None
 
@@ -810,7 +863,7 @@ end
 module type Analysis = sig
   module R : Representant_intf with type t = Representant.t
   module U : Unifiable with type repr = R.t
-  module I : module type of Info.Make (Representant) (U) ()
+  module I : module type of Info.Make (R) (U) ()
 
   val match_container_of1 : exp_node -> (exp * Info.offs) option
   val match_container_of2 : exp_node -> (exp * Info.offs) option

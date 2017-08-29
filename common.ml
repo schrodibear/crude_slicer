@@ -42,6 +42,7 @@ module Console = Options
 
 let (%) f g x = f (g x)
 let (%%) f g x y = f (g x y)
+let (%%%) f g x y z = f (g x y z)
 let (%>) f g x = g (f x)
 let const f _x = f
 let const' f x _y = f x
