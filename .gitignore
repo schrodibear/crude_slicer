@@ -8,6 +8,7 @@
 *.cmxs
 *.o
 *.annot
+*.byte
 Crude_slicer_DEP
 frama-c
 *.plugin.generated
