@@ -54,7 +54,8 @@ module Make (Analysis : Analysis) = struct
       let loc = e.eloc in
       let visit = visitFramacExpr (self :> frama_c_visitor) in
       let cast ty e =
-        let ty' = typeOf e in
+        let ty' = let ty' = typeOf e in if isIntegralType ty' then ty else ty' in
+        let ty, ty' = map_pair Ty.deref_once (ty, ty') in
         if not (Ty.compatible ty ty') then
           match
             Ci.(match_deep_first_subfield_of ty ty',
