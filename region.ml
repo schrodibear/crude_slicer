@@ -1464,9 +1464,19 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
            List.iter (on (relevant_region ?f) unify % U.of_repr) rs)
         (R.all_void_xs ())
 
+  let safe_param_regions ?f kf =
+    let open Kernel_function in
+    match get_definition kf with
+    | _                       -> param_regions kf
+    | exception No_Definition ->
+      switch (Some (get_name kf));
+      let r = param_regions kf in
+      switch f;
+      r
+
   let replay_on_call ~stmt ?f kf lvo args =
     let param_regions, arg_regions =
-      H_k.memo h_params kf param_regions, arg_regions stmt ?f kf lvo args
+      H_k.memo h_params kf (safe_param_regions ?f), arg_regions stmt ?f kf lvo args
     in
     let param_regions, arg_regions =
       let open! List in
