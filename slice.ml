@@ -289,7 +289,7 @@ module Make (Analysis : Region.Analysis) = struct
                  g)
           g;
         let open List in
-        let sccs = rev @@ map rev @@ Sccs.scc_list g in
+        let sccs = rev @@ Sccs.scc_list g in
         let rec round =
           function
           | []                                 -> assert false
