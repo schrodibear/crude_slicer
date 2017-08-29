@@ -244,8 +244,7 @@ module Ci = struct
               (curry @@
                function `Field _, `Field _ | `Container_of_void _, `Container_of_void _ -> true | _ -> false) %>
             concat_map
-              (function `Field _ :: _ as l -> l | `Container_of_void _ as e :: _ -> [e] | [] -> assert false) %>
-            rev)
+              (function `Field _ :: _ as l -> l | `Container_of_void _ as e :: _ -> [e] | [] -> assert false))
 
   let offsets ci =
     let open List in
