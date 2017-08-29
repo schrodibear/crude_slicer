@@ -83,6 +83,7 @@ module Representant = struct
 
   type t =
     {
+      id   : int;
       name : string;
       typ  : typ;
 
@@ -93,17 +94,19 @@ module Representant = struct
   let typ r = r.typ
   let kind r = r.kind
 
-  let equal r1 r2 = String.equal r1.name r2.name
-  let hash r = Hashtbl.hash r.name
-  let compare r1 r2 = String.compare r1.name r2.name
+  let equal r1 r2 = r1.id = r2.id
+  let hash r = r.id
+  let compare r1 r2 = compare r1.id r2.id
   let choose r1 r2 = Kind.choose r1.kind r2.kind
 
   module H = Hashtbl.Make (struct type nonrec t = t let equal, hash = equal, hash end)
 
+  let id = ref ~-1
 
   let mk ~name ~typ ~kind =
     let typ = Ty.normalize typ in
-    { name; typ; kind }
+    incr id;
+    { id = !id; name; typ; kind }
 
   let global name typ = mk ~name ~typ ~kind:`Global
   let poly fname name typ = mk ~name:(fname ^ "::" ^ name) ~typ ~kind:(`Poly fname)
