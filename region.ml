@@ -203,6 +203,8 @@ module type Unifiable = sig
   val repr : t -> repr
 
   val pp : Format.formatter -> t -> unit
+
+  val clear : unit -> unit
 end
 
 module Make_unifiable (R : Representant) () : Unifiable with type repr = R.t = struct
@@ -212,8 +214,8 @@ module Make_unifiable (R : Representant) () : Unifiable with type repr = R.t = s
 
   module H = R.H
 
-  let reprs = H.create 2048
-  let ranks = H.create 2048
+  let reprs = H.create 8192
+  let ranks = H.create 8192
 
   let rec repr r =
     match repr (H.find reprs r) with
@@ -247,6 +249,10 @@ module Make_unifiable (R : Representant) () : Unifiable with type repr = R.t = s
       | `Second -> set r2 ~as_repr_of:r1
 
   let pp fmt = Format.fprintf fmt "%a" R.pp % repr
+
+  let clear () =
+    H.clear reprs;
+    H.clear ranks
 end
 
 module type Hashmap = sig
@@ -268,7 +274,7 @@ module Make_hashmap (R : Representant) (U : Unifiable with type repr = R.t) :
 
   module H = R.H
   type t = U.t H.t
-  let create () = H.create 4096
+  let create () = H.create 8192
   let add u v h = H.replace h (U.repr u) v
   let add' h u v = add u v h
   let mem u h = H.mem h (U.repr u)
@@ -314,7 +320,7 @@ module Make_pair_hashmap (R : Representant) (U : Unifiable with type repr = R.t)
   module H_k = R.H
 
   type t = U.t H.t * K.t H_k.t
-  let create () = H.create 4096, H_k.create 256
+  let create () = H.create 8192, H_k.create 1024
   let add u k v (h, ks) =
     let r = U.repr u in
     H.replace h (r, k) v;
@@ -410,6 +416,8 @@ module Separation : functor () -> sig
 
   val switch : string option -> unit
   val assert_stratification : U.t -> unit
+
+  val clear : unit -> unit
 end = functor () -> struct
   module R = struct
     include Representant
@@ -570,8 +578,8 @@ end = functor () -> struct
                                                 (compFullName fi.fcomp) pp_field fi) u')       u';
           containers_of_void (fun ty -> loop (asprintf "(%a *) cast" pp_typ ty) u')            u'
       in
-      H'.clear visited;
-      loop "self reference" u u
+      loop "self reference" u u;
+      H'.clear visited
 
   module H_uu : sig
     type t
@@ -659,7 +667,6 @@ end = functor () -> struct
     let collapse =
       let h_k = H'.create () in
       fun f h ->
-        H'.clear h_k;
         iter
           (fun k v ->
             let k' = U.of_repr k in
@@ -670,7 +677,8 @@ end = functor () -> struct
         H'.clear h_k;
         filter_map_inplace
           (fun k v -> let k = U.of_repr k in if H'.mem k h_k then None else (H'.add k k h_k; Some v))
-          h
+          h;
+        H'.clear h_k
     let iter f h = iter (fun k v -> f (U.of_repr k) v) h
     let clear = clear
     let create () = create 512
@@ -758,7 +766,6 @@ end = functor () -> struct
       in
       let reflect2 = { reflect2 } in
       fun u1 u2 ->
-        H_l.clear loops;
         H_map.add u1 u2 map;
         traverse
           ~symm:false
@@ -767,7 +774,8 @@ end = functor () -> struct
             if (U.repr u1).R.kind = `Global then H_map.add u1 u1 map)
           ~reflect2
           ~post:(fun _ u2 -> H_l.remove u2 loops)
-          u1 u2
+          u1 u2;
+        H_l.clear loops
 
   let unify =
     let loops = H_l.create () in
@@ -794,8 +802,6 @@ end = functor () -> struct
     let reflect2 = { reflect2 } in
     let diff_kind u1 u2 = not R.(Kind.equal (U.repr u1).kind (U.repr u2).kind) in
     fun u1 u2 ->
-      H_l.clear loops;
-      H_uu.clear queued;
       depth := 0;
       traverse
         ~symm:true
@@ -810,7 +816,9 @@ end = functor () -> struct
           H_l.update u1 loops;
           if diff_kind u1 u2 then H_l.update u2 loops)
         ~post:(fun _ _ -> decr depth)
-        u1 u2
+        u1 u2;
+      H_l.clear loops;
+      H_uu.clear queued
 
   let reflect ~map u ~on:u' =
     H_map.clear map;
@@ -821,10 +829,10 @@ end = functor () -> struct
     let lmap = H_map.create () in
     let instantiate = instantiate ~map:lmap in
     fun ~map ~by us ->
-      H_map.clear lmap;
       List.iter2 instantiate by us;
       H_map.collapse (List.iter % unify) lmap;
-      H_map.iter (H_map.replace map) lmap
+      H_map.iter (H_map.replace map) lmap;
+      H_map.clear lmap
 
   let arrow = snd %% arrow
   let deref = snd % deref
@@ -832,32 +840,16 @@ end = functor () -> struct
   let dot_void = snd % dot_void
   let container = snd %% container
   let container_of_void = snd %% container_of_void
-end
 
-module type Representant_intf = sig
-  module Kind : sig
-    type t = [ `Global | `Poly of string  | `Local of string | `Dummy ]
-    val equal : [< t] -> [< t ] -> bool
-    val hash : [< t] -> int
-    val pp : Format.formatter -> [< t ] -> unit
-  end
-
-  type t = private
-    {
-      name : string;
-      typ  : typ;
-      mutable kind : Kind.t
-    }
-
-  val name : t -> string
-  val typ : t -> typ
-  val kind : t -> Kind.t
-  val equal : t -> t -> bool
-  val hash : t -> int
-  val compare : t -> t -> int
-  val flag : Flag.t
-  val all_void_xs : unit -> (int * t list) list
-  val pp : Format.formatter -> t -> unit
+  let clear () =
+    U.clear ();
+    R.H.clear R.h_void_xs;
+    H_f.clear h_arrow;
+    H'.clear  h_deref;
+    H_f.clear h_dot;
+    H'.clear  h_dot_void;
+    H_f.clear h_container;
+    H_t.clear h_container_of_void
 end
 
 module type Analysis = sig
@@ -895,6 +887,8 @@ module type Analysis = sig
   val arg_regions : stmt -> ?f:string -> kernel_function -> lval option -> exp list -> U.t list
   val param_regions : kernel_function -> U.t list
   val relevant_region : ?f:string -> U.t -> bool
+
+  val clear : unit -> unit
 end
 
 module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : Analysis = struct
@@ -1038,7 +1032,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
     |  `None
     |  `Value of U.t ] as 'a
 
-  let retvar, is_retvar =
+  let retvar, is_retvar, clear_retvars =
     let h_to_retvar = H_v.create 1024 in
     let h_retvars = H_v.create 1024 in
     (fun vi ->
@@ -1047,7 +1041,8 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
        let vi = copyVarinfo vi @@ "!" ^ vi.vname in
        H_v.replace h_retvars vi ();
        vi),
-    H_v.mem h_retvars
+    H_v.mem h_retvars,
+    fun () -> H_v.clear h_to_retvar; H_v.clear h_retvars
 
   (* Also used to retrieve return regions, only use from the inside(!) *)
   let rec of_var ?f x =
@@ -1270,10 +1265,17 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
 
   let h_maps = H_stmt.create 1024
 
+  let register_cleanup, cleanup =
+    let open! Queue in
+    let queue = create () in
+    (fun f -> add f queue),
+    fun () -> iter ((|>) ()) queue; clear queue
+
   let param_regions =
     let module Kf = Kernel_function in
     let h_var = H_v.create 512 in
     let maps = H_k.create 512 in
+    register_cleanup (fun () -> H_v.clear h_var; H_k.clear maps);
     let take_arrows ci = let arrows = Ci.arrows ci in fun u -> List.map (swap take @@ u) arrows in
     fun kf ->
       let params = Kf.get_formals kf in
@@ -1315,8 +1317,9 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
            | `None                     -> [])
         (retvar @ params)
 
-  let arg_regions  =
+  let arg_regions =
     let h_dummies = H_stmt.create 32 in
+    register_cleanup (fun () -> H_stmt.clear h_dummies);
     fun s ?f kf lvo exprs ->
       let retr =
         let rtyp = Ty.normalize @@ Kernel_function.get_return_type kf in
@@ -1440,6 +1443,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
 
   let expr_of_lval =
     let cache = H_l.create 4096 in
+    register_cleanup (fun () -> H_l.clear cache);
     fun ~loc lv -> H_l.memo cache lv (fun lv -> new_exp ~loc @@ Lval lv)
 
   open Visitor
@@ -1512,6 +1516,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
   let pp =
     let h_lv = H_l.create 1024 in
     let h_exp = H_e.create 1024 in
+    register_cleanup (fun () -> H_l.clear h_lv; H_e.clear h_exp);
     fun fmttr fundec ->
       let f = fundec.svar.vname in
       H_l.clear h_lv;
@@ -1595,4 +1600,15 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
   let map = H_stmt.find h_maps
 
   let param_regions kf = H_k.memo h_params kf param_regions
+
+  let clear () =
+    Separation.clear ();
+    H_v.clear h_var;
+    H_s.clear h_str;
+    H_l.clear h_lval;
+    H_e.clear h_expr;
+    clear_retvars ();
+    H_k.clear h_params;
+    H_stmt.clear h_maps;
+    cleanup ()
 end

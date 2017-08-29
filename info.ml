@@ -713,4 +713,6 @@ module Make (R : Representant) (U : Unifiable with type repr = R.t) () = struct
       r
 
   let flag = R.flag
+
+  let clear i = H_fundec.clear i.effects
 end

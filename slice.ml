@@ -278,7 +278,7 @@ module Make (Analysis : Region.Analysis) = struct
         A.iter (fun w r -> add_vertex g (w, r)) assigns;
         iter_vertex
           (fun (w_from, _ as v_from) ->
-             match w_from  with
+             match w_from with
              | `Result                 -> ()
              | #I.W.readable as w_from ->
                iter_vertex
@@ -844,6 +844,10 @@ module Make (Analysis : Region.Analysis) = struct
       Rmtmps.removeUnusedTemps
         ~isRoot:(function GFun (f, _) when f.svar.vname = Kernel.MainFunction.get () -> true | _ -> false)
         file
+
+    let clear () =
+      Analysis.clear ();
+      I.clear info
   end
 end
 
@@ -866,4 +870,11 @@ let slice () =
   Console.debug "Will now mark...";
   Slice.mark sccs;
   Console.debug "Will now sweep...";
-  Slice.sweep ()
+  Slice.sweep ();
+  let stat = Gc.stat () in
+  Console.debug  "Current # of live words: %d" stat.Gc.live_words;
+  Console.debug "Will now clean...";
+  Slice.clear ();
+  Gc.full_major ();
+  let stat = Gc.stat () in
+  Console.debug  "Current # of live words: %d" stat.Gc.live_words
