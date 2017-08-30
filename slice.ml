@@ -383,9 +383,10 @@ module Make (Analysis : Region.Analysis) = struct
 
       let alloc s lv e =
         let from = from s in
-        let lv = deref ~loc:(Stmt.loc s) lv in
+        let lv' = deref ~loc:(Stmt.loc s) lv in
         add_from_rval e from;
-        gassign lv from
+        gassign lv from;
+        gassign lv' from
       let stub s ?lv es =
         let from = from s in
         may
@@ -515,8 +516,8 @@ module Make (Analysis : Region.Analysis) = struct
         in
         List.map (fun (path, fi) -> w_mem ?fi @@ R.take path r_lv) (Ci.offsets ci)
 
-      let gassign lv = decide @@ match w_lval lv with Some w -> [w] | None -> comp_assign lv
-      let assign = gassign
+      let gassign lv = match w_lval lv with Some w -> [w] | None -> comp_assign lv
+      let assign = decide % gassign
       let return eo =
         decide @@
         may_map
@@ -555,8 +556,8 @@ module Make (Analysis : Region.Analysis) = struct
         in
         if I.E.is_target eff' then `Needed else decide writes
 
-      let alloc ~loc = gassign % deref ~loc
-      let stub = may_map gassign ~dft:`Not_yet
+      let alloc ~loc lv = decide @@ gassign lv @ gassign (deref ~loc lv)
+      let stub = may_map (decide % gassign) ~dft:`Not_yet
       let goto s = decide @@ [`Local_var (Local_var.of_varinfo @@ H_stmt.find info.I.goto_vars s)]
       let assume e =
         let r = ref [] in
