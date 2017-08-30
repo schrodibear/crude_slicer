@@ -113,26 +113,27 @@ let condensate =
 
 let rec to_offset =
   function
-  | []                         -> NoOffset
-  | `Field fi :: os            -> Field (fi, to_offset os)
-  | `Container_of_void _ :: os -> to_offset os
+  | []                                             -> NoOffset
+  | (`Field fi | `Container_of_void (fi, _)) :: os -> Field (fi, to_offset os)
 
 let cache_offsets =
   let open List in
   let module H = Hashtbl.Make
       (struct
-        type t = Info.offs
+        type t = (fieldinfo * typ) Info.offs
         let rec hash =
           function
-          | []                          -> 1
-          | `Field fi :: os             -> 7 * hash os + Fieldinfo.hash fi
-          | `Container_of_void ty :: os -> 13 * hash os + Typ.hash ty
+          | []                               -> 1
+          | `Field fi :: os                  -> 7 * hash os + Fieldinfo.hash fi
+          | `Container_of_void (_, ty) :: os -> 13 * hash os + Typ.hash ty
         let rec equal p1 p2 =
           match p1, p2 with
-          | [],                            []                                                         -> true
-          | `Field fi1             :: os1, `Field fi2             :: os2 when Fieldinfo.equal fi1 fi2 -> equal os1 os2
-          | `Container_of_void ty1 :: os1, `Container_of_void ty2 :: os2 when Typ.equal ty1 ty2       -> equal os1 os2
-          | _                                                                                         -> false
+          | [],                                 []                                 -> true
+          | `Field fi1                  :: os1, `Field fi2                  :: os2
+            when Fieldinfo.equal fi1 fi2                                           -> equal os1 os2
+          | `Container_of_void (_, ty1) :: os1, `Container_of_void (_, ty2) :: os2
+            when Typ.equal ty1 ty2                                                 -> equal os1 os2
+          | _                                                                      -> false
       end)
   in
   let h = H.create 4096 in
@@ -148,7 +149,7 @@ let cache_offsets =
   fun ~offs_of_key ci ->
     Console.debug ~level:2 "Collecting offsets from compinfo %s..." (compFullName ci);
     H.clear h;
-    Ci.offsets ci |>
+    Ci.goffsets ci |>
     map (fun (path, fo) -> path @ may_map (fun fi -> [`Field fi]) ~dft:[] fo) |>
     iter
       (iter_rev_prefixes @@
@@ -161,8 +162,8 @@ let cache_offsets =
          | (`Container_of_void _ | `Field _ as off) :: _ ->
            let ty =
              match off with
-             | `Container_of_void ty -> Ty.normalize ty
-             | `Field fi             -> Ty.normalize fi.ftype
+             | `Container_of_void (_, ty) -> Ty.normalize ty
+             | `Field fi                  -> Ty.normalize fi.ftype
            in
            let off = Integer.of_int @@ fst (bitsOffset (TComp (ci, empty_size_cache (), [])) (to_offset path)) lsr 3 in
            Info.H_field.replace offs_of_key (ci, ty, off) path;
@@ -171,8 +172,8 @@ let cache_offsets =
 let pp_off fmttr =
   let pp fmt = fprintf fmttr fmt in
   function
-  | `Container_of_void ty -> pp "@@(%a)" pp_typ ty
-  | `Field fi             -> pp ".%a" pp_field fi
+  | `Container_of_void (_, ty) -> pp "@@(%a)" pp_typ ty
+  | `Field fi                  -> pp ".%a" pp_field fi
 
 let cache_offsets =
   let conv n =

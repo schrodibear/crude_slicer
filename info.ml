@@ -679,20 +679,20 @@ module H_stmt_conds = struct
   include Hide.Show
 end
 
-type offs = [ `Field of fieldinfo | `Container_of_void of typ ] list
+type 'a offs = [ `Field of fieldinfo | `Container_of_void of 'a ] list
 
 module Make (R : Representant) (U : Unifiable with type repr = R.t) () = struct
   module M = Make_memories (R) (U) ()
   module W = Make_writes (M)
   module E = Make_effect (W)
 
-  type nonrec offs = offs
+  type nonrec 'a offs = 'a offs
 
   type t =
     {
       goto_vars   : varinfo H_stmt.t;
       stmt_vars   : varinfo H_stmt_conds.t;
-      offs_of_key : offs H_field.t;
+      offs_of_key : (fieldinfo * typ) offs H_field.t;
       effects     : E.some H_fundec.t
     }
 

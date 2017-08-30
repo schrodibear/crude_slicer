@@ -862,9 +862,9 @@ module type Analysis = sig
   module U : Unifiable with type repr = R.t
   module I : module type of Info.Make (R) (U) ()
 
-  val match_container_of1 : exp_node -> (exp * Info.offs) option
-  val match_container_of2 : exp_node -> (exp * Info.offs) option
-  val match_dot : exp_node -> (exp * Info.offs) option
+  val match_container_of1 : exp_node -> (exp * (fieldinfo * typ) Info.offs) option
+  val match_container_of2 : exp_node -> (exp * (fieldinfo * typ) Info.offs) option
+  val match_dot : exp_node -> (exp * (fieldinfo * typ) Info.offs) option
 
   type ('a, 'b) offs = [ `Field of 'a | `Container_of_void of 'b ]
   type +'a maybe_region =
@@ -892,12 +892,12 @@ module type Analysis = sig
   val arg_regions : stmt -> ?f:string -> kernel_function -> lval option -> exp list -> U.t list
   val param_regions : kernel_function -> U.t list
   val relevant_region : ?f:string -> U.t -> bool
-  val initial_deps : kernel_function -> ((I.offs * fieldinfo option) list * U.t * U.t) list
+  val initial_deps : kernel_function -> ((typ I.offs * fieldinfo option) list * U.t * U.t) list
 
   val clear : unit -> unit
 end
 
-module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : Analysis = struct
+module Analysis (I' : sig val offs_of_key : (fieldinfo * typ) Info.offs Info.H_field.t end) () : Analysis = struct
   module Separation = Separation ()
 
   open Separation
@@ -936,7 +936,8 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
       | NoOffset                              -> None
       | Field (fi, off) when fi.fcomp.cstruct -> match_offset ~acc:(`Field fi :: acc) off
       | Field (fi, off)                       -> match_offset
-                                                   ~acc:(`Container_of_void Ty.(normalize @@ unbracket fi.ftype) :: acc)
+                                                   ~acc:(`Container_of_void (fi, Ty.(normalize @@ unbracket fi.ftype))
+                                                         :: acc)
                                                    off
       | Index _                               -> None
     in
@@ -1231,7 +1232,7 @@ module Analysis (I' : sig val offs_of_key : Info.offs Info.H_field.t end) () : A
         match match_container_of1 e.enode, match_container_of2 e.enode, match_dot e.enode with
         | Some (e, offs), _, _
         | _, Some (e, offs), _              -> `Value (take (inv offs) @@ value (typeOf e) @@ of_expr e)
-        | _, _, Some (e, offs)              -> `Value (take offs @@ value (typeOf e) @@ of_expr e)
+        | _, _, Some (e, offs)              -> `Value (take (Ci.norm_offset offs) @@ value (typeOf e) @@ of_expr e)
         | None, None, None                  ->
           match e.enode with
           | Const (CStr s)                  -> `Value (value (typeOf e) @@ of_string @@ `S s)

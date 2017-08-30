@@ -23,8 +23,8 @@ let container_of =
     let newt =
       TPtr
         ((match List.hd offs with
-           | `Field fi             -> TComp (fi.fcomp, empty_size_cache (), [])
-           | `Container_of_void ty -> Ty.normalize ty),
+           | `Field fi                  -> TComp (fi.fcomp, empty_size_cache (), [])
+           | `Container_of_void (_, ty) -> Ty.normalize ty),
          [])
     in
     mkCast ~newt ~e:(new_exp ~loc @@ BinOp (MinusPI,
