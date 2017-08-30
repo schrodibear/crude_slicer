@@ -352,6 +352,104 @@ let hack_cfg =
         | _ -> DoChildren
     end)
 
+let switch_count fundec =
+  let count = ref 1 in
+  ignore @@
+  visitFramacFunction
+    (object
+      inherit frama_c_inplace
+      method! vstmt s =
+        match[@warning "-4"] s.skind with
+        | Switch (_, _, ss, _) -> let l = List.length ss in if l > 0 then count := !count * l; DoChildren
+        | _                    ->                                                              DoChildren
+    end)
+    fundec;
+  !count
+
+let[@warning "-4"] rewrite_switches =
+  let open List in
+  let rewrite_switch =
+    let module H = Stmt.Hashtbl in
+    let h = H.create 32 in
+    fun e b ss ->
+      iter
+        (ignore %
+         visitFramacStmt
+           (object
+             inherit frama_c_inplace
+             method! vstmt s = H.replace h s (); DoChildren
+           end))
+        b.bstmts;
+      let get_one_target ss =
+        let rec targets s =
+          if not (H.mem h s)
+          then [s]
+          else concat_map targets s.succs
+        in
+        let targets = map targets ss in
+        if for_all ((=) 1 % length) targets
+        then
+          match group_by Stmt.equal @@ map hd targets with
+          | [s :: _] -> Some s
+          | _        -> None
+        else
+          None
+      in
+      let bodies target b =
+        let is_case_label = function Case _ | Default _ -> true | Label _ -> false in
+        let bs = group_by (fun _ s2 -> not @@ exists is_case_label s2.labels) b.bstmts in
+        let conds =
+          map hd bs |>
+          map (fun s -> filter is_case_label s.labels)
+        in
+        let bs =
+          map
+            (fun ss ->
+               match rev ss with
+               | { skind = Goto _ | Break _ | Continue _; succs = [s]; _ } :: ss when Stmt.equal s target -> rev ss
+               | _                                                                                        -> ss)
+            bs |>
+          tap (iter @@ iter @@ fun s -> s.labels <- filter (not % is_case_label) s.labels)
+        in
+        let r = combine conds bs in
+        match partition (function Default _ :: _, _  -> true | _ -> false) r with
+        | [_, dss], ss -> Some (dss, ss)
+        | _            -> None
+      in
+      let (>>=) x f = opt_bind f x in
+      get_one_target ss >>= fun target ->
+      bodies target b >>= fun (dss, cases) ->
+      let loc = Stmt.loc target in
+      let ifs =
+        let cond cs =
+          let eqs =
+            map
+              (function
+                | Case (e', loc) -> mkBinOp ~loc Eq e e'
+                | _              -> assert false)
+              cs
+          in
+          fold_left (fun e -> mkBinOp ~loc:e.eloc BOr e) (hd eqs) (tl eqs)
+        in
+        fold_right (fun (cs, ss) b -> mkBlock [mkStmt @@ If (cond cs, mkBlock ss, b, loc)]) cases (mkBlock dss)
+      in
+      H.clear h;
+      Some (mkStmt @@ Block (mkBlock [hd ifs.bstmts; mkStmt @@ Goto (ref target, Stmt.loc target)]))
+  in
+  ignore %
+  visitFramacFunction
+    (object
+      inherit frama_c_inplace
+      method! vstmt s =
+        match s.skind with
+        | Switch (e, b, ss, _) ->
+          begin match rewrite_switch e b ss with
+          | Some s -> ChangeDoChildrenPost (s, id)
+          | None   -> DoChildren
+          end
+        | _ -> DoChildren
+    end)
+
 let fill_goto_tables ~goto_vars ~stmt_vars =
   let open Info in
   Console.debug "Started fill_goto_tables...";
@@ -363,6 +461,11 @@ let fill_goto_tables ~goto_vars ~stmt_vars =
        | exception Kernel_function.No_Definition -> ()
        | fundec                                  ->
          Console.debug ~level:2 "Filling goto tables in function %s..." fundec.svar.vname;
+         if switch_count fundec > Options.Switch_count.get () then begin
+           rewrite_switches fundec;
+           Cfg.clearCFGinfo ~clear_id:false fundec;
+           Cfg.cfgFun fundec
+         end;
          hack_cfg fundec;
          ignore @@ visitFramacFunction (new goto_visitor ~goto_vars ~stmt_vars kf) fundec;
          Cfg.clearCFGinfo ~clear_id:false fundec;

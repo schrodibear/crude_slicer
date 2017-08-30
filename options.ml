@@ -91,9 +91,20 @@ module Region_count =
     (struct
       let option_name = "-region_count"
       let help = "Specify how many regions of the same kind and type should be retained in the entire region \
-                 subgraph (before producing a loop) during unification"
+                  subgraph (before producing a loop) during unification"
       let arg_name = ""
       let default = 9
+    end)
+
+module Switch_count =
+  Int
+    (struct
+      let option_name = "-switch_count"
+      let help = "This heuristical threshold is used to rewrite switch statements to if statements in case they \
+                  blow up goto analysis; it should be approximately equal to the maximal number of paths \
+                  still considered with switches before rewriting to ifs"
+      let arg_name = ""
+      let default = 100000
     end)
 
 module Builtin_expect_regexp =
