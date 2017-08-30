@@ -475,7 +475,13 @@ module Make (Analysis : Region.Analysis) = struct
               let kfs = Analyze.callee_approx e in
               begin match kfs with
               | []                                                       -> stub s ?lv args;              SkipChildren
-              | kfs                                                      -> List.iter (call s ?lv) kfs;   SkipChildren
+              | kfs                                                      -> List.iter
+                                                                              (fun kf ->
+                                                                                 if Kernel_function.
+                                                                                      is_definition kf
+                                                                                 then call s ?lv kf
+                                                                                 else stub s ?lv args)
+                                                                              kfs;                        SkipChildren
               end
             | Instr (Asm _ | Skip _ | Code_annot _)                      ->                               SkipChildren
             | Return (e, _)                                              -> return s e;                   SkipChildren
@@ -655,7 +661,11 @@ module Make (Analysis : Region.Analysis) = struct
             | []                                                       -> stmt @@ stub lv
             | kfs                                                      -> try_all
                                                                             (fun kf ->
-                                                                               match call s ?lv kf with
+                                                                               match
+                                                                                 if Kernel_function.is_definition kf
+                                                                                 then call s ?lv kf
+                                                                                 else stub lv
+                                                                               with
                                                                                | `Needed  -> [Kernel_function.get_vi kf]
                                                                                | `Not_yet -> [])
                                                                              kfs
