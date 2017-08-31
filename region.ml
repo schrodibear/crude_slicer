@@ -1072,7 +1072,7 @@ module Analysis (I' : sig val offs_of_key : (fieldinfo * typ) Info.offs Info.H_f
             else Ty.deref_once typ
           in
           U.of_repr @@
-          match retvar, Ty.normalize typ, f with
+          match retvar, unrollType typ, f with
           | true,  TComp _, Some f                         -> R.local  f ("!" ^ f)       typ'
           | true,  _,       Some f                         -> R.poly   f f               typ'
           | true,  _,       None                           -> Console.fatal "Retvar requested from global scope: %a"
@@ -1329,7 +1329,7 @@ module Analysis (I' : sig val offs_of_key : (fieldinfo * typ) Info.offs Info.H_f
     register_cleanup (fun () -> H_stmt.clear h_dummies);
     fun s ?f kf lvo exprs ->
       let retr =
-        let rtyp = Ty.normalize @@ Kernel_function.get_return_type kf in
+        let rtyp = unrollType @@ Kernel_function.get_return_type kf in
         if isVoidType rtyp
         then []
         else
