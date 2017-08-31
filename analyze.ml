@@ -361,7 +361,9 @@ let switch_count fundec =
       inherit frama_c_inplace
       method! vstmt s =
         match[@warning "-4"] s.skind with
-        | Switch (_, _, ss, _) -> let l = List.length ss in if l > 0 then count := !count * l; DoChildren
+        | Switch (_, _, ss, _) -> (let l = List.length ss in
+                                   if l > 0 && !count * l > 0 then
+                                     count := !count * l;                                      DoChildren)
         | _                    ->                                                              DoChildren
     end)
     fundec;
