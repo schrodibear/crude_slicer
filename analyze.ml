@@ -386,12 +386,13 @@ let[@warning "-4"] rewrite_switches =
         b.bstmts;
       let get_one_target ss =
         let targets s =
-          let rec loop s' =
+          let rec loop d s' =
+            if d > 1000 then raise Exit;
             if not (H.mem h s') || not (Stmt.equal s' s) && exists is_case_label s'.labels
             then [s']
-            else concat_map loop s'.succs
+            else concat_map (loop @@ d + 1) s'.succs
           in
-          loop s
+          try loop 0 s with Exit -> []
         in
         let targets = map targets ss in
         if for_all ((=) 1 % length) targets
