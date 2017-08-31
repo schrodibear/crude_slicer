@@ -342,6 +342,7 @@ module type Reads = sig
   val iter_global_mems : (Global_mem.t -> unit) -> t -> unit
   val iter_poly_mems : (Poly_mem.t -> unit) -> t -> unit
   val iter_local_mems : (Local_mem.t -> unit) -> t -> unit
+  val iter : ([> W.readable] -> unit) -> t -> unit
   val is_empty : t -> bool
   val is_singleton : t -> bool
   val length : t -> int
@@ -474,6 +475,14 @@ module Make_reads (W : Writes) (K : Reads_kind with module W = W) () :
   let iter_global_mems f r = H_global_mem.iter f r.global_mems
   let iter_poly_mems f r = H_poly_mem.iter f r.poly_mems
   let iter_local_mems f r = H_local_mem.iter f r.local_mems
+
+  let iter f r =
+    iter_global_mems (fun m -> f @@ `Global_mem m) r;
+    iter_poly_mems   (fun m -> f @@ `Poly_mem m)   r;
+    iter_local_mems  (fun m -> f @@ `Local_mem m)  r;
+    iter_global_vars (fun v -> f @@ `Global_var v) r;
+    iter_poly_vars   (fun v -> f @@ `Poly_var v)   r;
+    iter_local_vars  (fun v -> f @@ `Local_var v)  r
 
   let is_empty r =
     H_global_var.is_empty r.global_vars &&

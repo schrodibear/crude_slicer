@@ -292,12 +292,7 @@ module Make (Analysis : Region.Analysis) = struct
         F.clear reads;
         F.import ~from:depends reads;
         let import_reads w = if A.mem w assigns then F.import ~from:(A.find w assigns) depends in
-        F.iter_global_mems (fun m -> import_reads @@ `Global_mem m) reads;
-        F.iter_poly_mems   (fun m -> import_reads @@ `Poly_mem m)   reads;
-        F.iter_local_mems  (fun m -> import_reads @@ `Local_mem m)  reads;
-        F.iter_global_vars (fun v -> import_reads @@ `Global_var v) reads;
-        F.iter_poly_vars   (fun v -> import_reads @@ `Poly_var v)   reads;
-        F.iter_local_vars  (fun v -> import_reads @@ `Local_var v)  reads;
+        F.iter import_reads reads;
         if result_dep then import_reads `Result
 
     let is_tracking_var eff v = isVoidPtrType v.vtype && I.E.is_tracking_var (Void_ptr_var.of_varinfo v) eff
@@ -399,6 +394,10 @@ module Make (Analysis : Region.Analysis) = struct
         let from = from s in
         add_from_rval e from;
         assign_all e from assigns
+      let unreach s =
+        let from = from s in
+        let import w = A.import_values w from assigns in
+        F.iter import from
     end
 
     let collector info =
@@ -462,6 +461,9 @@ module Make (Analysis : Region.Analysis) = struct
             | Instr (Call (_,
                            { enode = Lval (Var vi, NoOffset) }, [e], _))
               when Options.Assume_functions.mem vi.vname                 -> assume s e;                   SkipChildren
+            | Instr (Call (_,
+                           { enode = Lval (Var vi, NoOffset) }, [], _))
+              when Options.Path_assume_functions.mem vi.vname            -> unreach s;                    SkipChildren
             | Instr (Call (lv,
                            { enode = Lval (Var vi, NoOffset) },
                            _, _))
@@ -563,6 +565,7 @@ module Make (Analysis : Region.Analysis) = struct
         let r = ref [] in
         visit_rval (fun lv -> may (fun w -> r := w :: !r) @@ w_lval lv) e;
         decide !r
+      let unreach = `Needed
     end
 
     let marker info =
@@ -647,6 +650,9 @@ module Make (Analysis : Region.Analysis) = struct
           | Instr (Call (_,
                          { enode = Lval (Var vi, NoOffset) }, [e], _))
             when Options.Assume_functions.mem vi.vname                  -> stmt ~vi @@ assume e
+          | Instr (Call (_,
+                         { enode = Lval (Var vi, NoOffset) }, [], _))
+            when Options.Path_assume_functions.mem vi.vname             -> stmt ~vi @@ unreach
           | Instr (Call (lv,
                          { enode = Lval (Var vi, NoOffset) }, _, _))
             when Kf.mem_definition vi                                   -> stmt ~vi
@@ -792,7 +798,8 @@ module Make (Analysis : Region.Analysis) = struct
 
         method! vfunc f =
           let name = f.svar.vname in
-          if Options.(Alloc_functions.mem name || Assume_functions.mem name || Target_functions.mem name)
+          if Options.(Alloc_functions.mem name || Assume_functions.mem name || Path_assume_functions.mem name ||
+                      Target_functions.mem name)
           then                                  SkipChildren
           else (eff <- I.get info dummy_flag f; DoChildren)
 

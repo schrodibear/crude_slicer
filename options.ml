@@ -67,6 +67,15 @@ module Assume_functions =
       let default = Datatype.String.Set.of_list ["__VERIFIER_assume"; "ldv_assume"]
     end)
 
+module Path_assume_functions =
+  Filled_string_set
+    (struct
+      let option_name = "-path_assume_functions"
+      let help = "Specify names of functions allowing to specify assumed unreachability of statements"
+      let arg_name = ""
+      let default = Datatype.String.Set.of_list ["ldv_stop"]
+    end)
+
 module Region_length =
   Int
     (struct
