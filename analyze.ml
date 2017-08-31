@@ -374,6 +374,7 @@ let[@warning "-4"] rewrite_switches =
   let rewrite_switch =
     let module H = Stmt.Hashtbl in
     let h = H.create 32 in
+    let is_case_label = function Case _ | Default _ -> true | Label _ -> false in
     fun e b ss ->
       iter
         (ignore %
@@ -384,10 +385,13 @@ let[@warning "-4"] rewrite_switches =
            end))
         b.bstmts;
       let get_one_target ss =
-        let rec targets s =
-          if not (H.mem h s)
-          then [s]
-          else concat_map targets s.succs
+        let targets s =
+          let rec loop s' =
+            if not (H.mem h s') || not (Stmt.equal s' s) && exists is_case_label s'.labels
+            then [s']
+            else concat_map loop s'.succs
+          in
+          loop s
         in
         let targets = map targets ss in
         if for_all ((=) 1 % length) targets
@@ -399,7 +403,6 @@ let[@warning "-4"] rewrite_switches =
           None
       in
       let bodies target b =
-        let is_case_label = function Case _ | Default _ -> true | Label _ -> false in
         let bs = group_by (fun _ s2 -> not @@ exists is_case_label s2.labels) b.bstmts in
         let conds =
           map hd bs |>
