@@ -34,7 +34,12 @@ let container_of =
                                               ~e:(mkAddrOf ~loc (Mem (mkCast ~newt ~e:(zero ~loc)), to_offset offs)),
                                             charPtrType))
 
-let dot ~loc offs e = mkAddrOf ~loc (Mem e, to_offset offs)
+let dot ~loc offs e =
+  mkCast
+    ~force:false
+    ~overflow:Check
+    ~e:(mkAddrOf ~loc (Mem e, to_offset offs))
+    ~newt:(TPtr (ucharType, []))
 
 let rec mark =
   function

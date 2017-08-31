@@ -979,11 +979,16 @@ module Analysis (I' : sig val offs_of_key : (fieldinfo * typ) Info.offs Info.H_f
     | _ -> None
 
   let match_dot =
+    let is_uchar_ptr_type ty =
+      match unrollType ty with
+      | TPtr (TInt (IUChar, _), _) -> true
+      | _                          -> false
+    in
     function
     | BinOp ((PlusPI | IndexPI),
              { enode = CastE (chrptr, _, e); _ },
              { enode = Const (CInt64 (c, (IULongLong | IULong), _)); _ }, _)
-      when isCharPtrType chrptr && isPointerType (typeOf e) ->
+      when is_uchar_ptr_type chrptr && isPointerType (typeOf e) ->
       let ty = Ast_info.pointed_type (typeOf e) in
       begin match unrollType ty with
       | TComp (ci, _, _) ->
