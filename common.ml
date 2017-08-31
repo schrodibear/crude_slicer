@@ -244,7 +244,7 @@ module Ci = struct
               (curry @@
                function `Field _, `Field _ | `Container_of_void _, `Container_of_void _ -> true | _ -> false) %>
             concat_map
-              (function `Field _ :: _ as l -> l | `Container_of_void _ as e :: _ -> [e] | [] -> assert false))
+              (function `Field _ :: _ as l -> l | `Container_of_void _ :: _ as l -> [last l] | [] -> assert false))
 
   let goffsets ci =
     let open List in
