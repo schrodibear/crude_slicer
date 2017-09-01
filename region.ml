@@ -1496,6 +1496,17 @@ module Analysis (I' : sig val offs_of_key : (fieldinfo * typ) Info.offs Info.H_f
       map_pair (take @@ uncurry min @@ map_pair length pair) pair
     in
     let map = H_stmt.memo h_maps stmt (fun _ -> H_map.create ()) in
+    let bump_ret_region ci =
+      let bump us = bump_ci ci [List.hd us] in
+      bump arg_regions;
+      switch (Some (Kernel_function.get_name kf));
+      bump param_regions;
+      switch f
+    in
+    begin match unrollType @@ Kernel_function.get_return_type kf with
+    | TComp (ci, _, _) -> bump_ret_region ci
+    | _                -> ()
+    end;
     constrain ~map ~by:param_regions arg_regions
 
   let expr_of_lval =
