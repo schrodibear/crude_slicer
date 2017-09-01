@@ -116,6 +116,15 @@ module Switch_count =
       let default = 100000
     end)
 
+module Goto_path_count =
+  Int
+    (struct
+      let option_name = "-goto_path_count"
+      let help = "Limits the number of paths to consider for a single goto statement in goto analysis"
+      let arg_name = ""
+      let default = 100000
+    end)
+
 module Builtin_expect_regexp =
   String
     (struct

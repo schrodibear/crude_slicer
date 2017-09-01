@@ -208,24 +208,28 @@ module Goto_handling = struct
   module H = Stmt.Hashtbl
 
   module M = struct
+    exception Give_up
+
     let all_paths ?s' s =
       let open Stmt in
       let open List in
+      let count = ref 0 and max_count = Options.Goto_path_count.get () in
       let rec all_paths path =
         let cs = hd path in
         match[@warning "-4"] cs.skind with
-        | Return _ -> [path]
-        | _        ->
-          may_map (fun s' -> if equal cs s then [s'] else []) ~dft:[] s' @ cs.succs |>
-          filter
-            (fun cs' ->
-               let rec mem_succ =
-                 function
-                 | [] | [_]            -> false
-                 | x :: (y :: _ as xs) -> equal cs y && equal cs' x || mem_succ xs
-               in
-               not @@ mem_succ path) |>
-          concat_map (all_paths % cons' path)
+        | Return _ -> (incr count;
+                       if !count > max_count then raise Give_up;
+                       [path])
+        | _        -> may_map (fun s' -> if equal cs s then [s'] else []) ~dft:[] s' @ cs.succs |>
+                      filter
+                        (fun cs' ->
+                           let rec mem_succ =
+                             function
+                             | [] | [_]            -> false
+                             | x :: (y :: _ as xs) -> equal cs y && equal cs' x || mem_succ xs
+                           in
+                           not @@ mem_succ path) |>
+                      concat_map (all_paths % cons' path)
       in
       all_paths [s]
 
@@ -245,11 +249,8 @@ module Goto_handling = struct
       let separators = H.create 8 in
       let cache = H.create 64 in
       fun s s' ->
-        let all_paths = all_paths ~s' s in
         H.clear separators;
-        begin match all_paths with
-        | []      -> ()
-        | p :: ps ->
+        let compute_separators p ps =
           iter (fun s -> H.replace separators s ()) p;
           iter
             (fun p ->
@@ -257,6 +258,11 @@ module Goto_handling = struct
                iter (fun s -> H.replace cache s ()) p;
                H.filter_map_inplace (fun s () -> if H.mem cache s then Some () else None) separators)
             ps
+        in
+        begin match all_paths ~s' s with
+        | []                -> ()
+        | p :: ps           -> compute_separators p ps
+        | exception Give_up -> H.replace separators Kernel_function.(find_return @@ find_englobing_kf s) ()
         end;
         H.clear r;
         H.iter (H.add r) separators;
