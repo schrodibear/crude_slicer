@@ -39,7 +39,10 @@ module Make (Analysis : Region.Analysis) = struct
     let ty = Ty.normalize ty in
     if not (isStructOrUnionType ty || isVoidType ty) then Some (f ()) else None
 
-  let deref ~loc lv = Mem (new_exp ~loc @@ Lval lv), NoOffset
+  let deref =
+    let module H = Lval.Hashtbl in
+    let h = H.create 64 in
+    fun ~loc lv -> H.memo h lv @@ fun lv -> Mem (new_exp ~loc @@ Lval lv), NoOffset
 
   let is_var_sating p e =
     match (stripCasts e).enode with
