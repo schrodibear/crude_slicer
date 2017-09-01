@@ -1477,14 +1477,10 @@ module Analysis (I' : sig val offs_of_key : (fieldinfo * typ) Info.offs Info.H_f
         (R.all_void_xs ())
 
   let safe_param_regions ?f kf =
-    let open Kernel_function in
-    match get_definition kf with
-    | _                       -> param_regions kf
-    | exception No_Definition ->
-      switch (Some (get_name kf));
-      let r = param_regions kf in
-      switch f;
-      r
+    switch (Some (Kernel_function.get_name kf));
+    let r = param_regions kf in
+    switch f;
+    r
 
   let replay_on_call ~stmt ?f kf lvo args =
     let param_regions, arg_regions =
