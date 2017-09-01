@@ -63,7 +63,7 @@ struct
   type nonrec t = Bv.t * Flag.t
   let create f = Bv.create ~size false, f
   let clear (v, f) =
-    if Bv.is_empty v then Flag.report f;
+    if not (Bv.is_empty v) then Flag.report f;
     Bv.clear v
   let copy f (v, _) = Bv.copy v, f
   let add e (v, f) =
