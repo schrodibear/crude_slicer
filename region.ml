@@ -1387,20 +1387,24 @@ module Analysis (I' : sig val offs_of_key : (fieldinfo * typ) Info.offs Info.H_f
     in
     concat_map filter @@ combine arg_tys @@ combine arg_regions param_regions
 
+  let bump us offs = List.iter (ignore % take offs) us
+
+  let bump_ci ci us = List.iter (bump us) (Ci.dots ci)
+
   let bump_param_regions kf =
     List.iter
-      (fun (offs, au, pu) -> List.iter (fun (path, _) -> ignore @@ take path au; ignore @@ take path pu) offs)
+      (fun (offs, au, pu) -> List.iter (bump [au; pu] % fst) offs)
       (initial_deps kf)
 
   let unify_exprs =
     let unify_comps ?f ci lv1 lv2 =
       let u1, u2 = map_pair (location % of_lval ?f) (lv1, lv2) in
       List.iter (fun offs -> uncurry unify @@ map_pair (take offs) (u1, u2)) (Ci.arrows ci);
-      List.iter (fun offs -> ignore @@ map_pair (take offs) (u1, u2)) (Ci.dots ci)
+      bump_ci ci [u1; u2]
     in
     let bump_comp ?f ci e =
       match of_expr ?f e with
-      | `Value u -> List.iter (fun offs -> ignore @@ take offs u) (Ci.dots ci)
+      | `Value u -> bump_ci ci [u]
       | `None    -> ()
     in
     fun ?f e1 e2 ->
