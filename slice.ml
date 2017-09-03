@@ -319,7 +319,7 @@ module Make (Analysis : Region.Analysis) = struct
           | _        -> Console.fatal "Slicing.comp_assign: RHS is not an lval: %a" pp_exp e
         in
         let ci =
-          match unrollType @@ typeOf e with
+          match Ty.unbracket @@ unrollType @@ typeOf e with
           | TComp (ci, _, _)  -> ci
           | ty                -> Console.fatal "Slicing.comp_assign: RHS is not a composite: %a %a" pp_exp e pp_typ ty
         in
@@ -514,7 +514,7 @@ module Make (Analysis : Region.Analysis) = struct
       let comp_assign lv =
         let r_lv = R.(location @@ of_lval lv) in
         let ci =
-          match unrollType @@ typeOfLval lv with
+          match Ty.unbracket @@ unrollType @@ typeOfLval lv with
           | TComp (ci, _, _)  -> ci
           | ty                -> Console.fatal "Slicing.comp_assign: LHS is not a composite: %a : %a"
                                    pp_lval lv pp_typ ty
