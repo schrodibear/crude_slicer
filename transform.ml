@@ -12,6 +12,7 @@ open Cil
 open Cil_types
 open Visitor
 
+open Extlib
 open! Common
 open Region
 open Analyze
@@ -70,12 +71,25 @@ module Make (Analysis : Analysis) = struct
           | _                                                  -> ()
       in
       match match_container_of2 e.enode, match_dot e.enode with
-      | Some (e, offs), _              -> let e = visit e in mark offs; ChangeTo (container_of ~loc offs e)
-      | _,              Some (e, offs) -> let e = visit e in mark offs; ChangeTo (dot ~loc offs e)
-      | _                              ->
+      | Some (e, offs), _                         -> let e = visit e in mark offs; ChangeTo (container_of ~loc offs e)
+      | _,              Some (e, offs)            -> let e = visit e in mark offs; ChangeTo (dot ~loc offs e)
+      | _                                         ->
         match e.enode with
-        | CastE (ty, _, e)             -> cast ty e; DoChildren
-        | _                            -> DoChildren
+        | CastE (ty, _, e)                        -> cast ty e; DoChildren
+        | BinOp
+            ((Eq | Ne as op),
+             { enode = CastE (ty, _, e1); _ },
+             { enode = CastE (ty', _, e2); _ },
+             _)
+          when
+            not
+              (need_cast ty theMachine.upointType
+               || need_cast ty ty')               -> ChangeToPost
+                                                       (mkBinOp ~loc op
+                                                          (mkCast ~force:false ~overflow:Check ~e:e1 ~newt:(typeOf e2))
+                                                          e2,
+                                                       id)
+        | _                                       -> DoChildren
 
     method! vstmt s =
       match s.skind with
