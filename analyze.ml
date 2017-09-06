@@ -124,8 +124,8 @@ let cache_offsets =
         let rec hash =
           function
           | []                               -> 1
-          | `Field fi :: os                  -> 7 * hash os + Fieldinfo.hash fi
-          | `Container_of_void (_, ty) :: os -> 13 * hash os + Typ.hash ty
+          | `Field fi :: os                  -> 13 * hash os + 7 * Fieldinfo.hash fi + 5
+          | `Container_of_void (_, ty) :: os -> 13 * hash os + 7 * Typ.hash ty       + 3
         let rec equal p1 p2 =
           match p1, p2 with
           | [],                                 []                                 -> true
