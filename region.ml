@@ -1055,7 +1055,7 @@ module Analysis (I' : sig val offs_of_key : (fieldinfo * typ) Info.offs Info.H_f
     H_v.mem h_retvars,
     fun () -> H_v.clear h_to_retvar; H_v.clear h_retvars
 
-  (* Also used to retrieve return regions, only use from the inside(!) *)
+  (* Also used to retrieve return regions, when applied to retvars *)
   let rec of_var ?f x =
     let of_var =
       let open! H_v in
@@ -1210,7 +1210,12 @@ module Analysis (I' : sig val offs_of_key : (fieldinfo * typ) Info.offs Info.H_f
       let of_lval = of_lval ?f in
       let of_expr = of_expr ?f in
       let value r = value ?f r in
-      if not @@ isPointerType @@ Ty.rtyp_if_fun @@ typeOf e
+      let rtyp_if_fun =
+        match e.enode with
+        | Lval (Var vi, NoOffset) when is_retvar vi -> Ty.rtyp_if_fun
+        | _                                         -> id
+      in
+      if not @@ isPointerType @@ rtyp_if_fun @@ typeOf e
       then
         `None
       else
