@@ -84,13 +84,13 @@ module Representant = struct
   type t =
     {
       id   : int;
-      name : string;
+      name : string Lazy.t;
       typ  : typ;
 
       mutable kind : Kind.t
     }
 
-  let name r = r.name
+  let name r = !! (r.name)
   let typ r = r.typ
   let kind r = r.kind
 
@@ -108,9 +108,9 @@ module Representant = struct
     incr id;
     { id = !id; name; typ; kind }
 
-  let global name typ = mk ~name ~typ ~kind:`Global
-  let poly fname name typ = mk ~name:(fname ^ "::" ^ name) ~typ ~kind:(`Poly fname)
-  let local fname name typ = mk ~name:(fname ^ ":::" ^ name) ~typ ~kind:(`Local fname)
+  let global name typ = mk ~name:(lazy name) ~typ ~kind:`Global
+  let poly fname name typ = mk ~name:(lazy (fname ^ "::" ^ name)) ~typ ~kind:(`Poly fname)
+  let local fname name typ = mk ~name:(lazy (fname ^ ":::" ^ name)) ~typ ~kind:(`Local fname)
 
   let demote r = r.kind <- `Dummy
 
@@ -126,12 +126,12 @@ module Representant = struct
     check_field "Representant.arrow" r fi;
     if not (isPointerType fi.ftype) then
       Console.fatal "Representant.arrow: not a pointer field: %s.%s : %a" fi.fname fi.fcomp.cname pp_typ fi.ftype;
-    mk ~name:(r.name ^ "->" ^ fi.fname) ~typ:(Ast_info.pointed_type fi.ftype) ~kind:r.kind
+    mk ~name:(lazy (name r ^ "->" ^ fi.fname)) ~typ:(Ast_info.pointed_type fi.ftype) ~kind:r.kind
 
   let deref r =
     if not (isPointerType r.typ) then
-      Console.fatal "Representant.deref: not a pointer region: %s : %a" r.name pp_typ r.typ;
-    mk ~name:("*(" ^ r.name ^ ")") ~typ:(Ast_info.pointed_type r.typ) ~kind:r.kind
+      Console.fatal "Representant.deref: not a pointer region: %s : %a" (name r) pp_typ r.typ;
+    mk ~name:(lazy ("*(" ^ name r ^ ")")) ~typ:(Ast_info.pointed_type r.typ) ~kind:r.kind
 
   let check_detached f fi =
     if not (isStructOrUnionType fi.ftype || isArrayType fi.ftype || fi.faddrof) then
@@ -142,25 +142,25 @@ module Representant = struct
   let dot r fi =
     check_field "Representant.dot" r fi;
     check_detached "Representant.dot" fi;
-    mk ~name:(r.name ^ "." ^ fi.fname) ~typ:(Ty.unbracket fi.ftype) ~kind:r.kind
+    mk ~name:(lazy (name r ^ "." ^ fi.fname)) ~typ:(Ty.unbracket fi.ftype) ~kind:r.kind
 
   let container r fi =
     check_detached "Representant.container" fi;
     if not Ty.(compatible (unbracket fi.ftype) r.typ) then
       Console.fatal
         "Representant.container: illegal use of `container_of': %s.%s : %a vs. %s : %a"
-        fi.fcomp.cname fi.fname pp_typ fi.ftype r.name pp_typ r.typ;
+        fi.fcomp.cname fi.fname pp_typ fi.ftype (name r) pp_typ r.typ;
     if not fi.fcomp.cstruct then
       Console.fatal "Representant.container: container should be a structure: %s" fi.fcomp.cname;
     mk
-      ~name:("(" ^ r.name ^ ", " ^ fi.fcomp.cname ^ "." ^ fi.fname ^ ")")
+      ~name:(lazy ("(" ^ name r ^ ", " ^ fi.fcomp.cname ^ "." ^ fi.fname ^ ")"))
       ~typ:(TComp (fi.fcomp, empty_size_cache (), []))
       ~kind:r.kind
 
-  let dot_void r = mk ~name:(r.name ^ ".void") ~typ:voidType ~kind:r.kind
+  let dot_void r = mk ~name:(lazy (name r ^ ".void")) ~typ:voidType ~kind:r.kind
 
   let container_of_void r typ =
-    let name =
+    let name' =
       match unrollType typ with
       | TComp (ci, _, _) when ci.cstruct -> ci.cname
       | TComp _                          -> Console.fatal
@@ -177,11 +177,11 @@ module Representant = struct
     | ty                                   -> Console.fatal
                                                 "Representant.container_of_void: can only take (_, %s.void) \
                                                  from void or union region: %s : %a"
-                                                name r.name pp_typ ty
+                                                name' (name r) pp_typ ty
     end;
-    mk ~name:("(" ^ r.name ^ ", " ^ name ^ ".void)") ~typ ~kind:r.kind
+    mk ~name:(lazy ("(" ^ name r ^ ", " ^ name' ^ ".void)")) ~typ ~kind:r.kind
 
-  let pp fmttr r = Format.fprintf fmttr "%a%s" Kind.pp r.kind r.name
+  let pp fmttr r = Format.fprintf fmttr "%a%s" Kind.pp r.kind (name r)
 end
 
 module type Representant = sig
@@ -244,7 +244,6 @@ module Make_unifiable (R : Representant) () : Unifiable with type repr = R.t = s
           let k1, k2 = rank r1, rank r2 in
           if      k1 > k2                                            then `First
           else if k2 > k1                                            then `Second
-          else if String.(length @@ R.name r1 < length @@ R.name r2) then `First
           else                                                            `Second
       in
       match choice with
@@ -357,7 +356,7 @@ module type Representant_intf = sig
   type t = private
     {
       id   : int;
-      name : string;
+      name : string Lazy.t;
       typ  : typ;
       mutable kind : Kind.t
     }
