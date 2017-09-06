@@ -19,38 +19,45 @@ open Extlib
 open Format
 open! Common
 
-let memo f =
+let memo_callee_approx f =
   let cache = ref None in
-  fun () ->
-    match !cache with
-    | None ->
-      let r = f () in
-      cache := Some r;
-      r
-    | Some r -> r
+  fun ?callee_approx () ->
+    match !cache, callee_approx with
+    | None,             _
+    | Some (Some _, _), None
+    | Some (None,   _), Some _ ->(let r = f callee_approx in
+                                  cache := Some (callee_approx, r);
+                                  r)
+    | Some (Some _, r), Some _
+    | Some (None,   r), None   -> r
+
+class direct_call_skipping_visitor = object(self)
+  inherit frama_c_inplace
+  method! vinst =
+    let avoid_direct_call lv args =
+      may (ignore % visitFramacLval (self :> frama_c_visitor)) lv;
+      List.iter (ignore % visitFramacExpr (self :> frama_c_visitor)) args;
+      SkipChildren
+    in
+    function
+      [@warning "-4"]
+    | Call (lv, { enode = Lval (Var vi, NoOffset); _ }, args, _)
+      when Kf.mem vi                                             -> avoid_direct_call lv args
+    | Call _ | Set _ | Asm _ | Skip _ | Code_annot _             -> DoChildren
+end
 
 let get_addressed_kfs =
   let module H = Kernel_function.Hashtbl in
-  memo @@
-  fun () ->
+  memo_callee_approx @@
+  fun _ ->
   let o =
     object(self)
       val mutable result = H.create 16
       method private add kf = H.replace result kf ()
       method get = H.fold (const' List.cons) result []
 
-      inherit frama_c_inplace
-      method! vinst =
-        let avoid_direct_call lv args =
-          may (ignore % visitFramacLval (self :> frama_c_visitor)) lv;
-          List.iter (ignore % visitFramacExpr (self :> frama_c_visitor)) args;
-          SkipChildren
-        in
-        function
-          [@warning "-4"]
-        | Call (lv, { enode = Lval (Var vi, NoOffset); _ }, args, _)
-          when Kf.mem vi                                             -> avoid_direct_call lv args
-        | Call _ | Set _ | Asm _ | Skip _ | Code_annot _             -> DoChildren
+      inherit direct_call_skipping_visitor
+
       method! vvrbl vi =
         begin match Globals.Functions.get vi with
         | kf                  -> self#add kf
@@ -62,9 +69,14 @@ let get_addressed_kfs =
   Visitor.visitFramacFileSameGlobals (o :> frama_c_visitor) @@ Ast.get ();
   o#get
 
-let callee_approx e =
+let get_addressed_kfs = get_addressed_kfs ?callee_approx:(Some ())
+
+let callee_approx ?callee_approx e =
   let open List in
-  get_addressed_kfs () |>
+  may_map
+    (fun approx -> Exp.(List_hashtbl.find_all approx @@ deref_mem e))
+    ~dft:(get_addressed_kfs ())
+    callee_approx |>
   let ty = typeOf e in
   filter (fun kf -> not @@ need_cast (Kernel_function.get_vi kf).vtype ty)
 
@@ -74,8 +86,8 @@ module Cg =
     (struct type t = [ `Precise | `Approx ] let default = `Precise let compare : t -> _ = compare end)
 
 let get_cg =
-  memo @@
-  fun () ->
+  memo_callee_approx @@
+  fun approx ->
   let g = Cg.create () in
   let main = Globals.Functions.find_by_name @@ Kernel.MainFunction.get () in
   Cg.add_vertex g main;
@@ -98,11 +110,11 @@ let get_cg =
   g, main
 
 let condensate =
-  memo @@
-  fun () ->
+  memo_callee_approx @@
+  fun callee_approx ->
   Console.debug "Started callgraph condensation...";
   Console.debug ~level:2 "Computing callgraph...";
-  let cg, main = get_cg () in
+  let cg, main = get_cg ?callee_approx () in
   Console.debug ~level:2 "Syntactic slicing...";
   let module H = Kernel_function.Hashtbl in
   let module Traverse = Graph.Traverse.Bfs (Cg) in

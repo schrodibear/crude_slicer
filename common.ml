@@ -305,6 +305,18 @@ module Ci = struct
          | _                                                                 -> [])
 end
 
+module Exp = struct
+  include Exp
+  let deref_mem e =
+    match[@warning "-4"] e.enode with
+    | Lval (Mem e, NoOffset) -> e
+    | _                      -> e
+  module List_hashtbl = struct
+    include Hashtbl
+    let find_all h k = try find h k with Not_found -> []
+  end
+end
+
 module Stmt = struct
   include Stmt
   let lnum s = (fst @@ loc s).Lexing.pos_lnum

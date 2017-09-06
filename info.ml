@@ -13,7 +13,7 @@ open Cil_datatype
 
 open Format
 open Extlib
-open Common
+open! Common
 open Data
 
 module type Criterion = sig
