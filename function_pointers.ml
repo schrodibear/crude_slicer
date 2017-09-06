@@ -147,49 +147,44 @@ let ensure_nondet_int_function_present () =
 let rewrite ~callee_approx =
   let approx ckf s lvo e args loc =
     let open Kernel_function in
+    let mkStmt = mkStmt ~valid_sid:true in
     let call kf = Instr (Call (lvo, evar (get_vi kf), args, loc)) in
-    let int_tmp name = makeTempVar (get_definition ckf) ~name (TInt (IInt, [])) in
-    let init_nondet vi =
-      let verifier_nondet = get_vi @@ Globals.Functions.find_by_name @@ Options.Nondet_int_function.get () in
-      mkStmt @@ Instr (Call (Some (var vi), evar verifier_nondet, [], loc))
+    let stub () =
+      let nondet = makeTempVar (get_definition ckf) ~name:"nondet_stub" (TInt (IInt, [])) in
+      let init_nondet vi =
+        let verifier_nondet = get_vi @@ Globals.Functions.find_by_name @@ Options.Nondet_int_function.get () in
+        mkStmt @@ Instr (Call (Some (var vi), evar verifier_nondet, [], loc))
+      in
+      may_map
+        (fun lv ->
+           let ty = typeOfLval lv in
+           if isIntegralOrPointerType ty
+           && need_cast ty ulongLongType
+           && need_cast ty longLongType
+           then
+             Block
+               (mkBlock @@
+                [init_nondet nondet;
+                 mkStmt @@
+                 Instr (Set
+                          (lv,
+                           mkCast ~force:false ~overflow:Check ~e:(evar nondet) ~newt:(typeOfLval lv),
+                           loc))])
+           else
+             s.skind)
+        ~dft:(Instr (Skip loc))
+        lvo
     in
-    let block l = Block (mkBlock l) in
-    match Exp.(List_hashtbl.find_all callee_approx @@ underef_mem e) with
-    | []           -> (let nondet = int_tmp "nodet_stub" in
-                       s.skind <-
-                         may_map
-                           (fun lv ->
-                              let ty = typeOfLval lv in
-                              if isIntegralOrPointerType ty
-                              && need_cast ty ulongLongType
-                              && need_cast ty longLongType
-                              then
-                                block
-                                  [init_nondet nondet;
-                                   mkStmt @@
-                                   Instr (Set
-                                            (lv,
-                                             mkCast ~force:false ~overflow:Check ~e:(evar nondet) ~newt:(typeOfLval lv),
-                                             loc))]
-                              else
-                                s.skind)
-                           ~dft:(Instr (Skip loc))
-                           lvo)
-    | [kf]         -> s.skind <- call kf
-    | kf :: kfs    -> (let nondet = int_tmp "nondet_callee" in
-                       let next =
-                         let curr = ref ~-1 in
-                         fun () ->
-                           incr curr;
-                           mkBinOp ~loc Eq (evar ~loc nondet) (integer ~loc !curr)
-                       in
-                       s.skind <-
-                         block
-                           [init_nondet nondet;
-                            List.fold_right
-                              (fun kf acc -> mkStmt @@ If (next (), mkBlock [mkStmt @@ call kf], mkBlock [acc], loc))
-                              kfs
-                              (mkStmt @@ call kf)])
+    let e = Exp.underef_mem e in
+    s.skind <-
+      List.fold_right
+        (fun kf acc ->
+           If (mkBinOp ~loc Eq e (mkAddrOf ~loc @@ var @@ get_vi kf),
+               mkBlock [mkStmt @@ call kf],
+               mkBlock [mkStmt @@ acc],
+               loc))
+        Exp.(List_hashtbl.find_all callee_approx e)
+        (stub ())
   in
   ensure_nondet_int_function_present ();
   visitFramacFile
