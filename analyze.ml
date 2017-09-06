@@ -68,7 +68,10 @@ let callee_approx e =
   let ty = typeOf e in
   filter (fun kf -> not @@ need_cast (Kernel_function.get_vi kf).vtype ty)
 
-module Cg = Graph.Imperative.Digraph.Concrete (Kernel_function)
+module Cg =
+  Graph.Imperative.Digraph.ConcreteLabeled
+    (Kernel_function)
+    (struct type t = [ `Precise | `Approx ] let default = `Precise let compare : t -> _ = compare end)
 
 let get_cg =
   memo @@
@@ -84,7 +87,9 @@ let get_cg =
         begin match[@ warning "-4"] i with
         | Call (_, { enode = Lval (Var vi, NoOffset); _ }, _, _)
           when Kf.mem vi                                            -> Cg.add_edge g kf (Globals.Functions.get vi)
-        | Call (_, e, _, _)                                         -> List.iter (Cg.add_edge g kf) (callee_approx e)
+        | Call (_, e, _, _)                                         -> List.iter
+                                                                         (fun kf' -> Cg.add_edge_e g (kf, `Approx, kf'))
+                                                                         (callee_approx ?callee_approx:approx e)
         | _                                                         -> ()
         end;
         SkipChildren
@@ -105,9 +110,18 @@ let condensate =
   Traverse.iter_component (fun v -> H.replace h v ()) cg main;
   let module Components = Graph.Components.Make (Cg) in
   let g = Cg.create ~size:(H.length h) () in
-  Cg.iter_edges (fun f t -> if H.mem h f && H.mem h t then Cg.add_edge g f t) cg;
+  Cg.iter_edges_e (fun (f, _, t as e) -> if H.mem h f && H.mem h t then Cg.add_edge_e g e) cg;
   Console.debug ~level:2 "Sccs...";
-  let r = Components.scc_list g in
+  let r =
+    let l = Components.scc_list g in
+    Cg.iter_edges_e
+      (function
+        | f1, `Approx, f2 as e -> if not (Cg.mem_edge_e g (f1, `Precise, f2)) then Cg.remove_edge_e g e
+        | _                    -> ())
+      g;
+    let _, f = Components.scc g in
+    List.(map @@ sort (fun f1 f2 -> f f1 - f f2)) l
+  in
   Console.debug ~level:3 "Finished condensation...";
   r
 
