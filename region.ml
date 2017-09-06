@@ -1577,8 +1577,13 @@ module Analysis
       method private vexpr_pre = ignore % of_expr ~f
       method private vexpr_post e =
         match e.enode with
-        | BinOp ((Eq | Ne), e1, e2, _) -> unify_exprs ~f e1 e2
-        | _                            -> ()
+        | BinOp ((Eq | Ne),
+                 { enode = CastE (ty, _, e1); _ },
+                 { enode = CastE (ty', _, e2); _ },
+                 _)
+          when not (need_cast ty theMachine.upointType || need_cast ty ty') -> unify_exprs ~f e1 e2
+        | BinOp ((Eq | Ne), e1, e2, _)                                      -> unify_exprs ~f e1 e2
+        | _                                                                 -> ()
       method private vstmt_post stmt =
         match stmt.skind with
         | Instr (Set (lv, e, loc))                       -> unify_exprs ~f (expr_of_lval ~loc lv) e
