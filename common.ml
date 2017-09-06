@@ -307,7 +307,7 @@ end
 
 module Exp = struct
   include Exp
-  let deref_mem e =
+  let underef_mem e =
     match[@warning "-4"] e.enode with
     | Lval (Mem e, NoOffset) -> e
     | _                      -> e

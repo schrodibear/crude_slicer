@@ -51,6 +51,8 @@ module Make (Analysis : Region.Analysis) = struct
 
   let dummy_flag = Flag.create "slicing_dummy"
 
+  let callee_approx = Analysis.callee_approx
+
   module Make_local
       (C : sig val f : kernel_function end)
       (F : I.E.Reads)
@@ -478,7 +480,7 @@ module Make (Analysis : Region.Analysis) = struct
                            { enode = Lval (Var _, NoOffset) },
                            args, _))                                     -> stub s ?lv args;              SkipChildren
             | Instr (Call (lv, e, args, _))                              ->
-              let kfs = Analyze.callee_approx e in
+              let kfs = Analyze.callee_approx ?callee_approx e in
               begin match kfs with
               | []                                                       -> stub s ?lv args;              SkipChildren
               | kfs                                                      -> List.iter
@@ -628,8 +630,10 @@ module Make (Analysis : Region.Analysis) = struct
             end;
             SkipChildren
           in
-          let try_all f l =
-            List.(iter (mark % some) @@ concat_map f l);
+          let try_all e f l =
+            let kfs = List.filter (fun kf -> match f kf with `Needed -> true | `Not_yet -> false) l in
+            may Exp.(fun approx -> Hashtbl.replace approx (underef_mem e) kfs) callee_approx;
+            List.iter (mark % some % Kernel_function.get_vi) kfs;
             SkipChildren
           in
           let stmts stmts = if List.exists (fun s -> I.E.has_stmt_req s eff) stmts then I.E.add_stmt_req s eff in
@@ -666,18 +670,15 @@ module Make (Analysis : Region.Analysis) = struct
           | Instr (Call (lv,
                          { enode = Lval (Var _, NoOffset) }, _, _))     -> stmt @@ stub lv
           | Instr (Call (lv, e, _, _))                                  ->
-            let kfs = Analyze.callee_approx e in
+            let kfs = Analyze.callee_approx ?callee_approx e in
             begin match kfs with
             | []                                                       -> stmt @@ stub lv
             | kfs                                                      -> try_all
+                                                                            e
                                                                             (fun kf ->
-                                                                               match
-                                                                                 if Kernel_function.is_definition kf
-                                                                                 then call s ?lv kf
-                                                                                 else stub lv
-                                                                               with
-                                                                               | `Needed  -> [Kernel_function.get_vi kf]
-                                                                               | `Not_yet -> [])
+                                                                               if Kernel_function.is_definition kf
+                                                                               then call s ?lv kf
+                                                                               else stub lv)
                                                                              kfs
             end
           | Instr (Asm _ | Skip _ | Code_annot _)                       -> SkipChildren
@@ -856,7 +857,11 @@ module Make (Analysis : Region.Analysis) = struct
       Cfg.clearFileCFG ~clear_id:false file;
       Cfg.computeFileCFG file;
       Rmtmps.removeUnusedTemps
-        ~isRoot:(function GFun (f, _) when f.svar.vname = Kernel.MainFunction.get () -> true | _ -> false)
+        ~isRoot:(
+          function
+          | GFun (f, _)         when f.svar.vname = Kernel.MainFunction.get ()         -> true
+          | GFunDecl (_, vi, _) when vi.vname     = Options.Nondet_int_function.get () -> true
+          | _ -> false)
         file
 
     let clear () =
@@ -869,15 +874,40 @@ let slice () =
   Console.debug "Started slicing...";
   let offs_of_key = Info.H_field.create 2048 in
   Analyze.cache_offsets ~offs_of_key;
-  let module Region_analysis = Region.Analysis (struct let offs_of_key = offs_of_key end) () in
-  let { Region_analysis.I.goto_vars; stmt_vars; _ } as info = Region_analysis.I.create () in
-  Analyze.fill_goto_tables ~goto_vars ~stmt_vars;
-  let module Transform = Transform.Make (Region_analysis) in
+  Console.debug "Stage 1...";
+  let module Region_analysis1 =
+    Region.Analysis
+      (struct
+        let offs_of_key   = offs_of_key
+        let callee_approx = None
+        let region_length, region_depth, region_count = 1, 1, 2
+      end)
+      ()
+  in
+  let module Transform = Transform.Make (Region_analysis1) in
   Transform.rewrite ();
-  Region_analysis.compute_regions ();
-  let module Slice = Make (Region_analysis) in
+  Region_analysis1.compute_regions ();
+  let module Function_pointer_analysis = Function_pointers.Make (Region_analysis1) in
+  let callee_approx = Function_pointer_analysis.approx () in
+  Console.debug "Stage 2...";
+  Region_analysis1.clear ();
+  Gc.full_major ();
+  let module Region_analysis2 =
+    Region.Analysis
+      (struct
+        let offs_of_key   = offs_of_key
+        let callee_approx = Some callee_approx
+        let        region_length,        region_depth,        region_count =
+          Options.(Region_length.get (), Region_depth.get (), Region_count.get ())
+      end)
+      ()
+  in
+  let { Region_analysis2.I.goto_vars; stmt_vars; _ } as info = Region_analysis2.I.create () in
+  Analyze.fill_goto_tables ~goto_vars ~stmt_vars;
+  Region_analysis2.compute_regions ();
+  let module Slice = Make (Region_analysis2) in
   let module Slice = Slice.Make (struct let info = info end) in
-  let sccs = Analyze.condensate () in
+  let sccs = Analyze.condensate ~callee_approx () in
   Slice.init sccs;
   Console.debug "Will now collect assigns and deps...";
   Slice.collect sccs;
@@ -885,6 +915,7 @@ let slice () =
   Slice.mark sccs;
   Console.debug "Will now sweep...";
   Slice.sweep ();
+  Function_pointers.rewrite ~callee_approx;
   let stat = Gc.stat () in
   Console.debug  "Current # of live words: %d" stat.Gc.live_words;
   Console.debug "Will now clean...";

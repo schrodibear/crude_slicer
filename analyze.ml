@@ -74,7 +74,7 @@ let get_addressed_kfs = get_addressed_kfs ?callee_approx:(Some ())
 let callee_approx ?callee_approx e =
   let open List in
   may_map
-    (fun approx -> Exp.(List_hashtbl.find_all approx @@ deref_mem e))
+    (fun approx -> Exp.(List_hashtbl.find_all approx @@ underef_mem e))
     ~dft:(get_addressed_kfs ())
     callee_approx |>
   let ty = typeOf e in
