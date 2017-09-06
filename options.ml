@@ -76,6 +76,15 @@ module Path_assume_functions =
       let default = Datatype.String.Set.of_list ["ldv_stop"]
     end)
 
+module Nondet_int_function =
+  String
+    (struct
+      let option_name = "-nondet_int_function"
+      let help = "May specify an alternative name for __VERIFIER_nondet_int"
+      let arg_name = ""
+      let default = "__VERIFIER_nondet_int"
+    end)
+
 module Region_length =
   Int
     (struct
@@ -103,26 +112,6 @@ module Region_count =
                   subgraph (before producing a loop) during unification"
       let arg_name = ""
       let default = 9
-    end)
-
-module Switch_count =
-  Int
-    (struct
-      let option_name = "-switch_count"
-      let help = "This heuristical threshold is used to rewrite switch statements to if statements in case they \
-                  blow up goto analysis; it should be approximately equal to the maximal number of paths \
-                  still considered with switches before rewriting to ifs"
-      let arg_name = ""
-      let default = 100000
-    end)
-
-module Goto_path_count =
-  Int
-    (struct
-      let option_name = "-goto_path_count"
-      let help = "Limits the number of paths to consider for a single goto statement in goto analysis"
-      let arg_name = ""
-      let default = 100000
     end)
 
 module Builtin_expect_regexp =

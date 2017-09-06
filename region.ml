@@ -387,7 +387,13 @@ module type Representant_full = sig
   val container_of_void : t -> typ -> t
 end
 
-module Separation : functor () -> sig
+module type Separation_options = sig
+  val region_length : int
+  val region_depth : int
+  val region_count : int
+end
+
+module Separation : functor (_ : Separation_options) () -> sig
   module R : Representant_full
   module U : Unifiable with type repr = R.t
   module H' : Hashmap with module R := R and module U := U
@@ -420,7 +426,7 @@ module Separation : functor () -> sig
   val assert_stratification : U.t -> unit
 
   val clear : unit -> unit
-end = functor () -> struct
+end = functor (O : Separation_options) () -> struct
   module R = struct
     include Representant
 
@@ -708,9 +714,8 @@ end = functor () -> struct
         end)
     type t = (U.t * int) H.t
     open! H
-    let maxl = Options.Region_length.get ()
-    let maxd = Options.Region_depth.get ()
-    let maxc = Options.Region_count.get ()
+    let  maxl,          maxd,         maxc =
+      O.(region_length, region_depth, region_count)
     let create () = create 128
     let key u = let r = U.repr u in r.R.kind, Ty.normalize r.R.typ
     let derefable ty =
@@ -893,11 +898,28 @@ module type Analysis = sig
   val relevant_region : ?f:string -> U.t -> bool
   val initial_deps : kernel_function -> ((typ I.offs * fieldinfo option) list * U.t * U.t) list
 
+  val callee_approx : Kf.t list Exp.Hashtbl.t option
+
   val clear : unit -> unit
 end
 
-module Analysis (I' : sig val offs_of_key : (fieldinfo * typ) Info.offs Info.H_field.t end) () : Analysis = struct
-  module Separation = Separation ()
+module Analysis
+    (I' : sig
+       val offs_of_key : (fieldinfo * typ) Info.offs Info.H_field.t
+       val callee_approx : Kf.t list Exp.Hashtbl.t option
+       val region_length : int
+       val region_depth : int
+       val region_count : int
+     end) ()
+  : Analysis
+= struct
+  module Separation =
+    Separation
+      (struct
+        let   region_length, region_depth, region_count =
+          I'.(region_length, region_depth, region_count)
+      end)
+      ()
 
   open Separation
   module R = R
@@ -1543,6 +1565,8 @@ module Analysis (I' : sig val offs_of_key : (fieldinfo * typ) Info.offs Info.H_f
       | _ -> DoChildrenPost (tap self#vstmt_post)
   end
 
+  let callee_approx = I'.callee_approx
+
   class unifier () fundec =
     let f = fundec.svar.vname in
     let () = switch (Some f) in
@@ -1567,7 +1591,7 @@ module Analysis (I' : sig val offs_of_key : (fieldinfo * typ) Info.offs Info.H_f
                                                               lvo args
         | Instr (Call (lvo, e, args, _))                 -> List.iter
                                                               (fun kf -> replay_on_call ~stmt ~f kf lvo args)
-                                                              (Analyze.callee_approx e)
+                                                              (Analyze.callee_approx ?callee_approx e)
         | Return (Some e, loc)                           -> unify_exprs ~f
                                                               (expr_of_lval ~loc @@ var @@ retvar @@ fundec.svar) e
         | _                                              -> ()
@@ -1654,7 +1678,7 @@ module Analysis (I' : sig val offs_of_key : (fieldinfo * typ) Info.offs Info.H_f
 
   let compute_regions () =
     Console.debug "Started compute_regions...";
-    let sccs = Analyze.condensate () in
+    let sccs = Analyze.condensate ?callee_approx () in
     Console.debug "Proceeding with region analysis...";
     switch None;
     init_globals ();
