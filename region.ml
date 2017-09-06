@@ -1364,9 +1364,9 @@ module Analysis (I' : sig val offs_of_key : (fieldinfo * typ) Info.offs Info.H_f
 
   let initial_deps kf =
     let open List in
-    let rv, args = Kernel_function.(retvar @@ get_vi kf, get_formals kf) in
+    let f, rv, args = Kernel_function.(get_name kf, retvar @@ get_vi kf, get_formals kf) in
     let param_regions, arg_regions =
-      (param_regions kf, arg_regions dummyStmt kf (Some (var rv)) (map evar args)) |>
+      (param_regions kf, arg_regions dummyStmt ~f kf (Some (var rv)) (map evar args)) |>
       if isStructOrUnionType @@ Ty.rtyp_if_fun rv.vtype
       then
         function
