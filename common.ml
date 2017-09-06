@@ -44,6 +44,7 @@ let (%) f g x = f (g x)
 let (%%) f g x y = f (g x y)
 let (%%%) f g x y z = f (g x y z)
 let (%>) f g x = g (f x)
+let (!!) = Lazy.force
 let const f _x = f
 let const' f x _y = f x
 let curry f a b = f (a, b)
@@ -133,6 +134,7 @@ module String = struct
 end
 
 open Cil_types
+open Cil_datatype
 open Cil
 
 open Extlib
@@ -212,7 +214,7 @@ module Ty = struct
     in
     aux 0
 
-  let compatible ty1 ty2 = Cil_datatype.Typ.equal (normalize ty1) (normalize ty2)
+  let compatible ty1 ty2 = Typ.equal (normalize ty1) (normalize ty2)
 
   let rec ref ty n =
     if n <= 0 then ty
@@ -276,7 +278,6 @@ module Ci = struct
     List.map @@ map_fst norm_offset
 
   let dots ci =
-    let open Cil_datatype in
     let open List in
     offsets ci |>
     group_by
@@ -304,8 +305,13 @@ module Ci = struct
          | _                                                                 -> [])
 end
 
+module Stmt = struct
+  include Stmt
+  let lnum s = (fst @@ loc s).Lexing.pos_lnum
+end
+
 module Kf = struct
-  include Cil_datatype.Kf
+  include Kf
 
   let mem vi =
     try

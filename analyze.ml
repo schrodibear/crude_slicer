@@ -208,74 +208,60 @@ module Goto_handling = struct
   module H = Stmt.Hashtbl
 
   module M = struct
-    exception Give_up
-
-    let all_paths ?s' s =
-      let open Stmt in
-      let open List in
-      let count = ref 0 and max_count = Options.Goto_path_count.get () in
-      let rec all_paths path =
-        let cs = hd path in
-        match[@warning "-4"] cs.skind with
-        | Return _ -> (incr count;
-                       if !count > max_count then raise Give_up;
-                       [path])
-        | _        -> may_map (fun s' -> if equal cs s then [s'] else []) ~dft:[] s' @ cs.succs |>
-                      filter
-                        (fun cs' ->
-                           let rec mem_succ =
-                             function
-                             | [] | [_]            -> false
-                             | x :: (y :: _ as xs) -> equal cs y && equal cs' x || mem_succ xs
-                           in
-                           not @@ mem_succ path) |>
-                      concat_map (all_paths % cons' path)
-      in
-      all_paths [s]
-
     let add_closure h =
-      let open List in
       let rec add_closure s =
-        H.replace h s ();
-        s.succs |>
-        filter (not % H.mem h) |>
-        iter add_closure
+        if not (H.mem h s) then begin
+          H.replace h s ();
+          List.iter add_closure s.succs
+        end
       in
       add_closure
 
-    let dependant_stmts =
-      let open List in
-      let r = H.create 64 in
-      let separators = H.create 8 in
-      let cache = H.create 64 in
-      fun s s' ->
-        H.clear separators;
-        let compute_separators p ps =
-          iter (fun s -> H.replace separators s ()) p;
-          iter
-            (fun p ->
-               H.clear cache;
-               iter (fun s -> H.replace cache s ()) p;
-               H.filter_map_inplace (fun s () -> if H.mem cache s then Some () else None) separators)
-            ps
-        in
-        begin match all_paths ~s' s with
-        | []                -> ()
-        | p :: ps           -> compute_separators p ps
-        | exception Give_up -> H.replace separators Kernel_function.(find_return @@ find_englobing_kf s) ()
-        end;
-        H.clear r;
-        H.iter (H.add r) separators;
-        add_closure r s;
-        add_closure r s';
-        H.iter (const' @@ H.remove r) separators;
-        H.fold (const' cons) r []
+    let separate =
+      let module Q = Queue in
+      let d = H.create 64 in
+      let q = Q.create () in
+      let h = H.create 64 in
+      let exception Found of stmt in
+      fun r ?s' s ->
+        Q.add s q;
+        H.add d s 0;
+        while not (Q.is_empty q) do
+          let cs = Q.pop q in
+          may_map (fun s' -> if Stmt.equal cs s then [s'] else []) ~dft:[] s' @ cs.succs |>
+          List.iter (fun s -> if not (H.mem d s) then begin H.(add d s @@ find d cs + 1); Q.add s q end)
+        done;
+        H.remove d s;
+        match
+          H.iter_sorted_by_entry
+            ~cmp:(fun (s1, d1) (s2, d2) ->
+              if      d1 < d2 then -1
+              else if d1 > d2 then 1
+              else                 Stmt.compare s1 s2)
+            (fun cs _ ->
+               H.replace h cs ();
+               add_closure h s;
+               may (add_closure h) s';
+               if not (H.mem h r) || Stmt.equal cs r then begin
+                 H.remove h cs;
+                 H.remove h s;
+                 raise (Found cs)
+               end;
+               H.clear h)
+            d
+        with
+        | exception Found s ->(let r = s, H.fold (const' List.cons) h [] in
+                               H.clear d;
+                               H.clear h;
+                               r)
+        | ()                -> Console.fatal "Analysis.Goto_handling.separate: broken invariant: no separators"
 
     class goto_visitor ~goto_vars ~stmt_vars kf =
+      let return = Kernel_function.find_return kf in
       object(self)
         inherit frama_c_inplace
 
-        val mutable next = Kernel_function.find_return kf
+        val mutable next = return
 
         method! vblock =
           let visit s n =
@@ -307,11 +293,13 @@ module Goto_handling = struct
           | Goto _
           | Break _
           | Continue _                 ->
-            let deps = dependant_stmts s next in
+            let sep, deps = separate return ~s':next s in
+            Console.debug ~level:4 "Found separator for statement %a@@L%d : %a@@L%d"
+              pp_stmt s (Stmt.lnum s) pp_stmt sep (Stmt.lnum sep);
             let vi =
               makeTempVar
                 ~insert:false
-                ~name:("goto_at_L" ^ string_of_int (fst @@ Stmt.loc s).Lexing.pos_lnum)
+                ~name:("goto_at_L" ^ string_of_int @@ Stmt.lnum s)
                 (Kernel_function.get_definition kf)
                 (TInt (IInt, []))
             in
@@ -324,145 +312,6 @@ end
 
 include Goto_handling.M
 
-let hack_cfg =
-  let has_jumps s =
-    let vis = object
-      inherit frama_c_inplace
-
-      method! vstmt s =
-        begin match[@warning "-4"] s.skind with
-        | AsmGoto _
-        | Goto _
-        | Break _
-        | Continue _  -> raise Exit
-        | _           -> ()
-        end;
-        DoChildren
-    end in
-    try ignore @@ visitFramacStmt vis s; false
-    with Exit ->                         true
-  in
-  ignore %
-  visitFramacFunction
-    (object
-      inherit frama_c_inplace
-
-      method! vstmt s =
-        match[@warning "-4"] s.skind with
-        | If (_, ({ bstmts = s1 :: _; _ } as b1), b2, _) when not (has_jumps s) ->
-          (last b1.bstmts).succs <-
-            (match b2.bstmts with
-             | s :: _ -> [s]
-             | []     -> List.filter (not % Stmt.equal s1) s.succs);
-          s.succs <- [s1];
-          DoChildren
-        | _ -> DoChildren
-    end)
-
-let switch_count fundec =
-  let count = ref 1 in
-  ignore @@
-  visitFramacFunction
-    (object
-      inherit frama_c_inplace
-      method! vstmt s =
-        match[@warning "-4"] s.skind with
-        | Switch (_, _, ss, _) -> (let l = List.length ss in
-                                   if l > 0 && !count * l > 0 then
-                                     count := !count * l;                                      DoChildren)
-        | _                    ->                                                              DoChildren
-    end)
-    fundec;
-  !count
-
-let[@warning "-4"] rewrite_switches =
-  let open List in
-  let rewrite_switch =
-    let module H = Stmt.Hashtbl in
-    let h = H.create 32 in
-    let is_case_label = function Case _ | Default _ -> true | Label _ -> false in
-    fun e b ss ->
-      iter
-        (ignore %
-         visitFramacStmt
-           (object
-             inherit frama_c_inplace
-             method! vstmt s = H.replace h s (); DoChildren
-           end))
-        b.bstmts;
-      let get_one_target ss =
-        let targets s =
-          let rec loop d s' =
-            if d > 1000 then raise Exit;
-            if not (H.mem h s') || not (Stmt.equal s' s) && exists is_case_label s'.labels
-            then [s']
-            else concat_map (loop @@ d + 1) s'.succs
-          in
-          try loop 0 s with Exit -> []
-        in
-        let targets = map targets ss in
-        if for_all ((=) 1 % length) targets
-        then
-          match group_by Stmt.equal @@ map hd targets with
-          | [s :: _] -> Some s
-          | _        -> None
-        else
-          None
-      in
-      let bodies target b =
-        let bs = group_by (fun _ s2 -> not @@ exists is_case_label s2.labels) b.bstmts in
-        let conds =
-          map hd bs |>
-          map (fun s -> filter is_case_label s.labels)
-        in
-        let bs =
-          map
-            (fun ss ->
-               match rev ss with
-               | { skind = Goto _ | Break _ | Continue _; succs = [s]; _ } :: ss when Stmt.equal s target -> rev ss
-               | _                                                                                        -> ss)
-            bs |>
-          tap (iter @@ iter @@ fun s -> s.labels <- filter (not % is_case_label) s.labels)
-        in
-        let r = combine conds bs in
-        match partition (function Default _ :: _, _  -> true | _ -> false) r with
-        | [_, dss], ss -> Some (dss, ss)
-        | _            -> None
-      in
-      let (>>=) x f = opt_bind f x in
-      get_one_target ss >>= fun target ->
-      bodies target b >>= fun (dss, cases) ->
-      let loc = Stmt.loc target in
-      let ifs =
-        let cond cs =
-          let eqs =
-            map
-              (function
-                | Case (e', loc) -> mkBinOp ~loc Eq e e'
-                | _              -> assert false)
-              cs
-          in
-          fold_left (fun e -> mkBinOp ~loc:e.eloc BOr e) (hd eqs) (tl eqs)
-        in
-        fold_right (fun (cs, ss) b -> mkBlock [mkStmt @@ If (cond cs, mkBlock ss, b, loc)]) cases (mkBlock dss)
-      in
-      H.clear h;
-      Some (mkStmt @@ Block (mkBlock [hd ifs.bstmts; mkStmt @@ Goto (ref target, Stmt.loc target)]))
-  in
-  ignore %
-  visitFramacFunction
-    (object
-      inherit frama_c_inplace
-      method! vstmt s =
-        match s.skind with
-        | Switch (e, b, ss, _) ->
-          begin match rewrite_switch e b ss with
-          | Some s -> ChangeDoChildrenPost (s, id)
-          | None   -> DoChildren
-          end
-        | _ -> DoChildren
-    end)
-
 let fill_goto_tables ~goto_vars ~stmt_vars =
   let open Info in
   Console.debug "Started fill_goto_tables...";
@@ -474,19 +323,11 @@ let fill_goto_tables ~goto_vars ~stmt_vars =
        | exception Kernel_function.No_Definition -> ()
        | fundec                                  ->
          Console.debug ~level:2 "Filling goto tables in function %s..." fundec.svar.vname;
-         if switch_count fundec > Options.Switch_count.get () then begin
-           rewrite_switches fundec;
-           Cfg.clearCFGinfo ~clear_id:false fundec;
-           Cfg.cfgFun fundec
-         end;
-         hack_cfg fundec;
-         ignore @@ visitFramacFunction (new goto_visitor ~goto_vars ~stmt_vars kf) fundec;
-         Cfg.clearCFGinfo ~clear_id:false fundec;
-         Cfg.cfgFun fundec);
+         ignore @@ visitFramacFunction (new goto_visitor ~goto_vars ~stmt_vars kf) fundec);
   Console.debug ~level:3 "Finished filling goto tables. \
                           Result is:@\n@[<2>Goto vars:@\n%a@]@\n@[<2>Stmt vars:@\n%a@]"
     (pp_iter2 ~sep:";@\n" ~between:"@ ->@ " H_stmt.iter
-       (fun fmt s -> fprintf fmt "s%d@@L%d" s.sid (fst @@ Stmt.loc s).Lexing.pos_lnum)
+       (fun fmt s -> fprintf fmt "s%d@@L%d" s.sid @@ Stmt.lnum s)
        pp_varinfo)
     goto_vars
     (pp_iter2 ~sep:";@\n" ~between:"@ ->@ " H_stmt_conds.iter_all pp_stmt @@
