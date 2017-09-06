@@ -856,12 +856,9 @@ module Make (Analysis : Region.Analysis) = struct
       visitFramacFile (new cfg_fixupper ()) file;
       Cfg.clearFileCFG ~clear_id:false file;
       Cfg.computeFileCFG file;
+      may (fun callee_approx -> Function_pointers.rewrite ~callee_approx) callee_approx;
       Rmtmps.removeUnusedTemps
-        ~isRoot:(
-          function
-          | GFun (f, _)         when f.svar.vname = Kernel.MainFunction.get ()         -> true
-          | GFunDecl (_, vi, _) when vi.vname     = Options.Nondet_int_function.get () -> true
-          | _ -> false)
+        ~isRoot:(function GFun (f, _) when f.svar.vname = Kernel.MainFunction.get () -> true | _ -> false)
         file
 
     let clear () =
@@ -915,7 +912,6 @@ let slice () =
   Slice.mark sccs;
   Console.debug "Will now sweep...";
   Slice.sweep ();
-  Function_pointers.rewrite ~callee_approx;
   let stat = Gc.stat () in
   Console.debug  "Current # of live words: %d" stat.Gc.live_words;
   Console.debug "Will now clean...";
