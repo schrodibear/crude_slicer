@@ -152,20 +152,22 @@ module Make_reporting_hashmap (K : Hashed_printable) (S : Set) :
     H.filter_map_inplace (fun _ r -> Some (S.copy f r)) r;
     r, f
   let shallow_copy f (h, _) = H.copy h, f
+  let ensure k h f =
+    if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f))
   let add k kind e (h, f) =
-    if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f));
+    ensure k h f;
     S.add kind e (H.find h k)
   let add_some k e (h, f) =
-    if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f));
+    ensure k h f;
     S.add_some e (H.find h k)
   let import ~from:(from, _) (h, f) =
     H.iter
       (fun k from ->
-         if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f));
+         ensure k h f;
          S.import ~from (H.find h k))
       from
   let import_values k from (h, f) =
-    if not (H.mem h k) then (Flag.report f; H.replace h k (S.create f));
+    ensure k h f;
     S.import ~from (H.find h k)
   let remove k (h, f) =
     if H.mem h k then Flag.report f;
