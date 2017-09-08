@@ -662,33 +662,22 @@ end = functor (O : Separation_options) () -> struct
     val clear : t -> unit
   end = struct
     module H = R.H
-    type t = U.t H.t
+    type t = U.t list H.t
     open! H
-    let add u1 u2 h = add h (U.repr u1) u2
-    let replace h u1 u2 = replace h (U.repr u1) u2
-    let find u h = find h (U.repr u)
-    let mem u1 u2 h =
-      let r1, r2 = map_pair U.repr (u1, u2) in
-      List.exists (R.equal r2 % U.repr) @@ find_all h r1
-    let find_repr u1 u2 h =
-      let r1, r2 = map_pair U.repr (u1, u2) in
-      List.find ((<>) `First % R.choose r2 % U.repr) @@ find_all h r1
-    let collapse =
-      let h_k = H'.create () in
-      fun f h ->
-        iter
-          (fun k v ->
-            let k' = U.of_repr k in
-            if not (H'.mem k' h_k)
-            then f v (find_all h k)
-            else H'.add k' k' h_k)
-          h;
-        H'.clear h_k;
-        filter_map_inplace
-          (fun k v -> let k = U.of_repr k in if H'.mem k h_k then None else (H'.add k k h_k; Some v))
-          h;
-        H'.clear h_k
-    let iter f h = iter (fun k v -> f (U.of_repr k) v) h
+    let put ?(add=true) h u1 u2 =
+      let r1 = U.repr u1 in
+      let us = if add then try find h r1 with Not_found -> [] else [] in
+      replace h r1 (u2 :: us)
+    let add u1 u2 h = put h u1 u2
+    let replace = put ~add:false
+    let find_all u h = try find h (U.repr u) with Not_found -> []
+    let find u h = List.hd @@ find h (U.repr u)
+    let mem u1 u2 h = List.exists (R.equal (U.repr u2) % U.repr) @@ find_all u1 h
+    let find_repr u1 u2 h = List.find ((<>) `First % R.choose (U.repr u2) % U.repr) @@ find_all u1 h
+    let collapse f h =
+      iter List.(fun _ vs -> f (hd vs) @@ tl vs) h;
+      filter_map_inplace List.(const @@ some % singleton % hd) h
+    let iter f h = iter (fun k -> List.iter @@ f @@ U.of_repr k) h
     let clear = clear
     let create () = create 512
   end
@@ -741,7 +730,7 @@ end = functor (O : Separation_options) () -> struct
       let u = U.of_repr r in
       let k = key u in
       match find h k with
-      | _, d                -> add h k (u, d)
+      | _, d                -> replace h k (u, d)
       | exception Not_found -> ()
     let add = put add
     let replace = put replace
