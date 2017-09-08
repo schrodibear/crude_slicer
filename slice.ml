@@ -354,8 +354,9 @@ module Make (Analysis : Region.Analysis) = struct
         F.import ~from:(from s) depends;
         set_is_target ()
 
-      let call s ?lv kf =
+      let call s ?lv ?e kf =
         let from = from s in
+        may (fun e -> add_from_rval e from) e;
         let I.E.Some { reads; assigns = (module A'); eff = eff' } =
           I.get info R.flag @@ Kernel_function.get_definition kf
         in
@@ -487,7 +488,7 @@ module Make (Analysis : Region.Analysis) = struct
                                                                               (fun kf ->
                                                                                  if Kernel_function.
                                                                                       is_definition kf
-                                                                                 then call s ?lv kf
+                                                                                 then call s ?lv ~e kf
                                                                                  else stub s ?lv args)
                                                                               kfs;                        SkipChildren
               end
