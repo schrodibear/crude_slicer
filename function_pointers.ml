@@ -132,17 +132,7 @@ module Make (R : Region.Analysis) = struct
       r
 end
 
-let ensure_nondet_int_function_present () =
-  try
-    ignore @@ Globals.Functions.find_by_name @@ Options.Nondet_int_function.get ()
-  with
-  | Not_found ->
-    let file = Ast.get () in
-    file.globals <-
-      GFunDecl (empty_funspec (),
-                makeGlobalVar (Options.Nondet_int_function.get ()) (TFun (intType, Some [], false, [])),
-                Location.unknown)
-      :: file.globals
+let ensure_nondet_int_function_present () = Kf.ensure_proto intType (Options.Nondet_int_function.get ()) [] false
 
 let rewrite ~callee_approx =
   let approx ckf s lvo e args loc =

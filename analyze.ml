@@ -137,11 +137,6 @@ let condensate =
   Console.debug ~level:3 "Finished condensation...";
   r
 
-let rec to_offset =
-  function
-  | []                                             -> NoOffset
-  | (`Field fi | `Container_of_void (fi, _)) :: os -> Field (fi, to_offset os)
-
 let cache_offsets =
   let open List in
   let module H = Hashtbl.Make
@@ -191,7 +186,9 @@ let cache_offsets =
              | `Container_of_void (_, ty) -> Ty.normalize ty
              | `Field fi                  -> Ty.normalize fi.ftype
            in
-           let off = Integer.of_int @@ fst (bitsOffset (TComp (ci, empty_size_cache (), [])) (to_offset path)) lsr 3 in
+           let off =
+             Integer.of_int @@ fst (bitsOffset (TComp (ci, empty_size_cache (), [])) (Offset.of_offs path)) lsr 3
+           in
            Info.H_field.replace offs_of_key (ci, ty, off) path;
            Info.H_field.replace offs_of_key (ci, ty, negate off) path)
 

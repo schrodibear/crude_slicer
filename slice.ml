@@ -6,7 +6,7 @@
 (*                                                                        *)
 (**************************************************************************)
 
-[@@@ocaml.warning "-4-9-42-44-45-48"]
+[@@@warning "-4-9-42-44-45-48"]
 
 open Extlib
 
@@ -851,7 +851,7 @@ module Make (Analysis : Region.Analysis) = struct
           DoChildren
       end
 
-    let sweep () =
+    let sweep ?after_sweeping_funcs () =
       let file = Ast.get () in
       visitFramacFile (new sweeper ()) file;
       visitFramacFile (new cfg_fixupper ()) file;
@@ -859,7 +859,18 @@ module Make (Analysis : Region.Analysis) = struct
       Cfg.computeFileCFG file;
       may (fun callee_approx -> Function_pointers.rewrite ~callee_approx) callee_approx;
       Rmtmps.removeUnusedTemps
-        ~isRoot:(function GFun (f, _) when f.svar.vname = Kernel.MainFunction.get () -> true | _ -> false)
+        ~isRoot:(
+          function
+          | GFun (f, _) when f.svar.vname = Kernel.MainFunction.get () -> true
+          | GCompTag _ | GVar _ | GVarDecl _                           -> true
+          | _                                                          -> false)
+        file;
+      may ((|>) ()) after_sweeping_funcs;
+      Rmtmps.removeUnusedTemps
+        ~isRoot:(function
+          | GFun (f, _) when f.svar.vname = Kernel.MainFunction.get ()
+                          || hasAttribute Kf.stub_attr f.svar.vattr    -> true
+          | _                                                          -> false)
         file
 
     let clear () =
@@ -904,15 +915,17 @@ let slice () =
   Analyze.fill_goto_tables ~goto_vars ~stmt_vars;
   Region_analysis2.compute_regions ();
   let module Slice = Make (Region_analysis2) in
-  let module Slice = Slice.Make (struct let info = info end) in
+  let module Info = struct let info = info end in
+  let module Slice = Slice.Make (Info) in
   let sccs = Analyze.condensate ~callee_approx () in
   Slice.init sccs;
   Console.debug "Will now collect assigns and deps...";
   Slice.collect sccs;
   Console.debug "Will now mark...";
   Slice.mark sccs;
-  Console.debug "Will now sweep...";
-  Slice.sweep ();
+  Console.debug "Will now sweep and generate summaries...";
+  let module Summaries = Summaries.Make (Region_analysis2) (Info) in
+  Slice.sweep ~after_sweeping_funcs:(fun () -> Summaries.generate sccs) ();
   let stat = Gc.stat () in
   Console.debug  "Current # of live words: %d" stat.Gc.live_words;
   Console.debug "Will now clean...";

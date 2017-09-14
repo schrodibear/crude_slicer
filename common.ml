@@ -43,6 +43,7 @@ module Console = Options
 let (%) f g x = f (g x)
 let (%%) f g x y = f (g x y)
 let (%%%) f g x y z = f (g x y z)
+let (%%%%) f g x y z t = f (g x y z t)
 let (%>) f g x = g (f x)
 let (!!) = Lazy.force
 let const f _x = f
@@ -305,6 +306,14 @@ module Ci = struct
          | _                                                                 -> [])
 end
 
+module Offset = struct
+  include Offset
+  let rec of_offs =
+    function
+    | []                                             -> NoOffset
+    | (`Field fi | `Container_of_void (fi, _)) :: os -> Field (fi, of_offs os)
+end
+
 module Exp = struct
   include Exp
   let underef_mem e =
@@ -315,6 +324,25 @@ module Exp = struct
     include Hashtbl
     let find_all h k = try find h k with Not_found -> []
   end
+
+  let container_of =
+    let mkCast newt e = mkCast ~overflow:Check ~force:true ~e ~newt in
+    fun ~loc offs e ->
+      let oty =
+        TPtr
+          ((match List.hd offs with
+             | `Field fi                  -> TComp (fi.fcomp, empty_size_cache (), [])
+             | `Container_of_void (_, ty) -> Ty.normalize ty),
+           [])
+      in
+      mkCast oty @@
+      new_exp ~loc @@
+      BinOp
+        (MinusPI,
+         mkCast charPtrType e,
+         mkCast
+           theMachine.typeOfSizeOf @@ mkAddrOf ~loc (Mem (mkCast oty @@ zero ~loc), Offset.of_offs offs),
+         charPtrType)
 end
 
 module Stmt = struct
@@ -336,4 +364,19 @@ module Kf = struct
     with
     | Not_found ->
       false
+
+  let ensure_proto rtyp name argtys vararg =
+    try
+      ignore @@ Globals.Functions.find_by_name name
+    with
+    | Not_found ->
+      let file = Ast.get () in
+      let fs = empty_funspec () in
+      let params = List.mapi (fun i ty -> "arg" ^ string_of_int i, ty, []) argtys in
+      let vi = makeGlobalVar name @@ TFun (rtyp, Some params, vararg, []) in
+      let loc = Location.unknown in
+      file.globals <- GFunDecl (fs, vi, loc) :: file.globals;
+      Globals.Functions.add @@ Declaration (fs, vi, Some (List.map makeFormalsVarDecl params), loc)
+
+  let stub_attr = "stub"
 end

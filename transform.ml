@@ -15,30 +15,12 @@ open Visitor
 open Extlib
 open! Common
 open Region
-open Analyze
-
-let container_of =
-  let mkCast = mkCast ~overflow:Check ~force:true in
-  fun ~loc offs e ->
-    let newt =
-      TPtr
-        ((match List.hd offs with
-           | `Field fi                  -> TComp (fi.fcomp, empty_size_cache (), [])
-           | `Container_of_void (_, ty) -> Ty.normalize ty),
-         [])
-    in
-    mkCast ~newt ~e:(new_exp ~loc @@ BinOp (MinusPI,
-                                            mkCast ~newt:charPtrType ~e,
-                                            mkCast
-                                              ~newt:theMachine.typeOfSizeOf
-                                              ~e:(mkAddrOf ~loc (Mem (mkCast ~newt ~e:(zero ~loc)), to_offset offs)),
-                                            charPtrType))
 
 let dot ~loc offs e =
   mkCast
     ~force:false
     ~overflow:Check
-    ~e:(mkAddrOf ~loc (Mem e, to_offset offs))
+    ~e:(mkAddrOf ~loc (Mem e, Offset.of_offs offs))
     ~newt:(TPtr (ucharType, []))
 
 let rec mark =
@@ -70,8 +52,9 @@ module Make (Analysis : Analysis) = struct
           | _,         Some offs                               -> mark offs
           | _                                                  -> ()
       in
+      let container_of = Exp.container_of ~loc in
       match match_container_of2 e.enode, match_dot e.enode with
-      | Some (e, offs), _                         -> let e = visit e in mark offs; ChangeTo (container_of ~loc offs e)
+      | Some (e, offs), _                         -> let e = visit e in mark offs; ChangeTo (container_of offs e)
       | _,              Some (e, offs)            -> let e = visit e in mark offs; ChangeTo (dot ~loc offs e)
       | _                                         ->
         match e.enode with
@@ -113,12 +96,18 @@ module Make (Analysis : Analysis) = struct
   end
 
   let unique_param_names =
-    let name n = "arg" ^ string_of_int n in
-    let rec next vis n =
+    let name old n = old ^ if n = 0 then "" else string_of_int n in
+    let exists_glob_name n =
+      try ignore @@ Globals.Vars.find_from_astinfo n VGlobal; true
+      with Not_found ->
+        try ignore @@ Globals.Functions.find_by_name n;       true
+        with Not_found ->                                     false
+    in
+    let rec next vis old n =
       let n = n + 1 in
-      let name = name n in
-      if List.exists (fun vi -> String.equal vi.vname name) vis
-      then next vis n
+      let name = name old n in
+      if List.exists (fun vi -> String.equal vi.vname name) vis || exists_glob_name name
+      then next vis old n
       else n
     in
     fun () ->
@@ -128,10 +117,12 @@ module Make (Analysis : Analysis) = struct
            ignore @@
            List.fold_left
              (fun acc vi ->
-                if vi.vname = "" then
-                  vi.vname <- name acc;
-                next vis acc)
-             (next vis 0)
+                let old = if vi.vname = "" then "arg" else vi.vname in
+                let acc = next vis old acc in
+                if vi.vname = "" || exists_glob_name vi.vname then
+                  vi.vname <- name old acc;
+                acc)
+             ~-1
              vis)
 
   let rewrite () =

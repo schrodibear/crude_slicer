@@ -85,13 +85,53 @@ module Representant = struct
     {
       id   : int;
       name : string Lazy.t;
+      exp  : exp Lazy.t option;
       typ  : typ;
 
       mutable kind : Kind.t
     }
 
+  module Exp = struct
+    type t = exp
+
+    let loc = Location.unknown
+
+    let norm e =
+      let ty = typeOf e in
+      let e =
+        match unrollType ty, e.enode with
+        | TPtr _, _       -> e
+        | _,      Lval lv -> mkAddrOrStartOf ~loc:e.eloc lv
+        | _               -> Console.fatal "Region.Exp.norm: neither pointer nor lval: %a" pp_exp e
+      in
+      let newt = Ty.normalize ty in
+      if need_cast ty newt
+      then mkCast ~force:false ~overflow:Check ~e ~newt
+      else e
+
+    let addr = norm % mkAddrOrStartOf ~loc % var
+    let var = norm % evar ~loc
+    let ret = new_exp ~loc (Const (CStr "!R!"))
+    let is_ret = Exp.equal ret
+
+    let arrow addr fi = norm @@ new_exp ~loc @@ Lval (mkMem ~addr ~off:(Field (fi, NoOffset)))
+    let deref addr    = norm @@ new_exp ~loc @@ Lval (mkMem ~addr ~off:NoOffset)
+    let dot   addr fi = norm @@ mkAddrOrStartOf ~loc @@ mkMem ~addr ~off:(Field (fi, NoOffset))
+    let container e fi = Exp.container_of ~loc [`Field fi] e
+    let dot_void e             = mkCast ~force:true ~overflow:Check ~e ~newt:voidPtrType
+    let container_of_void e ty = mkCast ~force:true ~overflow:Check ~e ~newt:(TPtr (ty, []))
+
+    let opt f r = opt_map (fun e -> lazy (f !!e)) r.exp
+    let opt2 f r fi = opt_map (fun e -> lazy (f !!e fi)) r.exp
+
+    let    arrow_opt,  deref_opt,      dot_opt,      container_opt,     dot_void_opt,      container_of_void_opt =
+      opt2 arrow,  opt deref,     opt2 dot,     opt2 container,     opt dot_void,     opt2 container_of_void
+  end
+
   let name r = !! (r.name)
   let typ r = r.typ
+  let exp r = r.exp
+  let exp' r = opt_map (!!) r.exp
   let kind r = r.kind
 
   let equal r1 r2 = r1.id = r2.id
@@ -103,14 +143,14 @@ module Representant = struct
 
   let id = ref ~-1
 
-  let mk ~name ~typ ~kind =
+  let mk ~name ~e:exp ~typ ~kind =
     let typ = Ty.normalize typ in
     incr id;
-    { id = !id; name; typ; kind }
+    { id = !id; name; exp; typ; kind }
 
-  let global name typ = mk ~name:(lazy name) ~typ ~kind:`Global
-  let poly fname name typ = mk ~name:(lazy (fname ^ "::" ^ name)) ~typ ~kind:(`Poly fname)
-  let local fname name typ = mk ~name:(lazy (fname ^ ":::" ^ name)) ~typ ~kind:(`Local fname)
+  let global name e typ = mk ~name:(lazy name) ~e:(opt_map Lazy.from_val e) ~typ ~kind:`Global
+  let poly fname name e typ = mk ~name:(lazy (fname ^ "::" ^ name)) ~e:(Some (lazy e)) ~typ ~kind:(`Poly fname)
+  let local fname name typ = mk ~name:(lazy (fname ^ ":::" ^ name)) ~e:None ~typ ~kind:(`Local fname)
 
   let demote r = r.kind <- `Dummy
 
@@ -126,12 +166,16 @@ module Representant = struct
     check_field "Representant.arrow" r fi;
     if not (isPointerType fi.ftype) then
       Console.fatal "Representant.arrow: not a pointer field: %s.%s : %a" fi.fname fi.fcomp.cname pp_typ fi.ftype;
-    mk ~name:(lazy (name r ^ "->" ^ fi.fname)) ~typ:(Ast_info.pointed_type fi.ftype) ~kind:r.kind
+    mk
+      ~name:(lazy (name r ^ "->" ^ fi.fname))
+      ~e:(Exp.arrow_opt r fi)
+      ~typ:(Ast_info.pointed_type fi.ftype)
+      ~kind:r.kind
 
   let deref r =
     if not (isPointerType r.typ) then
       Console.fatal "Representant.deref: not a pointer region: %s : %a" (name r) pp_typ r.typ;
-    mk ~name:(lazy ("*(" ^ name r ^ ")")) ~typ:(Ast_info.pointed_type r.typ) ~kind:r.kind
+    mk ~name:(lazy ("*(" ^ name r ^ ")")) ~e:(Exp.deref_opt r) ~typ:(Ast_info.pointed_type r.typ) ~kind:r.kind
 
   let check_detached f fi =
     if not (isStructOrUnionType fi.ftype || isArrayType fi.ftype || fi.faddrof) then
@@ -142,7 +186,7 @@ module Representant = struct
   let dot r fi =
     check_field "Representant.dot" r fi;
     check_detached "Representant.dot" fi;
-    mk ~name:(lazy (name r ^ "." ^ fi.fname)) ~typ:(Ty.unbracket fi.ftype) ~kind:r.kind
+    mk ~name:(lazy (name r ^ "." ^ fi.fname)) ~e:(Exp.dot_opt r fi) ~typ:(Ty.unbracket fi.ftype) ~kind:r.kind
 
   let container r fi =
     check_detached "Representant.container" fi;
@@ -154,10 +198,11 @@ module Representant = struct
       Console.fatal "Representant.container: container should be a structure: %s" fi.fcomp.cname;
     mk
       ~name:(lazy ("(" ^ name r ^ ", " ^ fi.fcomp.cname ^ "." ^ fi.fname ^ ")"))
+      ~e:(Exp.container_opt r fi)
       ~typ:(TComp (fi.fcomp, empty_size_cache (), []))
       ~kind:r.kind
 
-  let dot_void r = mk ~name:(lazy (name r ^ ".void")) ~typ:voidType ~kind:r.kind
+  let dot_void r = mk ~name:(lazy (name r ^ ".void")) ~e:(Exp.dot_void_opt r) ~typ:voidType ~kind:r.kind
 
   let container_of_void r typ =
     let name' =
@@ -179,7 +224,7 @@ module Representant = struct
                                                  from void or union region: %s : %a"
                                                 name' (name r) pp_typ ty
     end;
-    mk ~name:(lazy ("(" ^ name r ^ ", " ^ name' ^ ".void)")) ~typ ~kind:r.kind
+    mk ~name:(lazy ("(" ^ name r ^ ", " ^ name' ^ ".void)")) ~e:(Exp.container_of_void_opt r typ) ~typ ~kind:r.kind
 
   let pp fmttr r = Format.fprintf fmttr "%a%s" Kind.pp r.kind (name r)
 end
@@ -190,6 +235,7 @@ module type Representant = sig
   val choose : t -> t -> [> `First | `Second | `Any ]
 
   val name : t -> string
+  val exp : t -> exp Lazy.t option
   val report : t -> is_repr_of:t -> unit
 
   val flag : Flag.t
@@ -244,6 +290,7 @@ module Make_unifiable (R : Representant) () : Unifiable with type repr = R.t = s
           let k1, k2 = rank r1, rank r2 in
           if      k1 > k2                                            then `First
           else if k2 > k1                                            then `Second
+          else if has_some (R.exp r1)                                then `First
           else                                                            `Second
       in
       match choice with
@@ -357,11 +404,29 @@ module type Representant_intf = sig
     {
       id   : int;
       name : string Lazy.t;
+      exp  : exp Lazy.t option;
       typ  : typ;
       mutable kind : Kind.t
     }
 
+  module Exp : sig
+    type t = exp
+    val loc : Location.t
+    val addr : varinfo -> t
+    val var : varinfo -> t
+    val ret : t
+    val is_ret : t -> bool
+    val arrow : t -> fieldinfo -> t
+    val deref : t -> t
+    val dot : t -> fieldinfo -> t
+    val container : t -> fieldinfo -> t
+    val dot_void : t -> t
+    val container_of_void : t -> typ -> t
+  end
+
   val name : t -> string
+  val exp : t -> Exp.t Lazy.t option
+  val exp' : t -> Exp.t option
   val typ : t -> typ
   val kind : t -> Kind.t
   val equal : t -> t -> bool
@@ -375,8 +440,8 @@ end
 module type Representant_full = sig
   include Representant_intf with type t = Representant.t
   include Representant with module Kind := Kind and type t := t
-  val global : string -> typ -> t
-  val poly : string -> string -> typ -> t
+  val global : string -> exp option -> typ -> t
+  val poly : string -> string -> exp -> typ -> t
   val local : string -> string -> typ -> t
   val demote : t -> unit
   val arrow : t -> fieldinfo -> t
@@ -462,8 +527,8 @@ end = functor (O : Separation_options) () -> struct
         h_void_xs
         []
 
-    let     global,        poly,        local =
-      mk %% global, mk %%% poly, mk %%% local
+    let      global,         poly,        local =
+      mk %%% global, mk %%%% poly, mk %%% local
     let     arrow,      deref,       dot,       container,      dot_void,       container_of_void =
       mk %% arrow, mk % deref, mk %% dot, mk %% container, mk % dot_void, mk %% container_of_void
   end
@@ -1088,26 +1153,26 @@ module Analysis
           in
           U.of_repr @@
           match retvar, unrollType typ, f with
-          | true,  TComp _, Some f                         -> R.local  f ("!" ^ f)       typ'
-          | true,  _,       Some f                         -> R.poly   f f               typ'
+          | true,  TComp _, Some f                         -> R.local  f ("!" ^ f)                 typ'
+          | true,  _,       Some f                         -> R.poly   f f               R.Exp.ret typ'
           | true,  _,       None                           -> Console.fatal "Retvar requested from global scope: %a"
                                                                 pp_varinfo v
 
           | false, _,       _      when (isFunctionType
-                                           v.vtype)        -> R.global   v.vname         v.vtype
+                                           v.vtype)        -> R.global   v.vname         (Some (R.Exp.addr v)) v.vtype
 
-          | false, TComp _, _      when v.vglob            -> R.global   ("&" ^ v.vname) typ'
-          | false, _,       _      when v.vglob && vaddrof -> R.global   ("&" ^ v.vname) typ'
-          | false, _,       _      when v.vglob            -> R.global   v.vname         typ'
+          | false, TComp _, _      when v.vglob            -> R.global   ("&" ^ v.vname) (Some (R.Exp.addr v)) typ'
+          | false, _,       _      when v.vglob && vaddrof -> R.global   ("&" ^ v.vname) (Some (R.Exp.addr v)) typ'
+          | false, _,       _      when v.vglob            -> R.global   v.vname         (Some (R.Exp.var v))  typ'
           | false, _,       None                           -> Console.fatal
                                                                 "Non-global variable outside any function: %a"
                                                                 pp_varinfo v
 
-          | false, TComp _, Some f                         -> R.local  f ("&" ^ v.vname) typ'
-          | false, _,       Some f when vaddrof            -> R.local  f ("&" ^ v.vname) typ'
+          | false, TComp _, Some f                         -> R.local  f ("&" ^ v.vname)               typ'
+          | false, _,       Some f when vaddrof            -> R.local  f ("&" ^ v.vname)               typ'
 
-          | false, _,       Some f when v.vformal          -> R.poly   f v.vname         typ'
-          | false, _,       Some f                         -> R.local  f v.vname         typ'
+          | false, _,       Some f when v.vformal          -> R.poly   f v.vname         (R.Exp.var v) typ'
+          | false, _,       Some f                         -> R.local  f v.vname                       typ'
         in
         if isFunctionType v.vtype && not retvar
         then `Location (u, fun () -> `Value u)
@@ -1136,7 +1201,7 @@ module Analysis
                       Char.chr Int64.(to_int @@ shift_right_logical (logand wc @@ shift_left 0xFFL sh) sh)))
               s
         in
-        U.of_repr @@ R.global ("\"" ^ s' ^ "\"") (match s with `S _ -> charType | `WS _ -> theMachine.wcharType)
+        U.of_repr @@ R.global ("\"" ^ s' ^ "\"") None (match s with `S _ -> charType | `WS _ -> theMachine.wcharType)
       in
       `Location (u, fun () -> `Value u)
     in
@@ -1149,8 +1214,8 @@ module Analysis
       let ty = Ty.deref_once ty in
       U.of_repr @@
       match f with
-      | Some f -> R.local f name ty
-      | None   -> R.global name ty
+      | Some f -> R.local f   name      ty
+      | None   -> R.global    name None ty
   and value : 'a. ?f:_ -> _ -> ([< `Location of _ | `Value of _ | `None ] as 'a) -> _ = fun ?f ty ->
     function
     | `Location (_, get) ->
@@ -1317,7 +1382,8 @@ module Analysis
         let u, u' =
           let open H_v in
           location @@ of_var ~f vi,
-          memo h_var vi (fun vi -> U.of_repr @@ R.poly f vi.vname @@ Ty.normalize ty)
+          let e = if is_retvar vi then R.Exp.ret else R.Exp.addr vi in
+          memo h_var vi (fun vi -> U.of_repr @@ R.poly f vi.vname e @@ Ty.normalize ty)
         in
         let map = H_k.memo maps kf (fun _ -> H_map.create ()) in
         reflect ~map u ~on:u';

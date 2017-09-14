@@ -97,25 +97,25 @@ module type Unifiable = sig
 end
 
 module type Memory = sig
-  type t
   type u
+  type r
+  type t = private r * Memory_field.t option
   val mk : ?fi: fieldinfo -> u -> t
   include Hashed_ordered_printable with type t := t
 end
 
 module type Poly_memory = sig
-  type t
-  type u
-  include Memory with type t := t and type u := u
+  include Memory
   val prj : find:(u -> u) -> mk:(?fi: fieldinfo -> u -> 'a) -> t -> 'a
 end
 
 module type Generic_memory = Poly_memory
 
 module Make_memory (R : Representant) (U : Unifiable with type repr = R.t) (C : Criterion with type t := R.t)
-  : Generic_memory with type u = U.t = struct
-  type t = R.t * Memory_field.t option
+  : Generic_memory with type u = U.t and type r = R.t = struct
   type u = U.t
+  type r = R.t
+  type t = R.t * Memory_field.t option
 
   let mk ?fi u =
     let r = U.repr u in
@@ -159,9 +159,10 @@ end
 
 module type Memories = sig
   type u
-  module Global_mem : Memory with type u := u
-  module Poly_mem : Poly_memory with type u := u
-  module Local_mem : Memory with type u := u
+  type r
+  module Global_mem : Memory with type u := u and type r := r
+  module Poly_mem : Poly_memory with type u := u and type r := r
+  module Local_mem : Memory with type u := u and type r := r
   module H_global_mem : Reporting_bithashset with type elt := Global_mem.t
   module H_poly_mem : functor () -> Reporting_bithashset with type elt := Poly_mem.t
   module H_local_mem : functor () -> Reporting_bithashset with type elt := Local_mem.t
@@ -169,6 +170,7 @@ end
 
 module Make_memories (R : Representant) (U : Unifiable with type repr = R.t) () = struct
   type u = U.t
+  type r = R.t
   module Global_mem = Make_memory (R) (U) (struct let is_ok r = R.kind r = `Global end)
   module Poly_mem =
     Make_memory (R) (U) (struct let is_ok r = match R.kind r with `Poly _ -> true | _ -> false end)

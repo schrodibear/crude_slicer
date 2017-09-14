@@ -85,6 +85,24 @@ module Nondet_int_function =
       let default = "__VERIFIER_nondet_int"
     end)
 
+module Havoc_function =
+  String
+    (struct
+      let option_name = "-havoc_function"
+      let help = "May specify an alternative name for __VERIFIER_havoc_region"
+      let arg_name = ""
+      let default = "__VERIFIER_havoc_region"
+    end)
+
+module Choice_function =
+  String
+    (struct
+      let option_name = "-choice_function"
+      let help = "May specify an alternative name for __VERIFIER_choose"
+      let arg_name = ""
+      let default = "__VERIFIER_choose"
+    end)
+
 module Region_length =
   Int
     (struct
