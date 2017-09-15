@@ -103,6 +103,15 @@ module Choice_function =
       let default = "__VERIFIER_choose"
     end)
 
+module Stub_postfix =
+  String
+    (struct
+      let option_name = "-stub_postfix"
+      let help = "May specify an alternative postfix for function stubs"
+      let arg_name = ""
+      let default = "___stub"
+    end)
+
 module Region_length =
   Int
     (struct

@@ -43,7 +43,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         try ignore @@ Globals.Functions.find_by_name name; false
         with Not_found ->                                  true
       in
-      let name = oldname ^ "_stub" in
+      let name = oldname ^ Options.Stub_postfix.get () in
       if doesn't_exist name
       then
         name

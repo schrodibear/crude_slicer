@@ -96,7 +96,7 @@ let get_cg =
       inherit frama_c_inplace
       method! vinst i =
         let kf = the self#current_kf in
-        begin match[@ warning "-4"] i with
+        begin match[@warning "-4"] i with
         | Call (_, { enode = Lval (Var vi, NoOffset); _ }, _, _)
           when Kf.mem vi                                         -> Cg.add_edge g kf (Globals.Functions.get vi)
         | Call (_, e, _, _)                                      -> List.iter
