@@ -98,11 +98,11 @@ let get_cg =
         let kf = the self#current_kf in
         begin match[@ warning "-4"] i with
         | Call (_, { enode = Lval (Var vi, NoOffset); _ }, _, _)
-          when Kf.mem vi                                            -> Cg.add_edge g kf (Globals.Functions.get vi)
-        | Call (_, e, _, _)                                         -> List.iter
-                                                                         (fun kf' -> Cg.add_edge_e g (kf, `Approx, kf'))
-                                                                         (callee_approx ?callee_approx:approx e)
-        | _                                                         -> ()
+          when Kf.mem vi                                         -> Cg.add_edge g kf (Globals.Functions.get vi)
+        | Call (_, e, _, _)                                      -> List.iter
+                                                                      (fun kf' -> Cg.add_edge_e g (kf, `Approx, kf'))
+                                                                      (callee_approx ?callee_approx:approx e)
+        | _                                                      -> ()
         end;
         SkipChildren
     end)
