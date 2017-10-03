@@ -141,6 +141,25 @@ module Region_count =
       let default = 9
     end)
 
+module Deps_limit =
+  Int
+    (struct
+      let option_name = "-deps_limit"
+      let help = "Specify how many arguments can be passed to dependency summary functions, too large calls will \
+                  contain only the lval/havoced region and the dummy argument (char *)0"
+      let arg_name = ""
+      let default = 25
+    end)
+
+module Recognize_wrecked_container_of =
+  Bool
+    (struct
+      let option_name = "-recognize_wrecked_container_of"
+      let help = "Recognize an utterly wrong code pattern emitted by CIF in place of \
+                  container_of macro expansion as normal container_of (the heuristic is generally unsound!)"
+      let default = true
+    end)
+
 module Builtin_expect_regexp =
   String
     (struct

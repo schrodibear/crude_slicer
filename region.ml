@@ -991,6 +991,7 @@ module Analysis
        val offs_of_key : (fieldinfo * typ) Info.offs Info.H_field.t
        val callee_approx : Kf.t list Exp.Hashtbl.t option
        val mode : [ `Poly_rec | `Mono_rec ]
+       val recognize_container_of2 : bool
        val region_length : int
        val region_depth : int
        val region_count : int
@@ -1083,6 +1084,8 @@ module Analysis
       | _ -> None
       end
     | _ -> None
+
+  let match_container_of2 = if I'.recognize_container_of2 then match_container_of2 else const None
 
   let match_dot =
     let is_uchar_ptr_type ty =

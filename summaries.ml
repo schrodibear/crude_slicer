@@ -93,16 +93,21 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         | `Poly_var   v -> mk_var (v :> varinfo)
         | `Result       -> `Var (var retvar)
       in
+      let limit =
+        let max = Options.Deps_limit.get () in
+        let z = zero ~loc in
+        fun es -> if List.length es <= max then es else [z]
+      in
       let havoc_lval =
         let havoc = Kernel_function.get_vi @@ Globals.Functions.find_by_name @@ Options.Choice_function.get () in
         fun lv es ->
           let tmp = makeTempVar d' ~insert:true ~name:"tmp" ulongLongType in
-          [mkStmt @@ Instr (Call (Some (var tmp), evar havoc, es, loc));
+          [mkStmt @@ Instr (Call (Some (var tmp), evar havoc, limit es, loc));
            mkStmt @@ Instr (Set (lv, mkCast ~force:false ~overflow:Check ~e:(evar tmp) ~newt:(typeOfLval lv), loc))]
       in
       let havoc_region =
         let havoc = Kernel_function.get_vi @@ Globals.Functions.find_by_name @@ Options.Havoc_function.get () in
-        fun e es -> [mkStmt @@ Instr (Call (None, evar havoc, e :: es, loc))]
+        fun e es -> [mkStmt @@ Instr (Call (None, evar havoc, e :: limit es, loc))]
       in
       let I.E.Some { reads = (module F); assigns = (module A); eff } = I.get info R.flag d in
       flatten @@

@@ -891,6 +891,7 @@ let slice () =
         let callee_approx = None
         let region_length, region_depth, region_count = 1, 1, 2
         let mode = `Mono_rec
+        let recognize_container_of2 = Options.Recognize_wrecked_container_of.get ()
       end)
       ()
   in
@@ -910,6 +911,7 @@ let slice () =
         let        region_length,        region_depth,        region_count =
           Options.(Region_length.get (), Region_depth.get (), Region_count.get ())
         let mode = `Poly_rec
+        let recognize_container_of2 = Options.Recognize_wrecked_container_of.get ()
       end)
       ()
   in
