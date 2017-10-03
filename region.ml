@@ -44,33 +44,17 @@ module Representant = struct
       | `Dummy   -> 4
 
     let choose k1 k2 =
-      begin match k1, k2 with
-      | (`Poly f1
-        | `Local f1),  (`Poly f2
-                       | `Local f2)
-        when not (String.equal f1 f2) -> Console.fatal
-                                           "Representant.Kind.choose: broken invariant: \
-                                            should not try unifying regions from diff. functions: %s and %s"
-                                           f1 f2
-      | (`Global
-        | `Poly _
-        | `Local _
-        | `Dummy),     (`Global
-                       | `Poly _
-                       | `Local _
-                       | `Dummy)      -> ()
-      end;
       match k1, k2 with
-      | `Global,  `Global                         -> `Any
-      | `Global,  (`Poly _ | `Local _ | `Dummy)   -> `First
-      | `Poly _,  `Global                         -> `Second
-      | `Poly _,  `Poly _                         -> `Any
-      | `Poly _,  (`Local _ | `Dummy)             -> `First
-      | `Local _, (`Global | `Poly _)             -> `Second
-      | `Local _, `Local _                        -> `Any
-      | `Local _, `Dummy                          -> `First
-      | `Dummy,   (`Global | `Poly _ | `Local _)  -> `Second
-      | `Dummy,   `Dummy                          -> `Any
+      | `Global,  `Global                        -> `Any
+      | `Global,  (`Poly _ | `Local _ | `Dummy)  -> `First
+      | `Poly _,  `Global                        -> `Second
+      | `Poly _,  `Poly _                        -> `Any
+      | `Poly _,  (`Local _ | `Dummy)            -> `First
+      | `Local _, (`Global | `Poly _)            -> `Second
+      | `Local _, `Local _                       -> `Any
+      | `Local _, `Dummy                         -> `First
+      | `Dummy,   (`Global | `Poly _ | `Local _) -> `Second
+      | `Dummy,   `Dummy                         -> `Any
 
     let pp fmttr =
       Format.fprintf fmttr %
@@ -553,6 +537,30 @@ end = functor (O : Separation_options) () -> struct
         h_void_xs
         []
 
+    let choose r1 r2 =
+      begin
+        if not O.check_locality
+        then
+          ()
+        else
+          match r1.kind, r2.kind with
+          | (`Poly f1
+            | `Local f1),  (`Poly f2
+                           | `Local f2)
+            when not (String.equal f1 f2) -> Console.fatal
+                                               "Representant.Kind.choose: broken invariant: \
+                                                should not try unifying regions from diff. functions: %s and %s"
+                                               f1 f2
+          | (`Global
+            | `Poly _
+            | `Local _
+            | `Dummy),     (`Global
+                           | `Poly _
+                           | `Local _
+                           | `Dummy)      -> ()
+      end;
+      choose r1 r2
+
     let      global,         poly,        local =
       mk %%% global, mk %%%% poly, mk %%% local
     let     arrow,      deref,       dot,       container,      dot_void,       container_of_void =
@@ -656,10 +664,14 @@ end = functor (O : Separation_options) () -> struct
       | `Poly _,  `Global
       | `Local _, `Global      -> ()
       | `Poly f,  `Poly f'
-        when String.equal f f' -> ()
+        when
+          not O.check_locality
+          || String.equal f f' -> ()
       | `Local f, (`Poly f'
                   | `Local f')
-        when String.equal f f' -> ()
+        when
+          not O.check_locality
+          || String.equal f f' -> ()
       | `Dummy,   _
       | _,        `Dummy       -> Console.fatal "Separation.stratification: leftover dummy region: %a is %s of %a"
                                     R.pp r1 s R.pp r2
