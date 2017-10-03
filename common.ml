@@ -330,10 +330,7 @@ module Exp = struct
     fun ~loc offs e ->
       let oty =
         TPtr
-          ((match List.hd offs with
-             | `Field fi                  -> TComp (fi.fcomp, empty_size_cache (), [])
-             | `Container_of_void (_, ty) -> Ty.normalize ty),
-           [])
+          ((let `Field fi | `Container_of_void (fi, _) = List.hd offs in TComp (fi.fcomp, empty_size_cache (), [])), [])
       in
       mkCast oty @@
       new_exp ~loc @@
