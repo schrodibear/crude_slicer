@@ -225,25 +225,25 @@ module Make (Analysis : Region.Analysis) = struct
       let add_from_arg = combine params @@ map add_from_rval args in
       fun acc fv -> assoc (fv : Formal_var.t :> varinfo) add_from_arg acc
 
-    let prj_poly_mem s =
-      let map = R.map s in
+    let prj_poly_mem s kf =
+      let map = R.map s kf in
       fun acc m -> F.add_some (I.M.Poly_mem.prj ~find:(fun u -> R.H_map.find u map) ~mk:r_mem m) acc
 
-    let prj_reads (type t) (module F' : I.E.Reads with type t = t) s params =
-      let prj_poly_var = prj_poly_var s params in
-      let prj_poly_mem = prj_poly_mem s in
+    let prj_reads (type t) (module F' : I.E.Reads with type t = t) s kf =
+      let prj_poly_var = prj_poly_var s (Kernel_function.get_formals kf) in
+      let prj_poly_mem = prj_poly_mem s kf in
       fun ~from acc ->
         F'.iter_global_vars (fun v -> F.add_global_var v acc) from;
         F'.iter_poly_vars   (prj_poly_var acc) from;
         F'.iter_global_mems (fun mem -> F.add_global_mem mem acc) from;
         F'.iter_poly_mems   (prj_poly_mem acc) from
 
-    let prj_write ?lv s =
+    let prj_write ?lv s kf =
       function
       | `Global_var _
       | `Global_mem _ as w -> Some w
       | `Poly_mem m        -> I.M.Poly_mem.prj
-                                ~find:(fun u -> R.H_map.find u @@ R.map s)
+                                ~find:(fun u -> R.H_map.find u @@ R.map s kf)
                                 ~mk:(fun ?fi u -> Some (w_mem ?fi u))
                                 m
       | `Result            -> opt_bind w_lval lv
@@ -360,8 +360,8 @@ module Make (Analysis : Region.Analysis) = struct
         let I.E.Some { reads; assigns = (module A'); eff = eff' } =
           I.get info R.flag @@ Kernel_function.get_definition kf
         in
-        let prj_reads = prj_reads reads s (Kernel_function.get_formals kf) in
-        let prj_write = prj_write ?lv s in
+        let prj_reads = prj_reads reads s kf in
+        let prj_write = prj_write ?lv s kf in
         if I.E.is_target eff' then begin
           F.import ~from depends;
           prj_reads ~from:(I.E.depends eff') depends;
@@ -543,7 +543,7 @@ module Make (Analysis : Region.Analysis) = struct
                        eff = eff' } =
           I.get info R.flag @@ Kernel_function.get_definition kf
         in
-        let prj_write = prj_write ?lv s in
+        let prj_write = prj_write ?lv s kf in
         let deps' = I.E.depends eff' in
         let may_push_and_cons f =
           opt_fold @@ List.cons % tap (fun w -> if F.(mem_some (of_write w) depends) then f ())
@@ -890,6 +890,7 @@ let slice () =
         let offs_of_key   = offs_of_key
         let callee_approx = None
         let region_length, region_depth, region_count = 1, 1, 2
+        let mode = `Mono_rec
       end)
       ()
   in
@@ -908,6 +909,7 @@ let slice () =
         let callee_approx = Some callee_approx
         let        region_length,        region_depth,        region_count =
           Options.(Region_length.get (), Region_depth.get (), Region_count.get ())
+        let mode = `Poly_rec
       end)
       ()
   in

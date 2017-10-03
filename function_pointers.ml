@@ -75,20 +75,18 @@ module Make (R : Region.Analysis) = struct
       method finish = ()
       method! vstmt s =
         match s.skind with
-        | Instr (Call _)           ->
-          begin match R.map s with
-          | map                    -> R.H_map.iter
-                                        (fun u' u ->
-                                           let from, u =
-                                             match dir with
-                                             | `Forward  -> u,  u'
-                                             | `Backward -> u', u
-                                           in
-                                           H.import approx ~from u)
-                                        map;                        SkipChildren
-          | exception Not_found    ->                               SkipChildren
-          end
-        | _                        ->                               DoChildren
+        | Instr (Call _)           -> List.iter
+                                        (snd %>
+                                         R.H_map.iter
+                                           (fun u' u ->
+                                              let from, u =
+                                                match dir with
+                                                | `Forward  -> u,  u'
+                                                | `Backward -> u', u
+                                              in
+                                              H.import approx ~from u))
+                                        (R.maps s);                     SkipChildren
+        | _                        ->                                   DoChildren
     end in
     fun () ->
       Console.debug "Started function pointer approximation...";

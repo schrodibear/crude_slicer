@@ -480,6 +480,8 @@ module type Separation_options = sig
   val region_length : int
   val region_depth : int
   val region_count : int
+
+  val check_locality : bool
 end
 
 module Separation : functor (_ : Separation_options) () -> sig
@@ -562,13 +564,17 @@ end = functor (O : Separation_options) () -> struct
   let switch fo = current := fo
 
   let check_region r =
-    match r.R.kind with
-    | `Local f | `Poly f
-      when
-        may_map ~dft:false
-          (String.equal f) !current -> Ok ()
-    | `Local f | `Poly f as k       -> Error (k, f)
-    | `Global | `Dummy              -> Ok ()
+    if not O.check_locality
+    then
+      Ok ()
+    else
+      match r.R.kind with
+      | `Local f | `Poly f
+        when
+          may_map ~dft:false
+            (String.equal f) !current -> Ok ()
+      | `Local f | `Poly f as k       -> Error (k, f)
+      | `Global | `Dummy              -> Ok ()
 
   module U = struct
     include Make_unifiable (R) ()
@@ -585,8 +591,10 @@ end = functor (O : Separation_options) () -> struct
                               R.pp (repr u') R.Kind.pp k R.pp r f
       in
       fun u1 u2 ->
-        check ~intruder:u1 u2;
-        check ~intruder:u2 u1;
+        if O.check_locality then begin
+          check ~intruder:u1 u2;
+          check ~intruder:u2 u1
+        end;
         unify u1 u2
   end
 
@@ -742,7 +750,7 @@ end = functor (O : Separation_options) () -> struct
     type t
     val create : unit -> t
     val add : U.t -> U.t -> t ->  unit
-    val replace : t -> U.t -> U.t -> unit
+    val replace : t -> U.t -> U.t -> unit [@@warning "-32"]
     val find : U.t -> t -> U.t
     val mem : U.t -> U.t -> t -> bool
     val find_repr : U.t -> U.t -> t -> U.t
@@ -912,14 +920,10 @@ end = functor (O : Separation_options) () -> struct
     instantiate ~map u u';
     H_map.collapse (List.iter % unify) map
 
-  let constrain =
-    let lmap = H_map.create () in
-    let instantiate = instantiate ~map:lmap in
-    fun ~map ~by us ->
-      List.iter2 instantiate by us;
-      H_map.collapse (List.iter % unify) lmap;
-      H_map.iter (H_map.replace map) lmap;
-      H_map.clear lmap
+  let constrain ~map ~by us =
+    H_map.clear map;
+    List.iter2 (instantiate ~map) by us;
+    H_map.collapse (List.iter % unify) map
 
   let arrow = snd %% arrow
   let deref = snd % deref
@@ -970,7 +974,8 @@ module type Analysis = sig
     val find : U.t -> t -> U.t
     val iter : (U.t -> U.t -> unit) -> t -> unit
   end
-  val map : stmt -> H_map.t
+  val map : stmt -> kernel_function -> H_map.t
+  val maps : stmt -> (kernel_function * H_map.t) list
   val arg_regions : stmt -> ?f:string -> kernel_function -> lval option -> exp list -> U.t list
   val param_regions : kernel_function -> U.t list
   val relevant_region : ?f:string -> U.t -> bool
@@ -985,6 +990,7 @@ module Analysis
     (I' : sig
        val offs_of_key : (fieldinfo * typ) Info.offs Info.H_field.t
        val callee_approx : Kf.t list Exp.Hashtbl.t option
+       val mode : [ `Poly_rec | `Mono_rec ]
        val region_length : int
        val region_depth : int
        val region_count : int
@@ -996,6 +1002,7 @@ module Analysis
       (struct
         let   region_length, region_depth, region_count =
           I'.(region_length, region_depth, region_count)
+        let check_locality = match I'.mode with `Poly_rec -> true | `Mono_rec -> false
       end)
       ()
 
@@ -1376,10 +1383,18 @@ module Analysis
 
   module H_k = Kernel_function.Hashtbl
   module H_stmt = Stmt.Hashtbl
+  module M_kf = Kf.Map
+  module H_call =
+    Hashtbl.Make
+      (struct
+        type t = stmt * kernel_function
+        let equal (s1, kf1) (s2, kf2) = Stmt.equal s1 s2 && Kf.equal kf1 kf2
+        let hash (s, kf) = 105871 * Stmt.hash s + Kf.hash kf
+      end)
 
   let h_params = H_k.create 1024
 
-  let h_maps = H_stmt.create 1024
+  let h_maps = H_call.create 1024
 
   let register_cleanup, cleanup =
     let open! Queue in
@@ -1591,7 +1606,7 @@ module Analysis
     switch f;
     r
 
-  let replay_on_call ~stmt ?f kf lvo args =
+  let replay_on_call ~same_scc ~stmt ?f kf lvo args =
     let param_regions, arg_regions =
       H_k.memo h_params kf (safe_param_regions ?f), arg_regions stmt ?f kf lvo args
     in
@@ -1600,7 +1615,14 @@ module Analysis
       let pair = param_regions, arg_regions in
       map_pair (take @@ uncurry min @@ map_pair length pair) pair
     in
-    let map = H_stmt.memo h_maps stmt (fun _ -> H_map.create ()) in
+    let fresh, map =
+      let key = stmt, kf in
+      match H_call.find_opt h_maps key with
+      | Some map  -> false, map
+      | None      -> true,  (let map = H_map.create () in
+                             H_call.add h_maps key map;
+                             map)
+    in
     let bump_ret_region ci =
       let bump us = bump_ci ci [List.hd us] in
       bump arg_regions;
@@ -1612,7 +1634,12 @@ module Analysis
     | TComp (ci, _, _) -> bump_ret_region ci
     | _                -> ()
     end;
-    constrain ~map ~by:param_regions arg_regions
+    match I'.mode, same_scc, fresh with
+    | `Poly_rec, true,  _
+    | `Poly_rec, false, true
+    | `Mono_rec, false, true  -> constrain ~map ~by:param_regions arg_regions
+    | `Mono_rec, true,  _     -> List.iter2 unify param_regions arg_regions
+    | _,         false, false -> ()
 
   let expr_of_lval =
     let cache = H_l.create 4096 in
@@ -1646,10 +1673,10 @@ module Analysis
 
   let callee_approx = I'.callee_approx
 
-  class unifier () fundec =
+  class unifier scc_map fundec =
     let f = fundec.svar.vname in
     let () = switch (Some f) in
-    object
+    object(self)
       inherit skipping_visitor
 
       method! vlval lv = ignore @@ of_lval ~f lv; DoChildren
@@ -1664,6 +1691,9 @@ module Analysis
         | BinOp ((Eq | Ne), e1, e2, _)                                      -> unify_exprs ~f e1 e2
         | _                                                                 -> ()
       method private vstmt_post stmt =
+        let replay_on_call ~stmt ?f kf lvo args =
+          replay_on_call ~same_scc:M_kf.(find (the self#current_kf) scc_map = find kf scc_map) ~stmt ?f kf lvo args
+        in
         match stmt.skind with
         | Instr (Set (lv, e, loc))                       -> unify_exprs ~f (expr_of_lval ~loc lv) e
         | Instr
@@ -1754,7 +1784,7 @@ module Analysis
           let pp = pp
         end
 
-        type t = unit
+        type t = int M_kf.t
 
         let get _ _ fundec = fundec
         let flag = R.flag
@@ -1763,10 +1793,13 @@ module Analysis
   let compute_regions () =
     Console.debug "Started compute_regions...";
     let sccs = Analyze.condensate ?callee_approx () in
+    let scc_map, _ =
+      List.(fold_left (fun (m, i) kfs -> fold_left (fun m kf -> M_kf.add kf i m) m kfs, i + 1) (M_kf.empty, 0) sccs)
+    in
     Console.debug "Proceeding with region analysis...";
     switch None;
     init_globals ();
-    Fixpoint.visit_until_convergence ~order:`topological (new unifier) () sccs;
+    Fixpoint.visit_until_convergence ~order:`topological (new unifier) scc_map sccs;
     switch None;
     unify_voids None;
     Console.debug ~level:3 "@[<2>Global result is:@\n%t@]" pp_globals;
@@ -1778,7 +1811,21 @@ module Analysis
 
   module H_map = H_map
 
-  let map = H_stmt.find h_maps
+  let map s kf = H_call.find h_maps (s, kf)
+
+  let maps s =
+    match s.skind with
+    | Instr
+        (Call
+           (_, { enode = Lval (Var vi, NoOffset); _ },
+            _, _))
+      when Kf.mem vi                                   ->(let kf = Globals.Functions.get vi in
+                                                          [kf, H_call.find h_maps (s, kf)])
+    | Instr (Call (_, e, _, _))                        -> List.map
+                                                            (fun kf -> kf, H_call.find h_maps (s, kf))
+                                                            (Analyze.callee_approx ?callee_approx e)
+    | _                                                -> Console.fatal "Can't get region maps from \
+                                                                         non-function-call statement"
 
   let param_regions kf = H_k.memo h_params kf param_regions
 
@@ -1790,6 +1837,6 @@ module Analysis
     H_e.clear h_expr;
     clear_retvars ();
     H_k.clear h_params;
-    H_stmt.clear h_maps;
+    H_call.clear h_maps;
     cleanup ()
 end
