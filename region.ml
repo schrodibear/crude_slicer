@@ -81,20 +81,48 @@ module Representant = struct
       | `Dummy   -> "?"
   end
 
-  type t =
+  type 'a region =
     {
       id   : int;
       name : string Lazy.t;
-      exp  : exp Lazy.t option;
+      exp  : 'a Lazy.t option;
       typ  : typ;
 
       mutable kind : Kind.t
     }
 
-  module Exp = struct
+  module type Exp = sig
+    type t = private exp
+    val loc : Location.t
+    val addr : varinfo -> exp
+    val var : varinfo -> exp
+    val ret : exp
+    val is_ret : exp -> bool
+    val arrow : t -> fieldinfo -> t
+    val deref : t -> t
+    val dot : t -> fieldinfo -> t
+    val container : t -> fieldinfo -> t
+    val dot_void : t -> t
+    val container_of_void : t -> typ -> t
+  end
+
+  module Exp : sig
+    include Exp
+    val mk : typ -> exp -> t
+    val arrow_opt : t region -> fieldinfo -> t Lazy.t option
+    val deref_opt : t region -> t Lazy.t option
+    val dot_opt : t region -> fieldinfo -> t Lazy.t option
+    val container_opt : t region -> fieldinfo -> t Lazy.t option
+    val dot_void_opt : t region -> t Lazy.t option
+    val container_of_void_opt : t region -> typ -> t Lazy.t option
+  end = struct
     type t = exp
 
     let loc = Location.unknown
+
+    let mk ty e =
+      let newt = TPtr (Ty.normalize ty, []) in
+      mkCast ~force:false ~overflow:Check ~e ~newt
 
     let norm e =
       let ty = typeOf e in
@@ -112,7 +140,7 @@ module Representant = struct
     let addr = norm % mkAddrOrStartOf ~loc % var
     let var = norm % evar ~loc
     let ret = new_exp ~loc (Const (CStr "!R!"))
-    let is_ret = Exp.equal ret
+    let is_ret = Exp.equal ret % stripCasts
 
     let arrow addr fi = norm @@ new_exp ~loc @@ Lval (mkMem ~addr ~off:(Field (fi, NoOffset)))
     let deref addr    = norm @@ new_exp ~loc @@ Lval (mkMem ~addr ~off:NoOffset)
@@ -127,6 +155,8 @@ module Representant = struct
     let    arrow_opt,  deref_opt,      dot_opt,      container_opt,     dot_void_opt,      container_of_void_opt =
       opt2 arrow,  opt deref,     opt2 dot,     opt2 container,     opt dot_void,     opt2 container_of_void
   end
+
+  type t = Exp.t region
 
   let name r = !! (r.name)
   let typ r = r.typ
@@ -148,8 +178,9 @@ module Representant = struct
     incr id;
     { id = !id; name; exp; typ; kind }
 
-  let global name e typ = mk ~name:(lazy name) ~e:(opt_map Lazy.from_val e) ~typ ~kind:`Global
-  let poly fname name e typ = mk ~name:(lazy (fname ^ "::" ^ name)) ~e:(Some (lazy e)) ~typ ~kind:(`Poly fname)
+  let global name e typ = mk ~name:(lazy name) ~e:(opt_map (Lazy.from_val % Exp.mk typ) e) ~typ ~kind:`Global
+  let poly fname name e typ =
+    mk ~name:(lazy (fname ^ "::" ^ name)) ~e:(Some (lazy (Exp.mk typ e))) ~typ ~kind:(`Poly fname)
   let local fname name typ = mk ~name:(lazy (fname ^ ":::" ^ name)) ~e:None ~typ ~kind:(`Local fname)
 
   let demote r = r.kind <- `Dummy
@@ -234,8 +265,12 @@ module type Representant = sig
   type t
   val choose : t -> t -> [> `First | `Second | `Any ]
 
+  module Exp : sig
+    type t
+  end
+
   val name : t -> string
-  val exp : t -> exp Lazy.t option
+  val exp : t -> Exp.t Lazy.t option
   val report : t -> is_repr_of:t -> unit
 
   val flag : Flag.t
@@ -400,29 +435,18 @@ module type Representant_intf = sig
     val pp : Format.formatter -> [< t ] -> unit
   end
 
-  type t = private
+  type 'a region = private
     {
       id   : int;
       name : string Lazy.t;
-      exp  : exp Lazy.t option;
+      exp  : 'a Lazy.t option;
       typ  : typ;
       mutable kind : Kind.t
     }
 
-  module Exp : sig
-    type t = exp
-    val loc : Location.t
-    val addr : varinfo -> t
-    val var : varinfo -> t
-    val ret : t
-    val is_ret : t -> bool
-    val arrow : t -> fieldinfo -> t
-    val deref : t -> t
-    val dot : t -> fieldinfo -> t
-    val container : t -> fieldinfo -> t
-    val dot_void : t -> t
-    val container_of_void : t -> typ -> t
-  end
+  module Exp : Representant.Exp
+
+  type t = Exp.t region
 
   val name : t -> string
   val exp : t -> Exp.t Lazy.t option
@@ -438,8 +462,8 @@ module type Representant_intf = sig
 end
 
 module type Representant_full = sig
-  include Representant_intf with type t = Representant.t
-  include Representant with module Kind := Kind and type t := t
+  include Representant_intf with type 'a region = 'a Representant.region
+  include Representant with module Kind := Kind and module Exp := Exp and type t := t
   val global : string -> exp option -> typ -> t
   val poly : string -> string -> exp -> typ -> t
   val local : string -> string -> typ -> t
@@ -916,7 +940,7 @@ end = functor (O : Separation_options) () -> struct
 end
 
 module type Analysis = sig
-  module R : Representant_intf with type t = Representant.t
+  module R : Representant_intf with type 'a region = 'a Representant.region
   module U : Unifiable with type repr = R.t
   module I : module type of Info.Make (R) (U) ()
 

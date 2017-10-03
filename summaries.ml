@@ -76,7 +76,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
                    else DoChildren
                  method! vvrbl vi = try ChangeTo (M_v.find vi params) with Not_found -> SkipChildren
                end)
-              (R.exp' r)
+              (R.exp' r :> exp option)
           in
           match eo, fo with
           | None,      _       -> `Skip
