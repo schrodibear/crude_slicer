@@ -86,12 +86,16 @@ module Make (Analysis : Analysis) = struct
     method! vglob_aux =
       function
       | GFun (f, _)
-        when Options.Required_bodies.mem f.svar.vname         -> DoChildren
-      | GFun ({ svar = { vname; _ } as svar; sspec; _ }, loc)
-        when Options.(Alloc_functions.mem  vname ||
-                      Assume_functions.mem vname ||
-                      Target_functions.mem vname)             -> ChangeTo [GFunDecl (sspec, svar, loc)]
-      | _                                                     -> DoChildren
+        when Options.Required_bodies.mem f.svar.vname      -> DoChildren
+      | GFun (d, loc)
+        when Options.(Alloc_functions.mem  d.svar.vname ||
+                      Assume_functions.mem d.svar.vname ||
+                      Target_functions.mem d.svar.vname)   ->(let kf = Globals.Functions.get d.svar in
+                                                              kf.fundec <-
+                                                                Declaration
+                                                                  (d.sspec, d.svar, Some d.sformals, d.svar.vdecl);
+                                                              ChangeTo [GFunDecl (d.sspec, d.svar, loc)])
+      | _                                                  -> DoChildren
 
   end
 
