@@ -151,24 +151,17 @@ module Ty = struct
     match typeDeepDropAllAttributes @@ unrollTypeDeep ty with
     | TVoid []
     | TInt (_, [])
-    | TFloat (_, []) as ty                    -> ty
-    | TPtr (TFun (ty, argso, vararg, []), [])
-    | TFun (ty, argso, vararg, [])            -> TPtr (TFun (normalize ty,
-                                                             opt_map
-                                                               (List.map
-                                                                  (fun (n, ty, _) -> n, normalize ty, []))
-                                                               argso,
-                                                             vararg,
-                                                             []),
-                                                       [])
-    | TPtr (TArray _ as ty, [])               -> TPtr (normalize @@ element_type ty, [])
-    | TPtr (ty, [])                           -> TPtr (normalize ty, [])
-    | TComp ({ cstruct = false; _ }, _, _)    -> TVoid []
-    | TArray (_, _, _, []) as ty              -> TPtr (normalize @@ element_type ty, [])
+    | TFloat (_, []) as ty                 -> ty
+    | TPtr (TFun (_, _, _, []) as ty, _)
+    | (TFun (_, _, _, []) as ty)           -> TPtr (ty, [])
+    | TPtr (TArray _ as ty, [])            -> TPtr (normalize @@ element_type ty, [])
+    | TPtr (ty, [])                        -> TPtr (normalize ty, [])
+    | TComp ({ cstruct = false; _ }, _, _) -> TVoid []
+    | TArray (_, _, _, []) as ty           -> TPtr (normalize @@ element_type ty, [])
     | TComp ({ cstruct = true; _ } as ci,
-             cache, [])                       -> TComp (ci, cache, [])
-    | TEnum (ei, [])                          -> TInt (ei.ekind, [])
-    | TBuiltin_va_list []                     -> TPtr (TVoid [], [])
+             cache, [])                    -> TComp (ci, cache, [])
+    | TEnum (ei, [])                       -> TInt (ei.ekind, [])
+    | TBuiltin_va_list []                  -> TPtr (TVoid [], [])
     | TVoid            (_ :: _)
     | TInt (_,          _ :: _)
     | TFloat (_,        _ :: _)
@@ -178,7 +171,7 @@ module Ty = struct
     | TComp (_, _,      _ :: _)
     | TEnum (_,         _ :: _)
     | TBuiltin_va_list (_ :: _)
-    | TNamed _                                -> assert false
+    | TNamed _                             -> assert false
 
   let deref_once ty =
     let open Ast_info in
