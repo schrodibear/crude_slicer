@@ -124,7 +124,7 @@ module Representant = struct
     let addr = norm % mkAddrOrStartOf ~loc % var
     let var = norm % evar ~loc
     let ret = new_exp ~loc (Const (CStr "!R!"))
-    let is_ret = Exp.equal ret % stripCasts
+    let is_ret = Exp.equal ret
 
     let arrow addr fi = norm @@ new_exp ~loc @@ Lval (mkMem ~addr ~off:(Field (fi, NoOffset)))
     let deref addr    = norm @@ new_exp ~loc @@ Lval (mkMem ~addr ~off:NoOffset)
