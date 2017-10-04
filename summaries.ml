@@ -95,8 +95,8 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       in
       let limit =
         let max = Options.Deps_limit.get () in
-        let z = zero ~loc in
-        fun es -> if List.length es <= max then es else [z]
+        let z = mkCast ~force:true ~overflow:Check ~e:(zero ~loc) ~newt:voidPtrType in
+        fun es -> let l = List.length es in if 0 < l && l <= max then es else [z]
       in
       let havoc_lval =
         let havoc = Kernel_function.get_vi @@ Globals.Functions.find_by_name @@ Options.Choice_function.get () in
