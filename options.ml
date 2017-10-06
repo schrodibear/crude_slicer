@@ -160,6 +160,24 @@ module Recognize_wrecked_container_of =
       let default = true
     end)
 
+module Mono_rec_threshold =
+  Int
+    (struct
+      let option_name = "-monorec_threshold"
+      let help = "Use monomorphic recusrion in region analysis if at least this number of functions is present \
+                  in the input file. Will not generate summaries."
+      let arg_name = ""
+      let default = 2000
+    end)
+
+module Summaries =
+  Bool
+    (struct
+      let option_name = "-summaries"
+      let help = "Switch summaries generation"
+      let default = true
+    end)
+
 module Builtin_expect_regexp =
   String
     (struct

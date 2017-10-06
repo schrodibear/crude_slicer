@@ -903,6 +903,11 @@ let slice () =
   Console.debug "Stage 2...";
   Region_analysis1.clear ();
   Gc.full_major ();
+  let mode =
+    if Globals.Functions.fold (const ((+) 1)) 0 <= Options.Mono_rec_threshold.get ()
+    then `Poly_rec
+    else `Mono_rec
+  in
   let module Region_analysis2 =
     Region.Analysis
       (struct
@@ -910,7 +915,7 @@ let slice () =
         let callee_approx = Some callee_approx
         let        region_length,        region_depth,        region_count =
           Options.(Region_length.get (), Region_depth.get (), Region_count.get ())
-        let mode = `Poly_rec
+        let mode = mode
         let recognize_container_of2 = Options.Recognize_wrecked_container_of.get ()
       end)
       ()
@@ -929,7 +934,10 @@ let slice () =
   Slice.mark sccs;
   Console.debug "Will now sweep and generate summaries...";
   let module Summaries = Summaries.Make (Region_analysis2) (Info) in
-  Slice.sweep ~after_sweeping_funcs:(fun () -> Summaries.generate sccs) ();
+  Slice.sweep
+    ~after_sweeping_funcs:(fun () ->
+      if Options.Summaries.get () && mode = `Poly_rec then Summaries.generate sccs)
+    ();
   let stat = Gc.stat () in
   Console.debug  "Current # of live words: %d" stat.Gc.live_words;
   Console.debug "Will now clean...";
