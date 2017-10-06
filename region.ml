@@ -1122,6 +1122,8 @@ module Analysis
       end
     | _ -> None
 
+  let match_dot = if I'.recognize_container_of2 then match_dot else const None
+
   (* Notice about handling integers used as pointers: they don't have regions, i.e. it's unsound(!),
      we just create a fresh region each time we cast an integer to a pointer, but this is done
      separately for each case below *)
