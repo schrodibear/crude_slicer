@@ -497,6 +497,8 @@ module Separation : functor (_ : Separation_options) () -> sig
   val reflect : map:H_map.t -> U.t -> on:U.t -> unit
   val constrain : map:H_map.t -> by:U.t list -> U.t list -> unit
 
+  val widen : U.t list -> unit
+
   val switch : string option -> unit
   val assert_stratification : U.t -> unit
 
@@ -945,6 +947,33 @@ end = functor (O : Separation_options) () -> struct
     List.iter2 (instantiate ~map) by us;
     H_map.collapse (List.iter % unify) map
 
+  let widen us =
+    let q = Queue.create () in
+    let uu = H_l.create () in
+    let queued = H'.create () in
+    let push u =
+      if not (H'.mem u queued) then begin
+        Queue.push u q;
+        H'.add u u queued;
+        H_l.add u uu
+      end
+    in
+    List.iter push us;
+    let push' _ = push in
+    while not (Queue.is_empty q) do
+      let u = Queue.pop q in
+      begin match H_l.find u uu with
+      | u', _               -> unify u u'
+      | exception Not_found -> ()
+      end;
+      H_f.iter push' u h_arrow;
+      H'.iter  push  u h_deref;
+      H_f.iter push' u h_dot;
+      H'.iter  push  u h_dot_void;
+      H_f.iter push' u h_container;
+      H_t.iter push' u h_container_of_void
+    done
+
   let arrow = snd %% arrow
   let deref = snd % deref
   let dot = snd %% dot
@@ -1007,10 +1036,12 @@ module type Analysis = sig
 end
 
 module Analysis
-    (I' : sig
+    (C : sig
        val offs_of_key : (fieldinfo * typ) Info.offs Info.H_field.t
        val callee_approx : Kf.t list Exp.Hashtbl.t option
-       val mode : [ `Poly_rec | `Mono_rec ]
+       val mode : [ `Poly_rec | `Mono_rec | `Global ]
+       val widen : bool
+       val assert_stratification : bool
        val recognize_container_of2 : bool
        val region_length : int
        val region_depth : int
@@ -1022,8 +1053,8 @@ module Analysis
     Separation
       (struct
         let   region_length, region_depth, region_count =
-          I'.(region_length, region_depth, region_count)
-        let check_locality = match I'.mode with `Poly_rec -> true | `Mono_rec -> false
+          C.(region_length, region_depth, region_count)
+        let check_locality = match C.mode with `Poly_rec -> true | `Mono_rec | `Global -> false
       end)
       ()
 
@@ -1097,7 +1128,7 @@ module Analysis
       begin match unrollType @@ Ast_info.pointed_type pstr, unrollType (typeOf e) with
       | TComp (ci, _, _), (TPtr _ | TArray _ as ty) when ci.cstruct ->
         begin try
-          Some (e, H_field.find I'.offs_of_key (ci, Ty.deref_once ty, c))
+          Some (e, H_field.find C.offs_of_key (ci, Ty.deref_once ty, c))
         with
         | Not_found -> None
         end
@@ -1105,7 +1136,7 @@ module Analysis
       end
     | _ -> None
 
-  let match_container_of2 = if I'.recognize_container_of2 then match_container_of2 else const None
+  let match_container_of2 = if C.recognize_container_of2 then match_container_of2 else const None
 
   let match_dot =
     let is_uchar_ptr_type ty =
@@ -1122,7 +1153,7 @@ module Analysis
       begin match unrollType ty with
       | TComp (ci, _, _) ->
         begin try
-          Some (e, H_field.find I'.offs_of_key (ci, uintType, c))
+          Some (e, H_field.find C.offs_of_key (ci, uintType, c))
         with
         | Not_found -> None
         end
@@ -1130,7 +1161,7 @@ module Analysis
       end
     | _ -> None
 
-  let match_dot = if I'.recognize_container_of2 then match_dot else const None
+  let match_dot = if C.recognize_container_of2 then match_dot else const None
 
   (* Notice about handling integers used as pointers: they don't have regions, i.e. it's unsound(!),
      we just create a fresh region each time we cast an integer to a pointer, but this is done
@@ -1659,12 +1690,13 @@ module Analysis
     | TComp (ci, _, _) -> bump_ret_region ci
     | _                -> ()
     end;
-    match I'.mode, same_scc, fresh with
+    match C.mode, same_scc, fresh with
     | `Poly_rec, true,  _
     | `Poly_rec, false, true
     | `Mono_rec, false, true  -> constrain ~map ~by:param_regions arg_regions
-    | `Mono_rec, true,  _     -> List.iter2 unify param_regions arg_regions
-    | _,         false, false -> ()
+    | `Mono_rec, true,  _
+    | `Global,   _,     true  -> List.iter2 unify param_regions arg_regions
+    | _,         _,     false -> ()
 
   let expr_of_lval =
     let cache = H_l.create 4096 in
@@ -1696,7 +1728,7 @@ module Analysis
       | _ -> DoChildrenPost (tap self#vstmt_post)
   end
 
-  let callee_approx = I'.callee_approx
+  let callee_approx = C.callee_approx
 
   class unifier scc_map fundec =
     let f = fundec.svar.vname in
@@ -1740,7 +1772,15 @@ module Analysis
         unify_voids (Some f);
         let kf = Globals.Functions.get fundec.svar in
         H_k.replace h_params kf @@ param_regions kf;
-        bump_param_regions kf
+        bump_param_regions kf;
+        if C.widen then
+          widen @@
+          List.concat_map
+            (fun v ->
+               match of_var ~f v with
+               | `Location (u, _) | `Value u -> [u]
+               | `None                       -> [])
+            Kernel_function.(get_formals kf @ get_locals kf)
     end
 
   let pp_region_of fmttr pp_e e =
@@ -1828,8 +1868,10 @@ module Analysis
     switch None;
     unify_voids None;
     Console.debug ~level:3 "@[<2>Global result is:@\n%t@]" pp_globals;
-    Console.debug "Finished compute_regions, will now check stratification invariants...";
-    assert_stratification ()
+    if C.assert_stratification then begin
+      Console.debug "Finished compute_regions, will now check stratification invariants...";
+      assert_stratification ()
+    end
 
   let dot_voids = dot_voids
   let containers_of_void = containers_of_void

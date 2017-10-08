@@ -884,13 +884,16 @@ let slice () =
   let offs_of_key = Info.H_field.create 2048 in
   Analyze.cache_offsets ~offs_of_key;
   Console.debug "Stage 1...";
+  let large_file = Globals.Functions.fold (const ((+) 1)) 0 > Options.Widening_threshold.get () in
   let module Region_analysis1 =
     Region.Analysis
       (struct
         let offs_of_key   = offs_of_key
         let callee_approx = None
         let region_length, region_depth, region_count = 1, 1, 2
-        let mode = `Mono_rec
+        let mode = `Global
+        let widen = false
+        let assert_stratification = not large_file
         let recognize_container_of2 = Options.Recognize_wrecked_container_of.get ()
       end)
       ()
@@ -903,11 +906,6 @@ let slice () =
   Console.debug "Stage 2...";
   Region_analysis1.clear ();
   Gc.full_major ();
-  let mode =
-    if Globals.Functions.fold (const ((+) 1)) 0 <= Options.Mono_rec_threshold.get ()
-    then `Poly_rec
-    else `Mono_rec
-  in
   let module Region_analysis2 =
     Region.Analysis
       (struct
@@ -915,7 +913,9 @@ let slice () =
         let callee_approx = Some callee_approx
         let        region_length,        region_depth,        region_count =
           Options.(Region_length.get (), Region_depth.get (), Region_count.get ())
-        let mode = mode
+        let mode = `Poly_rec
+        let widen = large_file
+        let assert_stratification = not large_file
         let recognize_container_of2 = Options.Recognize_wrecked_container_of.get ()
       end)
       ()
@@ -934,10 +934,7 @@ let slice () =
   Slice.mark sccs;
   Console.debug "Will now sweep and generate summaries...";
   let module Summaries = Summaries.Make (Region_analysis2) (Info) in
-  Slice.sweep
-    ~after_sweeping_funcs:(fun () ->
-      if Options.Summaries.get () && mode = `Poly_rec then Summaries.generate sccs)
-    ();
+  Slice.sweep ~after_sweeping_funcs:(fun () -> if Options.Summaries.get () then Summaries.generate sccs) ();
   let stat = Gc.stat () in
   Console.debug  "Current # of live words: %d" stat.Gc.live_words;
   Console.debug "Will now clean...";
