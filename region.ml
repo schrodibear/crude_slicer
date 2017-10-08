@@ -730,7 +730,7 @@ end = functor (O : Separation_options) () -> struct
     constraint 'x = < u : 'u; h : 'h; fl : 'fl; .. >
 
   let traverse
-      ~symm ?(guard=fun _ _ -> true) ?(pre=const ignore) ~reflect2 ?(update=const ignore) ?(post=const ignore) =
+      ~symm ?(guard=fun _ _ -> true) ~reflect2 ?(pre=const ignore) ?(update=const ignore) ?(post=const ignore) =
     let reflect_all h =
       let reflect1 f u2 = reflect2.reflect2 h (const' f) u2 () and reflect2 f = reflect2.reflect2 h f in
       fun u1 u2 ->
@@ -876,10 +876,10 @@ end = functor (O : Separation_options) () -> struct
         H_map.add u1 u2 map;
         traverse
           ~symm:false
+          ~reflect2
           ~pre:(fun u1 u2 ->
             H_l.add u2 loops;
             if (U.repr u1).R.kind = `Global then H_map.add u1 u1 map)
-          ~reflect2
           ~post:(fun _ u2 -> H_l.remove u2 loops)
           u1 u2;
         H_l.clear loops
@@ -895,6 +895,14 @@ end = functor (O : Separation_options) () -> struct
           H_uu.add u1' u2' queued
         end
       in
+      let add_new u1' u2' =
+        let r2' = U.repr u2' in
+        match R.choose (U.repr u1') r2' with
+        | `First  -> U.unify u1' u2'
+        | `Any    ->(R.demote r2';
+                     U.unify u1' u2')
+        | `Second -> add u1' u2'
+      in
       match f u2 k with
       | `Old, u2'                         -> add u1' u2'
       | `New, u2'                         ->
@@ -903,8 +911,8 @@ end = functor (O : Separation_options) () -> struct
                     || !depth >= H_l.maxd ->(R.demote (U.repr u2');
                                              U.unify u2' u2'';
                                              add u1' u2'')
-        | _                               -> add u1' u2'
-        | exception Not_found             -> add u1' u2'
+        | _                               -> add_new u1' u2'
+        | exception Not_found             -> add_new u1' u2'
     in
     let reflect2 = { reflect2 } in
     let diff_kind r1 r2 = not R.(Kind.equal r1.kind r2.kind) in
@@ -913,12 +921,12 @@ end = functor (O : Separation_options) () -> struct
       traverse
         ~symm:true
         ~guard:(fun u1 u2 -> not U.(R.equal (repr u1) @@ repr u2))
+        ~reflect2
         ~pre:(fun u1 u2 ->
           H_l.replace u1 loops;
           if U.(diff_kind (repr u1) @@ repr u2) then H_l.replace u2 loops;
           incr depth;
           U.unify u1 u2)
-        ~reflect2
         ~update:(fun r1 r2 ->
           H_l.update r1 loops;
           if diff_kind r1 r2 then H_l.update r2 loops)
