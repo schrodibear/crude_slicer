@@ -396,14 +396,18 @@ module Make (Analysis : Region.Analysis) = struct
              gassign lv from)
           lv
       let goto s = F.import ~from:(from s) @@ A.find (w_var @@ H_stmt.find info.I.goto_vars s) assigns
+      let import_trans ~from =
+        let from' = F.copy dummy_flag from in
+        F.iter (fun r -> F.import ~from:(A.find r assigns) from') from;
+        F.iter (fun w -> A.import_values w from' assigns) from'
       let assume s e =
         let from = from s in
         add_from_rval e from;
-        assign_all e from assigns
+        assign_all e from assigns;
+        import_trans ~from
       let unreach s =
         let from = from s in
-        let import w = A.import_values w from assigns in
-        F.iter import from
+        import_trans ~from
     end
 
     let collector info =
