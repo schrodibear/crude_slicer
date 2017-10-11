@@ -395,7 +395,7 @@ module Make (Analysis : Region.Analysis) = struct
              List.iter (fun e -> add_from_rval e from) es;
              gassign lv from)
           lv
-      let goto s = F.import ~from:(from s) @@ A.find (w_var @@ H_stmt.find info.I.goto_vars s) assigns
+      let goto s = F.import ~from:(from s) @@ A.find (w_var @@ H_stmt.find info.goto_vars s) assigns
       let import_trans ~from =
         let from' = F.copy dummy_flag from in
         F.iter (fun r -> F.import ~from:(A.find r assigns) from') from;
@@ -419,7 +419,7 @@ module Make (Analysis : Region.Analysis) = struct
           F.clear from;
           List.iter
             (fun vi -> F.add_local_var (Local_var.of_varinfo vi) from)
-            (H_stmt_conds.find_all info.I.stmt_vars s);
+            (H_stmt_conds.find_all info.stmt_vars s);
           Stack.iter (fun from' -> F.import ~from:from' from) under;
           from
       in
@@ -570,7 +570,7 @@ module Make (Analysis : Region.Analysis) = struct
 
       let alloc ~loc lv = decide @@ gassign lv @ gassign (deref ~loc lv)
       let stub = may_map (decide % gassign) ~dft:`Not_yet
-      let goto s = decide @@ [`Local_var (Local_var.of_varinfo @@ H_stmt.find info.I.goto_vars s)]
+      let goto s = decide @@ [`Local_var (Local_var.of_varinfo @@ H_stmt.find info.goto_vars s)]
       let assume e =
         let r = ref [] in
         visit_rval (fun lv -> may (fun w -> r := w :: !r) @@ w_lval lv) e;
@@ -781,13 +781,15 @@ module Make (Analysis : Region.Analysis) = struct
       in
       b.bstmts <- loop [] b.bstmts
 
+    module H_int = Datatype.Int.Hashtbl
+
     class sweeper () =
       let required_bodies, main_filter =
         let open Kernel_function in
         let result = H.create 256 in
         H.(iter
              (fun _ -> I.E.iter_body_reqs @@ fun f -> replace result f ())
-             info.I.effects);
+             info.effects);
         List.iter
           (fun kf ->
              try                H.replace result (get_definition kf) ()
@@ -800,8 +802,28 @@ module Make (Analysis : Region.Analysis) = struct
             (Not_found
             | No_Definition) ->                    result, None
       in
+      let irrelevant_lines = H_int.create 2048 in
+      let del_stmt, del_var =
+        let del_loc ?no (start, stop) =
+          for i = start.Lexing.pos_lnum to stop.Lexing.pos_lnum do
+            H_int.replace irrelevant_lines i no
+          done
+        in
+        (fun s ->
+           match s.skind with
+           | Goto (_, loc)
+             when H_stmt.mem info.goto_next s -> del_loc
+                                                     ~no:(fst @@
+                                                          Stmt.loc @@
+                                                          H_stmt.find info.goto_next s).Lexing.pos_lnum
+                                                     loc
+           | _                                -> del_loc (Stmt.loc s)),
+        del_loc ?no:None
+      in
       object
         val mutable eff = I.E.create dummy_flag
+
+        method iter_irrelevant_lines f = H_int.iter f irrelevant_lines
 
         inherit frama_c_inplace
 
@@ -814,18 +836,24 @@ module Make (Analysis : Region.Analysis) = struct
 
         method! vstmt_aux s =
           if not (I.E.has_stmt_req' s eff)
-          then if Options.Use_ghosts.is_set ()
+          then begin
+            del_stmt s;
+            if Options.Use_ghosts.is_set ()
             then (s.ghost <- true; DoChildren)
             else                   ChangeTo { s with skind = Instr (Skip (Stmt.loc s)); labels = collect_labels s }
+          end
           else                     DoChildren
 
         method! vblock _ = DoChildrenPost (tap shrink_block)
 
         method! vglob_aux g =
           match g, main_filter with
-          | GFun (f, _), _ when not (H.mem required_bodies f) ->                                   ChangeTo []
-          | GVar (vi, init, _), Some main_filter              -> init.init <- main_filter vi init; SkipChildren
-          | _                                                 ->                                   DoChildren
+          | GFun (f, _),          _
+            when not (H.mem required_bodies f)     ->                                   ChangeTo []
+          | GVar (vi, init, loc), Some main_filter ->(init.init <- main_filter vi init;
+                                                      if init.init = None then
+                                                        del_var loc;                    SkipChildren)
+          | _                                      ->                                   DoChildren
       end
 
     module H_lab = Label.Hashtbl
@@ -857,7 +885,20 @@ module Make (Analysis : Region.Analysis) = struct
 
     let sweep ?after_sweeping_funcs () =
       let file = Ast.get () in
-      visitFramacFile (new sweeper ()) file;
+      let sweeper = new sweeper () in
+      visitFramacFile (sweeper :> frama_c_visitor) file;
+      let oslice = Options.Oslice.get () in
+      if oslice <> "" then
+        Command.pp_to_file
+          oslice
+          Pretty_utils.(Format.(fun fmt ->
+            pp_iter2
+              ~sep:"\n"
+              ~between:","
+              (const' sweeper#iter_irrelevant_lines)
+              pp_print_int
+              (pp_opt ~pre:"" pp_print_int)
+              fmt ()));
       visitFramacFile (new cfg_fixupper ()) file;
       Cfg.clearFileCFG ~clear_id:false file;
       Cfg.computeFileCFG file;
@@ -924,8 +965,8 @@ let slice () =
       end)
       ()
   in
-  let { Region_analysis2.I.goto_vars; stmt_vars; _ } as info = Region_analysis2.I.create () in
-  Analyze.fill_goto_tables ~goto_vars ~stmt_vars;
+  let info = Region_analysis2.I.create () in
+  Analyze.fill_goto_tables info;
   Region_analysis2.compute_regions ();
   let module Slice = Make (Region_analysis2) in
   let module Info = struct let info = info end in

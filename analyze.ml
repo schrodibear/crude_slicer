@@ -279,7 +279,9 @@ module Goto_handling = struct
                                r)
         | ()                -> Console.fatal "Analysis.Goto_handling.separate: broken invariant: no separators"
 
-    class goto_visitor ~goto_vars ~stmt_vars kf =
+    open Info
+
+    class goto_visitor info kf =
       let return = Kernel_function.find_return kf in
       object(self)
         inherit frama_c_inplace
@@ -316,6 +318,7 @@ module Goto_handling = struct
           | Goto _
           | Break _
           | Continue _                 ->
+            H.replace info.goto_next s next;
             let sep, deps = separate return ~s':next s in
             Console.debug ~level:4 "Found separator for statement %a@@L%d : %a@@L%d"
               pp_stmt s (Stmt.lnum s) pp_stmt sep (Stmt.lnum sep);
@@ -326,8 +329,8 @@ module Goto_handling = struct
                 (Kernel_function.get_definition kf)
                 (TInt (IInt, []))
             in
-            H.replace goto_vars s vi;
-            List.iter (fun s -> H.add stmt_vars s vi) deps;
+            H.replace info.goto_vars s vi;
+            List.iter (fun s -> H.add info.stmt_vars s vi) deps;
             SkipChildren
       end
   end
@@ -335,24 +338,24 @@ end
 
 include Goto_handling.M
 
-let fill_goto_tables ~goto_vars ~stmt_vars =
+let fill_goto_tables info =
   let open Info in
   Console.debug "Started fill_goto_tables...";
-  H_stmt.clear goto_vars;
-  H_stmt.clear stmt_vars;
+  H_stmt.clear info.goto_vars;
+  H_stmt.clear info.stmt_vars;
   Globals.Functions.iter
     (fun kf ->
        match Kernel_function.get_definition kf with
        | exception Kernel_function.No_Definition -> ()
        | fundec                                  ->
          Console.debug ~level:2 "Filling goto tables in function %s..." fundec.svar.vname;
-         ignore @@ visitFramacFunction (new goto_visitor ~goto_vars ~stmt_vars kf) fundec);
+         ignore @@ visitFramacFunction (new goto_visitor info kf) fundec);
   Console.debug ~level:3 "Finished filling goto tables. \
                           Result is:@\n@[<2>Goto vars:@\n%a@]@\n@[<2>Stmt vars:@\n%a@]"
     (pp_iter2 ~sep:";@\n" ~between:"@ ->@ " H_stmt.iter
        (fun fmt s -> fprintf fmt "s%d@@L%d" s.sid @@ Stmt.lnum s)
        pp_varinfo)
-    goto_vars
+    info.goto_vars
     (pp_iter2 ~sep:";@\n" ~between:"@ ->@ " H_stmt_conds.iter_all pp_stmt @@
      pp_list ~pre:"[@[" ~suf:"]@]" ~sep:",@ " ~empty:"[]" pp_varinfo)
-    stmt_vars
+    info.stmt_vars

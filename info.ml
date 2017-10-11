@@ -586,8 +586,9 @@ module Void_ptr_var = Make_var (struct let is_ok vi = isVoidPtrType vi.vtype end
 
 module H_void_ptr_var = Make_reporting_bithashset (Void_ptr_var) ()
 
-module Make_effect (W : Writes) : sig
+module type Effect = sig
   type ('a, 'r) t
+  module W : Writes
   module K : Reads_kind with module W = W
   module type Reads = Reads with module W = W and module K = K
   module type Assigns = Reporting_hashmap with type key = W.t and type 'a S.kind = 'a K.t and type S.some = K.some
@@ -618,8 +619,10 @@ module Make_effect (W : Writes) : sig
   val flag : (_, _) t -> Flag.t
 
   val pp : formatter -> some -> unit
-end = struct
+end
 
+module Make_effect (W : Writes) : Effect with module W = W = struct
+  module W = W
   module K = Make_reads_kind (W)
   module Reads = Make_reads (W) (K)
   module Assigns = Make_reporting_hashmap (W)
@@ -717,28 +720,51 @@ end
 
 type 'a offs = [ `Field of fieldinfo | `Container_of_void of 'a ] list
 
-module Make (R : Representant) (U : Unifiable with type repr = R.t) () = struct
+type 'eff t =
+  {
+    goto_vars   : varinfo H_stmt.t;
+    goto_next   : stmt H_stmt.t;
+    stmt_vars   : varinfo H_stmt_conds.t;
+    offs_of_key : (fieldinfo * typ) offs H_field.t;
+    effects     : 'eff H_fundec.t
+  }
+
+module type Info = sig
+  module R : Representant
+  module U : Unifiable with type repr = R.t
+  module M : Memories with type r = R.t and type u = U.t
+  module W : Writes with module Memories = M
+  module E : Effect with module W = W
+
+  type nonrec 'a offs = 'a offs
+  type nonrec t = E.some t
+
+  val create : unit -> t
+  val get : t -> Flag.t -> fundec -> E.some
+  val flag : Flag.t
+  val clear : t -> unit
+end
+
+module Make (R : Representant) (U : Unifiable with type repr = R.t) () :
+  Info with module R := R and module U := U = struct
+
   module M = Make_memories (R) (U) ()
   module W = Make_writes (M)
   module E = Make_effect (W)
 
   type nonrec 'a offs = 'a offs
 
-  type t =
-    {
-      goto_vars   : varinfo H_stmt.t;
-      stmt_vars   : varinfo H_stmt_conds.t;
-      offs_of_key : (fieldinfo * typ) offs H_field.t;
-      effects     : E.some H_fundec.t
-    }
+  type nonrec t = E.some t
 
   let create () =
     {
       goto_vars = H_stmt.create 128;
+      goto_next = H_stmt.create 128;
       stmt_vars = H_stmt_conds.create 32;
       offs_of_key = H_field.create 64;
       effects = H_fundec.create 1024
     }
+
   let get fi fl f =
     try
       H_fundec.find fi.effects f

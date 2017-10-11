@@ -186,3 +186,11 @@ module Builtin_expect_regexp =
       let arg_name = ""
       let default = ".*__builtin_expect"
     end)
+
+module Oslice =
+  Empty_string
+    (struct
+      let option_name = "-oslice"
+      let arg_name = "file"
+      let help = "Print line numbers of all sliced-out statements to file `file'"
+    end)

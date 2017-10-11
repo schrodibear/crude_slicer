@@ -995,7 +995,7 @@ end
 module type Analysis = sig
   module R : Representant_intf with type 'a region = 'a Representant.region
   module U : Unifiable with type repr = R.t
-  module I : module type of Info.Make (R) (U) ()
+  module I : Info.Info with module R := R and module U := U
 
   val match_container_of1 : exp_node -> (exp * (fieldinfo * typ) Info.offs) option
   val match_container_of2 : exp_node -> (exp * (fieldinfo * typ) Info.offs) option
