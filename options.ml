@@ -171,11 +171,10 @@ module Widening_threshold =
     end)
 
 module Summaries =
-  Bool
+  True
     (struct
       let option_name = "-summaries"
       let help = "Switch summaries generation"
-      let default = true
     end)
 
 module Builtin_expect_regexp =
@@ -193,4 +192,24 @@ module Oslice =
       let option_name = "-oslice"
       let arg_name = "file"
       let help = "Print line numbers of all sliced-out statements to file `file'"
+    end)
+
+module Assert_stratification =
+  True
+    (struct
+      let option_name = "-assert_stratification"
+      let help = "Perform stratification checks after region analysis"
+    end)
+
+let start_time = ref (Unix.gettimeofday ())
+
+exception Timeout
+
+module Timeout =
+  Int
+    (struct
+      let option_name = "-timeout"
+      let help = "Run with timeout specified in seconds"
+      let arg_name = ""
+      let default = 400
     end)

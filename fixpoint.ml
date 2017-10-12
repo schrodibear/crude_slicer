@@ -35,6 +35,10 @@ module Make (I : Info) = struct
 
   class type ['a] frama_c_collector = object inherit frama_c_inplace method start : unit method finish : 'a end
 
+  let timeout = float_of_int @@ Options.Timeout.get ()
+
+  let start_time = !Options.start_time
+
   let visit_until_convergence ~order (v : _ -> _ -> _ #frama_c_collector) fi sccs =
     let iter =
       match order with
@@ -48,6 +52,8 @@ module Make (I : Info) = struct
            (fun fi ->
               iter
                 (fun d ->
+                   if timeout > 0. && Unix.gettimeofday () -. start_time > timeout then
+                     raise Options.Timeout;
                    Console.debug "Analysing function %s..." d.svar.vname;
                    let v = v fi d in
                    v#start;

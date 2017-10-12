@@ -21,8 +21,12 @@ let run () =
   Cil_printer.state.Printer_api.line_directive_style <- Some Printer_api.Line_preprocessor_output;
   Console.debug ~level:2 "Crude slicer enabled!";
   Console.feedback "Running slicer";
-  Slice.slice ();
-  Console.feedback "Slicer finished"
+  try
+    Slice.slice ();
+    Console.feedback "Slicer finished"
+  with
+  | Options.Timeout ->
+    Console.feedback "Slicer timed out of %d seconds" (Options.Timeout.get ())
 
 let main () = if Options.Analysis.get () then run ()
 let () = Db.Main.extend main
