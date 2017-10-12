@@ -700,12 +700,78 @@ end = functor (O : Separation_options) () -> struct
       loop "self reference" u u;
       H'.clear visited
 
+  module Arc = struct
+    type t =
+      | Deref
+      | Dot_void
+      | Arrow     of fieldinfo
+      | Dot       of fieldinfo
+      | Container of fieldinfo
+      | Container_of_void of typ
+    let arrow     fi = Arrow fi
+    let dot       fi = Dot fi
+    let container fi = Container fi
+    let container_of_void typ = Container_of_void typ
+    let equal a1 a2 =
+      match a1, a2 with
+      | Deref,                  Deref
+      | Dot_void,               Dot_void               -> true
+      | Arrow fi1,              Arrow fi2
+      | Dot fi1,                Dot fi2
+      | Container fi1,          Container fi2          -> Fieldinfo.equal fi1 fi2
+      | Container_of_void ty1,  Container_of_void ty2  -> Typ.equal ty1 ty2
+      | (Deref
+        | Dot_void
+        | Dot _
+        | Arrow _
+        | Container _
+        | Container_of_void _), (Deref
+                                | Dot_void
+                                | Dot _
+                                | Arrow _
+                                | Container _
+                                | Container_of_void _) -> false
+    let hash =
+      function
+      | Deref                 -> 1
+      | Dot_void              -> 2
+      | Arrow     fi          -> 7 * Fieldinfo.hash fi + 3
+      | Dot       fi          -> 7 * Fieldinfo.hash fi + 4
+      | Container fi          -> 7 * Fieldinfo.hash fi + 5
+      | Container_of_void typ -> 7 * Typ.hash typ + 6
+  end
+
+  module Key = struct
+    type t = R.Kind.t * typ
+    let equal (k1, ty1) (k2, ty2) = R.Kind.equal k1 k2 && Typ.equal ty1 ty2
+    let hash (k, ty) = 104729 * R.Kind.hash k + Typ.hash ty
+    let of_unifiable u = let r = U.repr u in r.R.kind, Ty.normalize r.R.typ
+  end
+
+  module Origin = struct
+    type t =
+      | Root
+      | Child of Key.t * Arc.t
+
+    let equal o1 o2 =
+      match o1, o2 with
+      | Root,           Root           -> true
+      | Child (k1, a1), Child (k2, a2) -> Key.equal k1 k2 && Arc.equal a1 a2
+      | (Root
+        | Child _),     (Root
+                        | Child _)     -> false
+    let hash =
+      function
+      | Root         -> 0
+      | Child (k, a) -> 15487399 * Key.hash k + 3 * Arc.hash a
+  end
+
   module H_uu : sig
     type t
     val create : unit -> t
-    val add : U.t -> U.t -> t -> unit
+    val add : Origin.t -> U.t -> Origin.t -> U.t -> t -> unit
     val mem : U.t -> U.t -> t -> bool
-    val iter : (U.t -> U.t -> unit) -> t -> unit
+    val iter : (Origin.t -> U.t -> Origin.t -> U.t -> unit) -> t -> unit
     val clear : t -> unit
   end = struct
     module H = Hashtbl.Make
@@ -718,33 +784,42 @@ end = functor (O : Separation_options) () -> struct
             let r1, r2 = U.(repr u1, repr u2) in
             997 * R.hash r1 + R.hash r2
         end)
-    type t = unit H.t
+    type t = (Origin.t * Origin.t) H.t
     open! H
     let create () = create 16
-    let add u1 u2 h = replace h (u1, u2) ()
+    let add o1 u1 o2 u2 h = replace h (u1, u2) (o1, o2)
     let mem u1 u2 h = mem h (u1, u2)
-    let iter f h = iter (const' @@ uncurry f) h
+    let iter f h = iter (fun (u1, u2) (o1, o2) -> f o1 u1 o2 u2) h
     let clear = clear
   end
 
   type 'x reflector =
-    { reflect2 : 'k. 'h -> ('u -> 'k -> 'fl * 'u) -> 'u -> 'k -> 'u -> unit }
-    constraint 'x = < u : 'u; h : 'h; fl : 'fl; .. >
+    { reflect2 : 'k. 'h -> 'o -> 'o -> 'u -> ('u -> 'k -> 'fl * 'u) -> 'k -> 'u -> unit }
+    constraint 'x = < o : 'o; u : 'u; h : 'h; fl : 'fl; .. >
+
+  let const4 c _ _ _ _ = c
+  let ignore4 _ _ _ _  = ()
 
   let traverse
-      ~symm ?(guard=fun _ _ -> true) ~reflect2 ?(pre=const ignore) ?(update=const ignore) ?(post=const ignore) =
+      ~symm ?(guard=const4 true) ~reflect2 ?(pre=ignore4) ?(update=ignore4) ?(post=ignore4) =
     let reflect_all h =
-      let reflect1 f u2 = reflect2.reflect2 h (const' f) u2 () and reflect2 f = reflect2.reflect2 h f in
+      let key = Key.of_unifiable in
+      let open Origin in
+      let reflect u1 u2 a = reflect2.reflect2 h (Child (key u1, a)) (Child (key u2, a)) u2 in
+      let reflect1 u1 u2 a  f   = reflect u1 u2 a      (const' f) ()
+      and reflect2 u1 u2 mk f k = reflect u1 u2 (mk k) f          k  in
       fun u1 u2 ->
-        H_f.iter (reflect2 arrow u2)             u1 h_arrow;
-        H'.iter  (reflect1 deref u2)             u1 h_deref;
-        H_f.iter (reflect2 dot u2)               u1 h_dot;
-        H'.iter  (reflect1 dot_void u2)          u1 h_dot_void;
-        H_f.iter (reflect2 container u2)         u1 h_container;
-        H_t.iter (reflect2 container_of_void u2) u1 h_container_of_void
+        let reflect1 = reflect1 u1 u2 and reflect2 mk = reflect2 u1 u2 mk in
+        let module A = Arc in
+        H_f.iter (reflect2 A.arrow             arrow)             u1 h_arrow;
+        H'.iter  (reflect1 A.Deref             deref)             u1 h_deref;
+        H_f.iter (reflect2 A.dot               dot)               u1 h_dot;
+        H'.iter  (reflect1 A.Dot_void          dot_void)          u1 h_dot_void;
+        H_f.iter (reflect2 A.container         container)         u1 h_container;
+        H_t.iter (reflect2 A.container_of_void container_of_void) u1 h_container_of_void
     in
-    let rec loop u1 u2 =
-      if guard u1 u2 then
+    let rec loop o1 o2 u1 u2 =
+      if guard o1 u1 o2 u2 then
         let r1, r2 = U.(repr u1, repr u2) in
         let t1, t2 = map_pair (Ty.normalize % R.typ) (r1, r2) in
         if not (Ty.compatible t1 t2) then
@@ -754,11 +829,11 @@ end = functor (O : Separation_options) () -> struct
         let h = H_uu.create () in
         reflect_all h u1 u2;
         if symm then reflect_all h u2 u1;
-        pre u1 u2;
-        H_uu.iter (fun u1' u2' -> loop u1' u2'; update r1 r2) h;
-        post u1 u2
+        pre o1 u1 o2 u2;
+        H_uu.iter (fun o1' u1' o2' u2' -> loop o1' o2' u1' u2'; update o1 r1 o2 r2) h;
+        post o1 u1 o2 u2
     in
-    loop
+    loop Origin.Root Origin.Root
 
   module H_map : sig
     type t
@@ -792,15 +867,14 @@ end = functor (O : Separation_options) () -> struct
     let clear = clear
     let create () = create 512
   end
-
   module H_l : sig
     type t
     val create : unit -> t
-    val add : U.t -> t -> unit
-    val remove : U.t -> t -> unit
-    val replace : U.t -> t -> unit
-    val update : R.t -> t -> unit
-    val find : U.t -> t -> U.t * int
+    val add : Origin.t -> U.t -> t -> unit
+    val remove : Origin.t -> U.t -> t -> unit
+    val replace : Origin.t -> U.t -> t -> unit
+    val update : Origin.t -> R.t -> t -> unit
+    val find : Origin.t -> U.t -> t -> U.t * int
     val clear : t -> unit
     val maxl : int
     val maxd : int
@@ -808,16 +882,16 @@ end = functor (O : Separation_options) () -> struct
   end = struct
     module H = Hashtbl.Make
         (struct
-          type t = R.Kind.t * typ
-          let equal (k1, ty1) (k2, ty2) = R.Kind.equal k1 k2 && Typ.equal ty1 ty2
-          let hash (k, ty) = 104729 * R.Kind.hash k + Typ.hash ty
+          type t = Origin.t * Key.t
+          let equal (o1, k1) (o2, k2) = Origin.equal o1 o2 && Key.equal k1 k2
+          let hash (o, k) = 179425879 * Origin.hash o + Key.hash k
         end)
     type t = (U.t * int) H.t
     open! H
     let  maxl,          maxd,         maxc =
       O.(region_length, region_depth, region_count)
     let create () = create 128
-    let key u = let r = U.repr u in r.R.kind, Ty.normalize r.R.typ
+    let key o u = o, Key.of_unifiable u
     let derefable ty =
       match unrollType ty with
       | TPtr (TFun _, _)   -> false
@@ -831,32 +905,32 @@ end = functor (O : Separation_options) () -> struct
       | TFun _
       | TEnum _            -> false
       | TNamed _           -> assert false
-    let put add u h =
-      let _, ty as k = key u in
+    let put add o u h =
+      let _, (_, ty) as k = key o u in
       if derefable ty then
         match find h k with
         | _, d                -> add h k (u, d + 1)
         | exception Not_found -> add h k (u, 0)
-    let update r h =
+    let update o r h =
       let u = U.of_repr r in
-      let k = key u in
+      let k = key o u in
       match find h k with
       | _, d                -> replace h k (u, d)
       | exception Not_found -> ()
     let add = put add
     let replace = put replace
-    let remove u h = remove h (key u)
-    let find u h = find h (key u)
+    let remove o u h = remove h (key o u)
+    let find o u h = find h (key o u)
     let clear = clear
   end
 
   let instantiate =
     let loops = H_l.create () in
     fun ~map ->
-      let reflect2 h f u2 k u1' =
+      let reflect2 h o1' o2' u2 f k u1' =
         let add u1' u2' =
-          H_map.add u1' u2' map;
-          H_uu.add  u1' u2' h
+          H_map.add     u1'     u2' map;
+          H_uu.add  o1' u1' o2' u2' h
         in
         match f u2 k with
         | `Old, u2' when H_map.mem u1' u2' map   -> ()
@@ -866,7 +940,7 @@ end = functor (O : Separation_options) () -> struct
           | u2''                                 ->(R.demote (U.repr u2');
                                                     U.unify u2' u2'')
           | exception Not_found                  ->
-            match H_l.find u2' loops with
+            match H_l.find o2' u2' loops with
             | u2'', d when d >= H_l.maxl         ->(R.demote (U.repr u2');
                                                     U.unify u2' u2'';
                                                     add u1' u2'')
@@ -879,10 +953,10 @@ end = functor (O : Separation_options) () -> struct
         traverse
           ~symm:false
           ~reflect2
-          ~pre:(fun u1 u2 ->
-            H_l.add u2 loops;
+          ~pre:(fun _ u1 o2 u2 ->
+            H_l.add o2 u2 loops;
             if (U.repr u1).R.kind = `Global then H_map.add u1 u1 map)
-          ~post:(fun _ u2 -> H_l.remove u2 loops)
+          ~post:(fun _ _ o2 u2 -> H_l.remove o2 u2 loops)
           u1 u2;
         H_l.clear loops
 
@@ -890,11 +964,11 @@ end = functor (O : Separation_options) () -> struct
     let loops = H_l.create () in
     let queued = H_uu.create () in
     let depth = ref 0 in
-    let reflect2 h f u2 k u1' =
+    let reflect2 h o1' o2' u2 f k u1' =
       let add u1' u2' =
         if not H_uu.(mem u1' u2' queued || mem u2' u1' queued) then begin
-          H_uu.add u1' u2' h;
-          H_uu.add u1' u2' queued
+          H_uu.add o1' u1' o2' u2' h;
+          H_uu.add o1' u1' o2' u2' queued
         end
       in
       let add_new u1' u2' =
@@ -908,7 +982,7 @@ end = functor (O : Separation_options) () -> struct
       match f u2 k with
       | `Old, u2'                         -> add u1' u2'
       | `New, u2'                         ->
-        match H_l.find u2' loops with
+        match H_l.find o2' u2' loops with
         | u2'', c when c >= H_l.maxc
                     || !depth >= H_l.maxd ->(R.demote (U.repr u2');
                                              U.unify u2' u2'';
@@ -922,17 +996,17 @@ end = functor (O : Separation_options) () -> struct
       depth := 0;
       traverse
         ~symm:true
-        ~guard:(fun u1 u2 -> not U.(R.equal (repr u1) @@ repr u2))
+        ~guard:(fun _ u1 _ u2 -> not U.(R.equal (repr u1) @@ repr u2))
         ~reflect2
-        ~pre:(fun u1 u2 ->
-          H_l.replace u1 loops;
-          if U.(diff_kind (repr u1) @@ repr u2) then H_l.replace u2 loops;
+        ~pre:(fun o1 u1 o2 u2 ->
+          H_l.replace o1 u1 loops;
+          if U.(diff_kind (repr u1) @@ repr u2) then H_l.replace o2 u2 loops;
           incr depth;
           U.unify u1 u2)
-        ~update:(fun r1 r2 ->
-          H_l.update r1 loops;
-          if diff_kind r1 r2 then H_l.update r2 loops)
-        ~post:(fun _ _ -> decr depth)
+        ~update:(fun o1 r1 o2 r2 ->
+          H_l.update o1 r1 loops;
+          if diff_kind r1 r2 then H_l.update o2 r2 loops)
+        ~post:(fun _ _ _ _ -> decr depth)
         u1 u2;
       H_l.clear loops;
       H_uu.clear queued
@@ -951,27 +1025,32 @@ end = functor (O : Separation_options) () -> struct
     let q = Queue.create () in
     let uu = H_l.create () in
     let queued = H'.create () in
-    let push u =
+    let push o u =
       if not (H'.mem u queued) then begin
-        Queue.push u q;
+        Queue.push (o, u) q;
         H'.add u u queued;
-        H_l.add u uu
+        H_l.add o u uu
       end
     in
-    List.iter push us;
-    let push' _ = push in
+    let open Origin in
+    List.iter (push Root) us;
+    let key = Key.of_unifiable in
+    let push1 u a    = push (Child (key u, a)) in
+    let push2 u mk k = push1 u (mk k) in
     while not (Queue.is_empty q) do
-      let u = Queue.pop q in
-      begin match H_l.find u uu with
+      let o, u = Queue.pop q in
+      begin match H_l.find o u uu with
       | u', _               -> unify u u'
       | exception Not_found -> ()
       end;
-      H_f.iter push' u h_arrow;
-      H'.iter  push  u h_deref;
-      H_f.iter push' u h_dot;
-      H'.iter  push  u h_dot_void;
-      H_f.iter push' u h_container;
-      H_t.iter push' u h_container_of_void
+      let open! Arc in
+      let push1 = push1 u and push2 x = push2 u x in
+      H_f.iter (push2 arrow)             u h_arrow;
+      H'.iter  (push1 Deref)             u h_deref;
+      H_f.iter (push2 dot)               u h_dot;
+      H'.iter  (push1 Dot_void)          u h_dot_void;
+      H_f.iter (push2 container)         u h_container;
+      H_t.iter (push2 container_of_void) u h_container_of_void
     done
 
   let arrow = snd %% arrow
