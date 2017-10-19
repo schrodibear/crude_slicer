@@ -10,6 +10,7 @@
 *.annot
 *.byte
 *.native
+*.opt
 Crude_slicer_DEP
 frama-c
 *.plugin.generated
