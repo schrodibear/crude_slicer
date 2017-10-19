@@ -559,7 +559,7 @@ module Reads
   let add_some (e : some) r = let Some (k, x) = e in add k x r
 
   let sub r ~from =
-    G.Var.H.sub       r.global_var  ~from:from.global_vars;
+    G.Var.H.sub       r.global_vars ~from:from.global_vars;
     F.Poly.Var.H.sub  r.poly_vars   ~from:from.poly_vars;
     F.Local.Var.H.sub r.local_vars  ~from:from.local_vars;
     G.Mem.H.sub       r.global_mems ~from:from.global_mems;

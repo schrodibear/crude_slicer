@@ -26,6 +26,6 @@ cpa.sh -heap 8000m \
        -setprop 'counterexample.export.exportWitness=TRUE' \
        -setprop "counterexample.export.graphml=$FILE.violation-witness.graphml" \
        -setprop 'log.consoleLevel=INFO' \
-       -setprop "cfa.slice=$FILE.slice" \
+       -setprop "cfa.slicePostfix=.slice" \
        -spec "$CPADIR/config/specification/sv-comp-reachability.spc" \
        $FILE
