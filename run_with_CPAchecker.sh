@@ -2,7 +2,8 @@
 
 FILE=$1
 
-frama-c -crude_slicer \
+frama-c -machdep gcc_x86_64
+        -crude_slicer \
         -timeout 400 \
         -no-recognize_wrecked_container_of \
         -widening_threshold 2000 \

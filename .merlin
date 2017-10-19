@@ -45,5 +45,5 @@ S frama-c/src/libraries/stdlib
 B frama-c/src/libraries/stdlib
 S frama-c/src/plugins/callgraph
 B frama-c/src/plugins/callgraph
-PKG ocamlgraph
+PKG ocamlgraph xmlm sha
 REC

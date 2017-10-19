@@ -325,8 +325,8 @@ module Make (Analysis : Region.Analysis) = struct
         in
         let ci =
           match Ty.unbracket @@ unrollType @@ typeOf e with
-          | TComp (ci, _, _)  -> ci
-          | ty                -> Console.fatal "Slicing.comp_assign: RHS is not a composite: %a %a" pp_exp e pp_typ ty
+          | TComp (ci, _, _) -> ci
+          | ty               -> Console.fatal "Slicing.comp_assign: RHS is not a composite: %a %a" pp_exp e pp_typ ty
         in
         List.iter
           (fun (path, fi) ->
@@ -558,13 +558,13 @@ module Make (Analysis : Region.Analysis) = struct
           L'.A.fold
             (fun w' _ ->
                match w', lv with
-               | `Result,              Some lv -> may_push_and_cons
-                                                    (fun () -> I.E.add_result_dep eff')
-                                                    (w_lval lv)
-               | `Result,              None    -> id
-               | (#L'.W.readable as w'), _     -> may_push_and_cons
-                                                    L'.R.(fun () -> add_some (of_write w') deps')
-                                                    (prj_write ~prj:L'.F.Poly.Mem.prj w'))
+               | `Result,                Some lv -> may_push_and_cons
+                                                      (fun () -> I.E.add_result_dep eff')
+                                                      (w_lval lv)
+               | `Result,                None    -> id
+               | (#L'.W.readable as w'), _       -> may_push_and_cons
+                                                      L'.R.(fun () -> add_some (of_write w') deps')
+                                                      (prj_write ~prj:L'.F.Poly.Mem.prj w'))
             (I.E.assigns eff')
             []
         in
