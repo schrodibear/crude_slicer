@@ -1,4 +1,6 @@
 # Don't indent twice
 max_indent = 2
 # Don't indent begin match
-strict_with = auto
+strict_with = always
+# Aligh functin parameters
+align_params = always

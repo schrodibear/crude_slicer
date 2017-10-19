@@ -23,18 +23,6 @@ module Make (Analysis : Region.Analysis) = struct
 
   module I = Analysis.I
 
-  let w_var vi =
-    match isArithmeticOrPointerType vi.vtype, vi.vglob, vi.vformal with
-    | true, true,  false -> `Global_var (Global_var.of_varinfo vi)
-    | true, false, true  -> `Poly_var   (Formal_var.of_varinfo vi)
-    | true, false, false -> `Local_var  (Local_var.of_varinfo vi)
-    | false, _,    _     -> Console.fatal
-                              "Slice.w_var: broken invariant: trying to write to composite variable without region: %a"
-                              pp_varinfo vi
-    | true, glob,  frml  -> Console.fatal
-                              "Slice.w_var: broken invariant: inconsistent varinfo: %a: .vglob=%B, .vformal=%B"
-                              pp_varinfo vi  glob frml
-
   let unless_comp ty f =
     let ty = Ty.normalize ty in
     if not (isStructOrUnionType ty || isVoidType ty) then Some (f ()) else None
@@ -55,8 +43,7 @@ module Make (Analysis : Region.Analysis) = struct
 
   module Make_local
       (C : sig val f : kernel_function end)
-      (F : I.E.Reads)
-      (A : I.E.Assigns with type S.t = F.t and type S.some = F.some) = struct
+      (L : I.E.Local) = struct
 
     let f = Kernel_function.get_name C.f
 
@@ -68,11 +55,30 @@ module Make (Analysis : Region.Analysis) = struct
     end
     module U = Analysis.U
 
+    module F = L.R
+    module A = L.A
+    module G = I.G
+    module W = L.W
+    open L.F
+
+    let w_var vi =
+      match isArithmeticOrPointerType vi.vtype, vi.vglob, vi.vformal with
+      | true, true,  false -> `Global_var (G.Var.of_varinfo vi)
+      | true, false, true  -> `Poly_var   (Poly.Var.of_varinfo vi)
+      | true, false, false -> `Local_var  (Local.Var.of_varinfo vi)
+      | false, _,    _     -> Console.fatal
+                                "Slice.w_var: broken invariant: \
+                                 trying to write to composite variable without region: %a"
+                                pp_varinfo vi
+      | true, glob,  frml  -> Console.fatal
+                                "Slice.w_var: broken invariant: inconsistent varinfo: %a: .vglob=%B, .vformal=%B"
+                                pp_varinfo vi  glob frml
+
     let w_mem ?fi u =
       match (U.repr u).R.kind with
-      | `Global                          -> `Global_mem (I.M.Global_mem.mk ?fi u)
-      | `Local f' when String.equal f f' -> `Local_mem  (I.M.Local_mem.mk ?fi u)
-      | `Poly f'  when String.equal f f' -> `Poly_mem   (I.M.Poly_mem.mk ?fi u)
+      | `Global                          -> `Global_mem (G.Mem.mk ?fi u)
+      | `Local f' when String.equal f f' -> `Local_mem  (Local.Mem.mk ?fi u)
+      | `Poly f'  when String.equal f f' -> `Poly_mem   (Poly.Mem.mk ?fi u)
       | `Local f'
       | `Poly f'                         -> Console.fatal "Slice.w_mem: broken invariant: writing to local \
                                                            region %a of function %s from function %s"
@@ -102,8 +108,8 @@ module Make (Analysis : Region.Analysis) = struct
         | Index _                    -> assert false
         | NoOffset                   -> no_offset ()
 
-    let unwrap (I.E.Some { reads = (module F'); assigns = (module A'); eff }) : (A.t, F.t) I.E.t =
-      match F'.W, A'.W with
+    let unwrap (I.E.Some { local = (module L'); eff }) : (A.t, F.t) I.E.t =
+      match L'.R.W, L'.A.W with
       | F.W, A.W -> eff
       | _        -> Console.fatal "Slice.unpack: broken invariant: got effect of a different function"
 
@@ -122,7 +128,7 @@ module Make (Analysis : Region.Analysis) = struct
            | `Location (u, _)
              when not (isStructOrUnionType vi.vtype)
                && vi.vaddrof                         -> A.add
-                                                          (w_mem u) F.K.Poly_var (Formal_var.of_varinfo vi)
+                                                          (w_mem u) F.Poly_var (Poly.Var.of_varinfo vi)
                                                           assigns
            | `Location _ | `Value _ | `None          -> ())
         (Kernel_function.get_formals C.f);
@@ -223,29 +229,26 @@ module Make (Analysis : Region.Analysis) = struct
       let open List in
       let args = take (length params) args in
       let add_from_arg = combine params @@ map add_from_rval args in
-      fun acc fv -> assoc (fv : Formal_var.t :> varinfo) add_from_arg acc
+      fun acc fv -> assoc fv add_from_arg acc
 
-    let prj_poly_mem s kf =
+    let prj_poly_mem ~prj s kf =
       let map = R.map s kf in
-      fun acc m -> F.add_some (I.M.Poly_mem.prj ~find:(fun u -> R.H_map.find u map) ~mk:r_mem m) acc
+      fun acc m -> F.add_some (prj ~find:(fun u -> R.H_map.find u map) ~mk:r_mem m) acc
 
-    let prj_reads (type t) (module F' : I.E.Reads with type t = t) s kf =
+    let prj_reads (type a r) (module L' : I.E.Local with type A.t = a and type R.t = r) s kf =
       let prj_poly_var = prj_poly_var s (Kernel_function.get_formals kf) in
       let prj_poly_mem = prj_poly_mem s kf in
       fun ~from acc ->
-        F'.iter_global_vars (fun v -> F.add_global_var v acc) from;
-        F'.iter_poly_vars   (prj_poly_var acc) from;
-        F'.iter_global_mems (fun mem -> F.add_global_mem mem acc) from;
-        F'.iter_poly_mems   (prj_poly_mem acc) from
+        L'.R.iter_global_vars (fun v -> F.add_global_var v acc) from;
+        L'.R.iter_poly_vars   ((prj_poly_var :> F.t -> L'.F.Poly.Var.t -> unit) acc) from;
+        L'.R.iter_global_mems (fun mem -> F.add_global_mem mem acc) from;
+        L'.R.iter_poly_mems   (prj_poly_mem ~prj:L'.F.Poly.Mem.prj acc) from
 
-    let prj_write ?lv s kf =
+    let prj_write ~prj ?lv s kf =
       function
       | `Global_var _
       | `Global_mem _ as w -> Some w
-      | `Poly_mem m        -> I.M.Poly_mem.prj
-                                ~find:(fun u -> R.H_map.find u @@ R.map s kf)
-                                ~mk:(fun ?fi u -> Some (w_mem ?fi u))
-                                m
+      | `Poly_mem m        -> prj ~find:(fun u -> R.H_map.find u @@ R.map s kf) ~mk:(fun ?fi u -> Some (w_mem ?fi u)) m
       | `Result            -> opt_bind w_lval lv
       | `Poly_var _
       | `Local_var _
@@ -254,10 +257,10 @@ module Make (Analysis : Region.Analysis) = struct
     (* Incomplete, but suitable for fix-point iteration approach *)
     let add_transitive_closure =
       let module Vertex = struct
-        type t = I.W.t * F.t
-        let compare (a, _) (b, _) = I.W.compare a b
-        let equal (a, _) (b, _) = I.W.equal a b
-        let hash (x, _) = I.W.hash x
+        type t = W.t * F.t
+        let compare (a, _) (b, _) = W.compare a b
+        let equal (a, _) (b, _) = W.equal a b
+        let hash (x, _) = W.hash x
       end in
       let module Deps = Graph.Imperative.Digraph.Concrete (Vertex) in
       let module Sccs = Graph.Components.Make (Deps) in
@@ -268,8 +271,8 @@ module Make (Analysis : Region.Analysis) = struct
         iter_vertex
           (fun (w_from, _ as v_from) ->
              match w_from with
-             | `Result                 -> ()
-             | #I.W.readable as w_from ->
+             | `Result               -> ()
+             | #W.readable as w_from ->
                iter_vertex
                  (fun (_, r_to as v_to) ->
                     if not (Vertex.equal v_from v_to) &&
@@ -357,24 +360,24 @@ module Make (Analysis : Region.Analysis) = struct
       let call s ?lv ?e kf =
         let from = from s in
         may (fun e -> add_from_rval e from) e;
-        let I.E.Some { reads; assigns = (module A'); eff = eff' } =
+        let I.E.Some { local = (module L') as local; eff = eff' } =
           I.get info R.flag @@ Kernel_function.get_definition kf
         in
-        let prj_reads = prj_reads reads s kf in
+        let prj_reads = prj_reads local s kf in
         let prj_write = prj_write ?lv s kf in
         if I.E.is_target eff' then begin
           F.import ~from depends;
           prj_reads ~from:(I.E.depends eff') depends;
           set_is_target ()
         end;
-        A'.iter
+        L'.A.iter
           (fun w' from' ->
              may
                (fun w ->
                   let reads = A.find w assigns in
                   F.import ~from reads;
                   prj_reads ~from:from' reads)
-               (prj_write w'))
+               (prj_write ~prj:L'.F.Poly.Mem.prj w'))
           (I.E.assigns eff');
         may
           (fun lv ->
@@ -418,7 +421,7 @@ module Make (Analysis : Region.Analysis) = struct
         fun s ->
           F.clear from;
           List.iter
-            (fun vi -> F.add_local_var (Local_var.of_varinfo vi) from)
+            (fun vi -> F.add_local_var (Local.Var.of_varinfo vi) from)
             (H_stmt_conds.find_all info.stmt_vars s);
           Stack.iter (fun from' -> F.import ~from:from' from) under;
           from
@@ -507,7 +510,7 @@ module Make (Analysis : Region.Analysis) = struct
       end
 
     module Mark
-        (M : sig val decide : [< I.W.t] list -> [ `Needed | `Not_yet ] val info : I.t val eff : (A.t, F.t) I.E.t end) =
+        (M : sig val decide : [< W.t] list -> [ `Needed | `Not_yet ] val info : I.t val eff : (A.t, F.t) I.E.t end) =
     struct
       open M
       let assigns = I.E.assigns eff
@@ -542,8 +545,7 @@ module Make (Analysis : Region.Analysis) = struct
           ~dft:[]
           eo
       let call s ?lv kf =
-        let I.E.Some { reads = (module F');
-                       assigns = (module A');
+        let I.E.Some { local = (module L');
                        eff = eff' } =
           I.get info R.flag @@ Kernel_function.get_definition kf
         in
@@ -553,16 +555,16 @@ module Make (Analysis : Region.Analysis) = struct
           opt_fold @@ List.cons % tap (fun w -> if F.(mem_some (of_write w) depends) then f ())
         in
         let writes =
-          A'.fold
+          L'.A.fold
             (fun w' _ ->
                match w', lv with
                | `Result,              Some lv -> may_push_and_cons
                                                     (fun () -> I.E.add_result_dep eff')
                                                     (w_lval lv)
                | `Result,              None    -> id
-               | (#I.W.readable as w'), _      -> may_push_and_cons
-                                                    F'.(fun () -> add_some (of_write w') deps')
-                                                    (prj_write w'))
+               | (#L'.W.readable as w'), _     -> may_push_and_cons
+                                                    L'.R.(fun () -> add_some (of_write w') deps')
+                                                    (prj_write ~prj:L'.F.Poly.Mem.prj w'))
             (I.E.assigns eff')
             []
         in
@@ -570,7 +572,7 @@ module Make (Analysis : Region.Analysis) = struct
 
       let alloc ~loc lv = decide @@ gassign lv @ gassign (deref ~loc lv)
       let stub = may_map (decide % gassign) ~dft:`Not_yet
-      let goto s = decide @@ [`Local_var (Local_var.of_varinfo @@ H_stmt.find info.goto_vars s)]
+      let goto s = decide @@ [`Local_var (Local.Var.of_varinfo @@ H_stmt.find info.goto_vars s)]
       let assume e =
         let r = ref [] in
         visit_rval (fun lv -> may (fun w -> r := w :: !r) @@ w_lval lv) e;
@@ -590,23 +592,23 @@ module Make (Analysis : Region.Analysis) = struct
           F.clear reads;
           List.iter
             (function
-              | `Result            -> ()
-              | #I.W.readable as w -> F.(add_some (of_write w) reads))
+              | `Result          -> ()
+              | #W.readable as w -> F.(add_some (of_write w) reads))
             l;
           F.intersects reads depends
         in
         let rec mem_result =
           function
-          | []            -> false
-          | `Result :: _  -> true
-          | #I.W.t  :: xs -> mem_result xs
+          | []           -> false
+          | `Result :: _ -> true
+          | #W.t  :: xs  -> mem_result xs
         in
         function
         | []                               -> `Not_yet
         | [`Result] when has_result_dep () -> `Needed
         | [`Result]                        -> `Not_yet
-        | [#I.W.readable as w]             -> single w
-        | (l : [< I.W.t] list)             -> decide (has_result_dep () && mem_result l || intersects l)
+        | [#W.readable as w]               -> single w
+        | (l : [< W.t] list)               -> decide (has_result_dep () && mem_result l || intersects l)
       in
       let module Mark = Mark (struct let decide, info, eff = decide, info, eff end) in
       let open Mark in
@@ -731,8 +733,8 @@ module Make (Analysis : Region.Analysis) = struct
     let () =
       Globals.Functions.iter_on_fundecs
         (fun d ->
-           let I.E.Some { reads = (module F); assigns = (module A); _ } = I.get info Analysis.R.flag d in
-           let module L = Make_local (struct let f = Globals.Functions.get d.svar end) (F) (A) in
+           let I.E.Some { local = (module L); _ } = I.get info Analysis.R.flag d in
+           let module L = Make_local (struct let f = Globals.Functions.get d.svar end) (L) in
            H.replace collectors d @@ L.collector info;
            H.replace markers d @@ L.marker info;
            H.replace initializers d @@ L.init_deps info;
@@ -821,7 +823,7 @@ module Make (Analysis : Region.Analysis) = struct
         del_loc ?no:None
       in
       object
-        val mutable eff = I.E.create dummy_flag
+        val mutable eff = I.E.create dummy_flag (emptyFunction "")
 
         method iter_irrelevant_lines f = H_int.iter f irrelevant_lines
 

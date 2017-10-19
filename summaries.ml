@@ -29,8 +29,6 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
   module U = R.U
   open M
 
-  type mem = R.t * fieldinfo option
-
   let generate =
     let open List in
     let module H_d = Fundec.Hashtbl in
@@ -63,7 +61,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       in
       let retexp = if isStructOrUnionType retvar.vtype then mkAddrOf ~loc (var retvar) else evar retvar in
       let params = fold_right2 M_v.add d.sformals d'.sformals M_v.empty in
-      let mk_w : I.W.t -> _ =
+      let mk_w : I.writable -> _ =
         let mk_mem (r, fo) =
           let eo =
             opt_map
@@ -85,12 +83,12 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         in
         let mk_var vi = `Var (var @@ try M_v.find vi params with Not_found -> vi) in
         function
-        | `Global_mem m -> mk_mem (m :> mem)
-        | `Global_var v -> mk_var (v :> varinfo)
+        | `Global_mem m -> mk_mem m
+        | `Global_var v -> mk_var v
         | `Local_mem  _ -> `Skip
         | `Local_var  _ -> `Skip
-        | `Poly_mem   m -> mk_mem (m :> mem)
-        | `Poly_var   v -> mk_var (v :> varinfo)
+        | `Poly_mem   m -> mk_mem m
+        | `Poly_var   v -> mk_var v
         | `Result       -> `Var (var retvar)
       in
       let limit =
@@ -109,17 +107,17 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         let havoc = Kernel_function.get_vi @@ Globals.Functions.find_by_name @@ Options.Havoc_function.get () in
         fun e es -> [mkStmt @@ Instr (Call (None, evar havoc, e :: limit es, loc))]
       in
-      let I.E.Some { reads = (module F); assigns = (module A); eff } = I.get info R.flag d in
+      let I.E.Some { local = (module L); eff } = I.get info R.flag d in
       flatten @@
       rev @@
       (if not (isVoidType retvar.vtype) then [[mkStmt @@ Return (Some (evar retvar), loc)]] else []) @
-      A.fold
+      L.A.fold
         (fun w froms ->
            let froms () =
              rev @@
-             F.fold
+             L.R.fold
                (fun r ->
-                  match mk_w r with
+                  match mk_w (r : L.W.readable :> I.writable) with
                   | `Var lv -> cons @@ new_exp ~loc (Lval lv)
                   | `Exp e  -> cons e
                   | `Skip   -> id)
@@ -129,9 +127,9 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
            if
              match w with
              | `Result            -> I.E.has_result_dep eff
-             | #I.W.readable as w -> F.(mem_some (of_write w) @@ I.E.depends eff)
+             | #L.W.readable as w -> L.R.(mem_some (of_write w) @@ I.E.depends eff)
            then
-             match mk_w w with
+             match mk_w (w :> I.writable) with
              | `Var lv -> cons @@ havoc_lval   lv (froms ())
              | `Exp e  -> cons @@ havoc_region e  (froms ())
              | `Skip   -> id

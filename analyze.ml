@@ -324,7 +324,7 @@ module Goto_handling = struct
               pp_stmt s (Stmt.lnum s) pp_stmt sep (Stmt.lnum sep);
             let vi =
               makeTempVar
-                ~insert:false
+                ~insert:true
                 ~name:("goto_at_L" ^ string_of_int @@ Stmt.lnum s)
                 (Kernel_function.get_definition kf)
                 (TInt (IInt, []))

@@ -33,7 +33,7 @@ module type Reporting_bithashset = sig
   val pp : Format.formatter -> t -> unit
 end
 
-module Make_reporting_bithashset (M : Hashed_printable) () : Reporting_bithashset with type elt = M.t =
+module Reporting_bithashset (M : Hashed_printable) () : Reporting_bithashset with type elt = M.t =
 struct
   type elt = M.t
   module H = Hashtbl.Make (M)
@@ -135,7 +135,7 @@ module type Reporting_hashmap = sig
   val pp : Format.formatter -> t -> unit
 end
 
-module Make_reporting_hashmap (K : Hashed_printable) (S : Set) :
+module Reporting_hashmap (K : Hashed_printable) (S : Set) :
   Reporting_hashmap with type key = K.t and module S = S = struct
   type key = K.t
   module S = S

@@ -21,35 +21,14 @@ module type Criterion = sig
   val is_ok : t -> bool
 end
 
-module Make_var (C : Criterion with type t := varinfo) : sig
+module type Variable = sig
   type t = private varinfo
 
   include Criterion with type t := t
   val of_varinfo : varinfo -> t
   include Hashed_ordered_printable with type t := t
-end = struct
-  type t = varinfo
-
-  include C
-
-  let of_varinfo vi =
-    if C.is_ok vi then vi
-    else               invalid_arg "Formal_var.of_varinfo"
-
-  include (Varinfo : Hashed_ordered with type t := t)
-  let pp = pp_varinfo
+  module H : Reporting_bithashset with type elt := t
 end
-
-module Global_var = Make_var (struct let is_ok vi = isArithmeticOrPointerType vi.vtype && vi.vglob end)
-
-module Formal_var = Make_var (struct let is_ok vi = isArithmeticOrPointerType vi.vtype && vi.vformal end)
-
-module Local_var =
-  Make_var (struct let is_ok vi = isArithmeticOrPointerType vi.vtype && not vi.vglob && not vi.vformal end)
-
-module H_global_var = Make_reporting_bithashset (Global_var) ()
-module H_formal_var = Make_reporting_bithashset (Formal_var)
-module H_local_var = Make_reporting_bithashset (Local_var)
 
 module Memory_field : sig
   type t = private fieldinfo
@@ -90,31 +69,242 @@ module type Representant = sig
 end
 
 module type Unifiable = sig
+  module R : Representant
   type t
-  type repr
-  val repr : t -> repr
-  val of_repr : repr -> t
+  val repr : t -> R.t
+  val of_repr : R.t -> t
 end
 
 module type Memory = sig
-  type u
-  type r
-  type t = private r * Memory_field.t option
-  val mk : ?fi: fieldinfo -> u -> t
+  module R : Representant
+  module U : Unifiable with module R := R
+  type t = private R.t * Memory_field.t option
+  val mk : ?fi: fieldinfo -> U.t -> t
   include Hashed_ordered_printable with type t := t
+  module H : Reporting_bithashset with type elt := t
 end
 
 module type Poly_memory = sig
   include Memory
-  val prj : find:(u -> u) -> mk:(?fi: fieldinfo -> u -> 'a) -> t -> 'a
+  val prj : find:(U.t -> U.t) -> mk:(?fi: fieldinfo -> U.t -> 'a) -> t -> 'a
 end
 
 module type Generic_memory = Poly_memory
 
-module Make_memory (R : Representant) (U : Unifiable with type repr = R.t) (C : Criterion with type t := R.t)
-  : Generic_memory with type u = U.t and type r = R.t = struct
-  type u = U.t
-  type r = R.t
+module type Global = sig
+  module R : Representant
+  module U : Unifiable with module R := R
+  module Var : Variable
+  module Mem : Memory with module R := R and module U := U
+end
+
+module type Function = sig
+  module R : Representant
+  module U : Unifiable with module R := R
+  module Poly : sig
+    module Var : Variable
+    module Mem : Poly_memory with module R := R and module U := U
+  end
+  module Local : sig
+    module Var : Variable
+    module Mem : Memory with module R := R and module U := U
+  end
+end
+
+module type Writes = sig
+  module R : Representant
+  module U : Unifiable with module R := R
+  module G : Global    with module R := R and module U := U
+  module F : Function  with module R := R and module U := U
+  type readable =
+    [ `Global_var of G.Var.t
+    | `Poly_var   of F.Poly.Var.t
+    | `Local_var  of F.Local.Var.t
+    | `Global_mem of G.Mem.t
+    | `Poly_mem   of F.Poly.Mem.t
+    | `Local_mem  of F.Local.Mem.t ]
+
+  type t = [ readable  | `Result ]
+
+  include Hashed_ordered_printable with type t := t
+end
+
+type ('w, _) reads = ..
+
+module type Reads = sig
+  module R : Representant
+  module U : Unifiable with module R := R
+  module G : Global    with module R := R and module U := U
+  module F : Function  with module R := R and module U := U
+  module W : Writes    with module R := R and module U := U and module G := G and module F := F
+
+  type _ kind =
+    | Global_var : G.Var.t       kind
+    | Poly_var   : F.Poly.Var.t  kind
+    | Local_var  : F.Local.Var.t kind
+    | Global_mem : G.Mem.t       kind
+    | Poly_mem   : F.Poly.Mem.t  kind
+    | Local_mem  : F.Local.Mem.t kind
+
+  type some = Some : 'a kind * 'a -> some
+
+  type t
+
+  type ('w, _) reads += W : (W.t, t) reads
+
+  val of_write : [< W.readable ] -> some
+
+  val create : Flag.t -> t
+  val clear : t -> unit
+  val import : from:t -> t -> unit
+  val add_global_var : G.Var.t       -> t -> unit
+  val add_poly_var   : F.Poly.Var.t  -> t -> unit
+  val add_local_var  : F.Local.Var.t -> t -> unit
+  val add_global_mem : G.Mem.t       -> t -> unit
+  val add_poly_mem   : F.Poly.Mem.t  -> t -> unit
+  val add_local_mem  : F.Local.Mem.t -> t -> unit
+  val add : 'a kind -> 'a -> t -> unit
+  val add_some : some -> t -> unit
+  val sub : t -> from:t -> unit
+  val mem : 'a kind -> 'a -> t -> bool
+  val mem_some : some -> t -> bool
+  val intersects : t -> t -> bool
+  val flag : t -> Flag.t
+  val copy : Flag.t -> t -> t
+
+  val iter_global_vars : (G.Var.t       -> unit) -> t -> unit
+  val iter_poly_vars   : (F.Poly.Var.t  -> unit) -> t -> unit
+  val iter_local_vars  : (F.Local.Var.t -> unit) -> t -> unit
+  val iter_global_mems : (G.Mem.t       -> unit) -> t -> unit
+  val iter_poly_mems   : (F.Poly.Mem.t  -> unit) -> t -> unit
+  val iter_local_mems  : (F.Local.Mem.t -> unit) -> t -> unit
+
+  val fold_global_vars : (G.Var.t       -> 'a -> 'a) -> t -> 'a -> 'a
+  val fold_poly_vars   : (F.Poly.Var.t  -> 'a -> 'a) -> t -> 'a -> 'a
+  val fold_local_vars  : (F.Local.Var.t -> 'a -> 'a) -> t -> 'a -> 'a
+  val fold_global_mems : (G.Mem.t       -> 'a -> 'a) -> t -> 'a -> 'a
+  val fold_poly_mems   : (F.Poly.Mem.t  -> 'a -> 'a) -> t -> 'a -> 'a
+  val fold_local_mems  : (F.Local.Mem.t -> 'a -> 'a) -> t -> 'a -> 'a
+
+  val iter : ([> W.readable] -> unit) -> t -> unit
+  val fold : ([> W.readable] -> 'a -> 'a) -> t -> 'a -> 'a
+
+  val is_empty : t -> bool
+  val is_singleton : t -> bool
+  val length : t -> int
+
+  val pp : formatter -> t -> unit
+end
+
+module type Local = sig
+  module Repr : Representant
+  module U    : Unifiable with module R := Repr
+  module G    : Global    with module R := Repr and module U := U
+  module F    : Function  with module R := Repr and module U := U
+  module W    : Writes    with module R := Repr and module U := U and module G := G and module F := F
+  module R    : Reads     with module R := Repr and module U := U and module G := G and module F := F and module W := W
+  module A    : Reporting_hashmap with module S := R and type key := W.t
+end
+
+module type Requires = sig
+  type t
+
+  val create : Flag.t -> t
+  val import : from:t -> t -> unit
+  val add_body : fundec -> t -> unit
+  val add_stmt : stmt -> t -> unit
+  val copy : Flag.t -> t -> t
+
+  val iter_bodies : (fundec -> unit) -> t -> unit
+  val iter_stmts : (stmt -> unit) -> t -> unit
+  val has_body : fundec -> t -> bool
+  val has_stmt : stmt -> t -> bool
+end
+
+module Fundec = struct include Fundec let pp = pretty end
+module Stmt = struct include Stmt let pp = pretty end
+
+module Requires : Requires = struct
+  module H_fundec = Reporting_bithashset (Fundec) ()
+  module H_stmt = Reporting_bithashset (Stmt) ()
+
+  type t =
+    {
+      bodies : H_fundec.t;
+      stmts  : H_stmt.t
+    }
+
+  let create f = { bodies = H_fundec.create f; stmts = H_stmt.create f }
+  let import ~from r =
+    H_fundec.import ~from:from.bodies r.bodies;
+    H_stmt.import ~from:from.stmts r.stmts
+  let add_body f r = H_fundec.add f r.bodies
+  let add_stmt s r = H_stmt.add s r.stmts
+  let copy f r = { bodies = H_fundec.copy f r.bodies; stmts = H_stmt.copy f r.stmts }
+
+  let iter_bodies f r = H_fundec.iter f r.bodies
+  let iter_stmts f r = H_stmt.iter f r.stmts
+  let has_body f r = H_fundec.mem f r.bodies
+  let has_stmt s r = H_stmt.mem s r.stmts
+end
+
+module Variable (C : Criterion with type t := varinfo) () : Variable = struct
+  type t = varinfo
+
+  include C
+
+  let of_varinfo vi =
+    if C.is_ok vi then vi
+    else               invalid_arg "Variable.of_varinfo"
+
+  include (Varinfo : Hashed_ordered with type t := t)
+  let pp = pp_varinfo
+
+  module H = Reporting_bithashset (struct type nonrec t = t let equal = equal let hash = hash let pp = pp end) ()
+end
+
+module Void_ptr_var = Variable (struct let is_ok vi = isVoidPtrType vi.vtype end) ()
+
+module type Effect = sig
+  module R : Representant
+  module U : Unifiable with module R := R
+  module G : Global    with module R := R and module U := U
+
+  module type Local = Local with module Repr := R and module U := U and module G := G
+
+  type ('a, 'r) t
+
+  type some =
+    | Some :
+        { local : (module Local with type A.t = 'a and type R.t = 'r);
+          eff : ('a, 'r) t } -> some
+  val create : Flag.t -> fundec -> some
+  val assigns : ('a, 'r) t -> 'a
+  val depends : ('a, 'r) t -> 'r
+  val add_result_dep : (_, _) t -> unit
+  val add_requires : Requires.t -> (_, _) t -> unit
+  val add_body_req : fundec -> (_, _) t -> unit
+  val add_stmt_req : stmt -> (_, _) t -> unit
+  val set_is_target : (_, _) t -> unit
+  val add_tracking_var : Void_ptr_var.t -> (_, _) t -> unit
+  val copy : Flag.t -> some -> some
+
+  val is_target : (_, _) t -> bool
+  val is_tracking_var : Void_ptr_var.t -> (_, _) t -> bool
+  val has_result_dep : (_, _) t -> bool
+  val iter_body_reqs : (fundec -> unit) -> some -> unit
+  val iter_stmt_reqs : (stmt -> unit) -> some -> unit
+  val has_body_req : fundec -> (_, _) t -> bool
+  val has_stmt_req : stmt -> (_, _) t -> bool
+  val has_stmt_req' : stmt -> some -> bool
+  val flag : (_, _) t -> Flag.t
+
+  val pp : formatter -> some -> unit
+end
+
+module Memory (R : Representant) (U : Unifiable with module R := R) (C : Criterion with type t := R.t) ()
+  : Generic_memory with module R := R and module U := U = struct
+
   type t = R.t * Memory_field.t option
 
   let mk ?fi u =
@@ -155,240 +345,164 @@ module Make_memory (R : Representant) (U : Unifiable with type repr = R.t) (C : 
     function
     | r, Some fi -> pp "%a->%a" R.pp r Memory_field.pp fi
     | r, None    -> pp "*%a" R.pp r
+
+  module H = Reporting_bithashset (struct type nonrec t = t let equal = equal let hash = hash let pp = pp end) ()
 end
 
-module type Memories = sig
-  type u
-  type r
-  module Global_mem : Memory with type u := u and type r := r
-  module Poly_mem : Poly_memory with type u := u and type r := r
-  module Local_mem : Memory with type u := u and type r := r
-  module H_global_mem : Reporting_bithashset with type elt := Global_mem.t
-  module H_poly_mem : functor () -> Reporting_bithashset with type elt := Poly_mem.t
-  module H_local_mem : functor () -> Reporting_bithashset with type elt := Local_mem.t
+module Global (R : Representant) (U : Unifiable with module R := R) () :
+  Global with module R := R and module U := U = struct
+
+  module Var = Variable (struct let is_ok vi = isArithmeticOrPointerType vi.vtype && vi.vglob end) ()
+  module Mem = Memory (R) (U) (struct let is_ok r = R.kind r = `Global end) ()
 end
 
-module Make_memories (R : Representant) (U : Unifiable with type repr = R.t) () = struct
-  type u = U.t
-  type r = R.t
-  module Global_mem = Make_memory (R) (U) (struct let is_ok r = R.kind r = `Global end)
-  module Poly_mem =
-    Make_memory (R) (U) (struct let is_ok r = match R.kind r with `Poly _ -> true | _ -> false end)
-  module Local_mem =
-    Make_memory (R) (U) (struct let is_ok r = match R.kind r with `Local _ -> true | _ -> false end)
-  module H_global_mem = Make_reporting_bithashset (Global_mem) ()
-  module H_poly_mem = Make_reporting_bithashset (Poly_mem)
-  module H_local_mem = Make_reporting_bithashset (Local_mem)
+module Function (R : Representant) (U : Unifiable with module R := R) (F : sig val f : fundec end) () :
+  Function with module R := R and module U := U = struct
+  module Local = struct
+    module Var =
+      Variable
+        (struct
+          let is_ok vi =
+            isArithmeticOrPointerType vi.vtype
+            && not vi.vglob
+            && not vi.vformal
+            && List.exists (Varinfo.equal vi) F.f.slocals
+        end)
+        ()
+    module Mem =
+      Memory
+        (R)
+        (U)
+        (struct let is_ok r = match R.kind r with `Local f when String.equal f F.f.svar.vname -> true | _ -> false end)
+        ()
+  end
+  module Poly = struct
+    module Var =
+      Variable
+        (struct
+          let is_ok vi =
+            isArithmeticOrPointerType vi.vtype
+            && vi.vformal
+            && List.exists (Varinfo.equal vi) F.f.sformals
+        end)
+        ()
+    module Mem =
+      Memory
+        (R)
+        (U)
+        (struct let is_ok r = match R.kind r with `Poly f when String.equal f F.f.svar.vname -> true | _ -> false end)
+        ()
+  end
 end
 
-module type Writes = sig
-  module Memories : Memories
-
-  open Memories
+module Writes
+    (R : Representant)
+    (U : Unifiable with module R := R)
+    (G : Global with module R := R and module U := U)
+    (F : Function with module R := R and module U := U) :
+  Writes with module R := R and module U := U and module G := G and module F := F = struct
 
   type readable =
-    [ `Global_var of Global_var.t
-    | `Poly_var of Formal_var.t
-    | `Local_var of Local_var.t
-    | `Global_mem of Global_mem.t
-    | `Poly_mem of Poly_mem.t
-    | `Local_mem of Local_mem.t ]
-
-  type t = [ readable  | `Result ]
-
-  include Hashed_ordered_printable with type t := t
-end
-
-module Make_writes (M : Memories) : Writes with module Memories = M = struct
-  module Memories = M
-
-  open M
-
-  type readable =
-    [ `Global_var of Global_var.t
-    | `Poly_var of Formal_var.t
-    | `Local_var of Local_var.t
-    | `Global_mem of Global_mem.t
-    | `Poly_mem of Poly_mem.t
-    | `Local_mem of Local_mem.t ]
+    [ `Global_var of G.Var.t
+    | `Poly_var   of F.Poly.Var.t
+    | `Local_var  of F.Local.Var.t
+    | `Global_mem of G.Mem.t
+    | `Poly_mem   of F.Poly.Mem.t
+    | `Local_mem  of F.Local.Mem.t ]
 
   type t = [ readable | `Result ]
 
   let compare w1 w2 =
     match w1, w2 with
-    | `Global_var v1, `Global_var v2  -> Global_var.compare v1 v2
+    | `Global_var v1, `Global_var v2  -> G.Var.compare v1 v2
     | `Global_var _,  _               -> -1
     | `Poly_var _,    `Global_var _   -> 1
-    | `Poly_var v1,   `Poly_var v2    -> Formal_var.compare v1 v2
+    | `Poly_var v1,   `Poly_var v2    -> F.Poly.Var.compare v1 v2
     | `Poly_var _,    _               -> -1
     | `Local_var _,  (`Global_var _
                      | `Poly_var _)   -> 1
-    | `Local_var v1, ` Local_var v2   -> Local_var.compare v1 v2
+    | `Local_var v1, ` Local_var v2   -> F.Local.Var.compare v1 v2
     | `Local_var _,   _               -> -1
     | `Global_mem _, (`Global_var _
                      | `Poly_var _
                      | `Local_var _)  -> 1
-    | `Global_mem m1, `Global_mem m2  -> Global_mem.compare m1 m2
+    | `Global_mem m1, `Global_mem m2  -> G.Mem.compare m1 m2
     | `Global_mem _,  _               -> -1
     | `Poly_mem _,   (`Global_var _
                      | `Poly_var _
                      | `Local_var _
                      | `Global_mem _) -> 1
-    | `Poly_mem m1,  `Poly_mem m2     -> Poly_mem.compare m1 m2
+    | `Poly_mem m1,  `Poly_mem m2     -> F.Poly.Mem.compare m1 m2
     | `Poly_mem _,    _               -> -1
     | `Local_mem _,  (`Global_var _
                      | `Poly_var _
                      | `Local_var _
                      | `Global_mem _
                      | `Poly_mem _)   -> 1
-    | `Local_mem m1, `Local_mem m2    -> Local_mem.compare m1 m2
+    | `Local_mem m1, `Local_mem m2    -> F.Local.Mem.compare m1 m2
     | `Local_mem _,   _               -> -1
     | `Result,        `Result         -> 0
     | `Result,        _               -> 1
 
   let equal w1 w2 =
     match[@warning "-4"] w1, w2 with
-    | `Global_var v1, `Global_var v2 -> Global_var.equal v1 v2
-    | `Poly_var v1,   `Poly_var v2   -> Formal_var.equal v1 v2
-    | `Local_var v1,  `Local_var v2  -> Local_var.equal v1 v2
-    | `Global_mem m1, `Global_mem m2 -> Global_mem.equal m1 m2
-    | `Poly_mem m1,   `Poly_mem m2   -> Poly_mem.equal m1 m2
-    | `Local_mem m1,  `Local_mem m2  -> Local_mem.equal m1 m2
+    | `Global_var v1, `Global_var v2 -> G.Var.equal       v1 v2
+    | `Poly_var v1,   `Poly_var v2   -> F.Poly.Var.equal  v1 v2
+    | `Local_var v1,  `Local_var v2  -> F.Local.Var.equal v1 v2
+    | `Global_mem m1, `Global_mem m2 -> G.Mem.equal       m1 m2
+    | `Poly_mem m1,   `Poly_mem m2   -> F.Poly.Mem.equal  m1 m2
+    | `Local_mem m1,  `Local_mem m2  -> F.Local.Mem.equal m1 m2
     | `Result,        `Result        -> true
-    | _                             -> false
+    | _                              -> false
 
   let hash =
     function
-    | `Global_var v -> 7 * Global_var.hash v
-    | `Poly_var v   -> 7 * Formal_var.hash v + 1
-    | `Local_var v  -> 7 * Local_var.hash v + 2
-    | `Global_mem m -> 7 * Global_mem.hash m + 3
-    | `Poly_mem m   -> 7 * Poly_mem.hash m + 4
-    | `Local_mem m  -> 7 * Local_mem.hash m + 5
+    | `Global_var v -> 7 * G.Var.hash v
+    | `Poly_var v   -> 7 * F.Poly.Var.hash v  + 1
+    | `Local_var v  -> 7 * F.Local.Var.hash v + 2
+    | `Global_mem m -> 7 * G.Mem.hash m       + 3
+    | `Poly_mem m   -> 7 * F.Poly.Mem.hash m  + 4
+    | `Local_mem m  -> 7 * F.Local.Mem.hash m + 5
     | `Result       -> 6
 
   let pp fmttr =
     let pp fmt = fprintf fmttr fmt in
     function
-    | `Global_var v -> pp "^%a" Global_var.pp v
-    | `Poly_var v   -> pp "'%a" Formal_var.pp v
-    | `Local_var v  -> pp "~%a" Local_var.pp v
-    | `Global_mem m -> pp "^%a" Global_mem.pp m
-    | `Poly_mem m   -> pp "'%a" Poly_mem.pp m
-    | `Local_mem m  -> pp "~%a" Local_mem.pp m
+    | `Global_var v -> pp "^%a" G.Var.pp       v
+    | `Poly_var v   -> pp "'%a" F.Poly.Var.pp  v
+    | `Local_var v  -> pp "~%a" F.Local.Var.pp v
+    | `Global_mem m -> pp "^%a" G.Mem.pp       m
+    | `Poly_mem m   -> pp "'%a" F.Poly.Mem.pp  m
+    | `Local_mem m  -> pp "~%a" F.Local.Mem.pp m
     | `Result       -> pp "!R"
 end
 
-module type Reads_kind = sig
-  module W : Writes
+module Reads
+    (R : Representant)
+    (U : Unifiable with module R := R)
+    (G : Global with module R := R and module U := U)
+    (F : Function with module R := R and module U := U)
+    (W : Writes with module R := R and module U := U and module G := G and module F := F) :
+  Reads with module R := R and module U := U and module G := G and module F := F and module W := W = struct
 
-  open W.Memories
+  type _ kind =
+    | Global_var : G.Var.t       kind
+    | Poly_var   : F.Poly.Var.t  kind
+    | Local_var  : F.Local.Var.t kind
+    | Global_mem : G.Mem.t       kind
+    | Poly_mem   : F.Poly.Mem.t  kind
+    | Local_mem  : F.Local.Mem.t kind
 
-  type _ t =
-    | Global_var : Global_var.t t
-    | Poly_var : Formal_var.t t
-    | Local_var : Local_var.t t
-    | Global_mem : Global_mem.t t
-    | Poly_mem : Poly_mem.t t
-    | Local_mem : Local_mem.t t
-
-  type some = Some : 'a t * 'a -> some
-end
-
-module Make_reads_kind (W : Writes) : Reads_kind with module W = W = struct
-  module W = W
-  module rec M : Reads_kind with module W := W = M
-  include M
-end
-
-type ('w, _) reads = ..
-
-module type Reads = sig
-  module W : Writes
-
-  open W.Memories
-
-  module K : Reads_kind with module W = W
-
-  type t
-
-  type ('w, _) reads += W : (W.t, t) reads
-
-  type 'a kind = 'a K.t
-
-  type some = K.some = Some : 'a K.t * 'a -> some
-
-  val of_write : [< W.readable ] -> some
-
-  val create : Flag.t -> t
-  val clear : t -> unit
-  val import : from:t -> t -> unit
-  val add_global_var : Global_var.t -> t -> unit
-  val add_poly_var : Formal_var.t -> t -> unit
-  val add_local_var : Local_var.t -> t -> unit
-  val add_global_mem : Global_mem.t -> t -> unit
-  val add_poly_mem : Poly_mem.t -> t -> unit
-  val add_local_mem : Local_mem.t -> t -> unit
-  val add : 'a kind -> 'a -> t -> unit
-  val add_some : some -> t -> unit
-  val sub : t -> from:t -> unit
-  val mem : 'a kind -> 'a -> t -> bool
-  val mem_some : some -> t -> bool
-  val intersects : t -> t -> bool
-  val flag : t -> Flag.t
-  val copy : Flag.t -> t -> t
-
-  val iter_global_vars : (Global_var.t -> unit) -> t -> unit
-  val iter_poly_vars : (Formal_var.t -> unit) -> t -> unit
-  val iter_local_vars : (Local_var.t -> unit) -> t -> unit
-  val iter_global_mems : (Global_mem.t -> unit) -> t -> unit
-  val iter_poly_mems : (Poly_mem.t -> unit) -> t -> unit
-  val iter_local_mems : (Local_mem.t -> unit) -> t -> unit
-
-  val fold_global_vars : (Global_var.t -> 'a -> 'a) -> t -> 'a -> 'a
-  val fold_poly_vars : (Formal_var.t -> 'a -> 'a) -> t -> 'a -> 'a
-  val fold_local_vars : (Local_var.t -> 'a -> 'a) -> t -> 'a -> 'a
-  val fold_global_mems : (Global_mem.t -> 'a -> 'a) -> t -> 'a -> 'a
-  val fold_poly_mems : (Poly_mem.t -> 'a -> 'a) -> t -> 'a -> 'a
-  val fold_local_mems : (Local_mem.t -> 'a -> 'a) -> t -> 'a -> 'a
-
-  val iter : ([> W.readable] -> unit) -> t -> unit
-  val fold : ([> W.readable] -> 'a -> 'a) -> t -> 'a -> 'a
-
-  val is_empty : t -> bool
-  val is_singleton : t -> bool
-  val length : t -> int
-
-  val pp : formatter -> t -> unit
-end
-
-module Make_reads (W : Writes) (K : Reads_kind with module W = W) () :
-  Reads with module W = W and module K = K = struct
-
-  open W.Memories
-
-  module H_formal_var = H_formal_var ()
-  module H_local_var = H_local_var ()
-  module H_poly_mem = H_poly_mem ()
-  module H_local_mem = H_local_mem ()
-
-  module K = K
-  module W = K.W
-
-  type 'a kind = 'a K.t
-
-  type some = K.some = Some : 'a K.t * 'a -> some
-
-  open! K
+  type some = Some : 'a kind * 'a -> some
 
   type t =
     {
-      global_vars : H_global_var.t;
-      poly_vars   : H_formal_var.t;
-      local_vars  : H_local_var.t;
-      global_mems : H_global_mem.t;
-      poly_mems   : H_poly_mem.t;
-      local_mems  : H_local_mem.t
+      global_vars : G.Var.H.t;
+      poly_vars   : F.Poly.Var.H.t;
+      local_vars  : F.Local.Var.H.t;
+      global_mems : G.Mem.H.t;
+      poly_mems   : F.Poly.Mem.H.t;
+      local_mems  : F.Local.Mem.H.t
     }
 
   type ('w, _) reads += W : (W.t, t) reads
@@ -396,236 +510,159 @@ module Make_reads (W : Writes) (K : Reads_kind with module W = W) () :
   let of_write : _ -> some =
     function[@warning "-42"]
     | `Global_var v -> Some (Global_var, v)
-    | `Local_var v  -> Some (Local_var, v)
-    | `Poly_var v   -> Some (Poly_var, v)
+    | `Local_var  v -> Some (Local_var, v)
+    | `Poly_var   v -> Some (Poly_var, v)
     | `Global_mem m -> Some (Global_mem, m)
-    | `Local_mem m  -> Some (Local_mem, m)
-    | `Poly_mem m   -> Some (Poly_mem, m)
+    | `Local_mem  m -> Some (Local_mem, m)
+    | `Poly_mem   m -> Some (Poly_mem, m)
 
   let create f =
-    { global_vars = H_global_var.create f;
-      poly_vars = H_formal_var.create f;
-      local_vars = H_local_var.create f;
-      global_mems = H_global_mem.create f;
-      poly_mems = H_poly_mem.create f;
-      local_mems = H_local_mem.create f }
+    { global_vars = G.Var.H.create       f;
+      poly_vars   = F.Poly.Var.H.create  f;
+      local_vars  = F.Local.Var.H.create f;
+      global_mems = G.Mem.H.create       f;
+      poly_mems   = F.Poly.Mem.H.create  f;
+      local_mems  = F.Local.Mem.H.create f }
 
   let clear r =
-    H_global_var.clear r.global_vars;
-    H_formal_var.clear r.poly_vars;
-    H_local_var.clear r.local_vars;
-    H_global_mem.clear r.global_mems;
-    H_poly_mem.clear r.poly_mems;
-    H_local_mem.clear r.local_mems
+    G.Var.H.clear       r.global_vars;
+    F.Poly.Var.H.clear  r.poly_vars;
+    F.Local.Var.H.clear r.local_vars;
+    G.Mem.H.clear       r.global_mems;
+    F.Poly.Mem.H.clear  r.poly_mems;
+    F.Local.Mem.H.clear r.local_mems
 
   let import ~from r =
-    H_global_var.import ~from:from.global_vars r.global_vars;
-    H_formal_var.import ~from:from.poly_vars r.poly_vars;
-    H_local_var.import ~from:from.local_vars r.local_vars;
-    H_global_mem.import ~from:from.global_mems r.global_mems;
-    H_poly_mem.import ~from:from.poly_mems r.poly_mems;
-    H_local_mem.import ~from:from.local_mems r.local_mems
+    G.Var.H.import       ~from:from.global_vars r.global_vars;
+    F.Poly.Var.H.import  ~from:from.poly_vars   r.poly_vars;
+    F.Local.Var.H.import ~from:from.local_vars  r.local_vars;
+    G.Mem.H.import       ~from:from.global_mems r.global_mems;
+    F.Poly.Mem.H.import  ~from:from.poly_mems   r.poly_mems;
+    F.Local.Mem.H.import ~from:from.local_mems  r.local_mems
 
-  let add_global_var v r = H_global_var.add v r.global_vars
-  let add_poly_var v r = H_formal_var.add v r.poly_vars
-  let add_local_var v r = H_local_var.add v r.local_vars
-  let add_global_mem m r = H_global_mem.add m r.global_mems
-  let add_poly_mem m r = H_poly_mem.add m r.poly_mems
-  let add_local_mem m r = H_local_mem.add m r.local_mems
+  let add_global_var v r = G.Var.H.add       v r.global_vars
+  let add_poly_var   v r = F.Poly.Var.H.add  v r.poly_vars
+  let add_local_var  v r = F.Local.Var.H.add v r.local_vars
+  let add_global_mem m r = G.Mem.H.add       m r.global_mems
+  let add_poly_mem   m r = F.Poly.Mem.H.add  m r.poly_mems
+  let add_local_mem  m r = F.Local.Mem.H.add m r.local_mems
 
-  let add : type a. a K.t -> a -> _ = fun k x r ->
+  let add : type a. a kind -> a -> _ = fun k x r ->
     match k with
-    | Global_var -> H_global_var.add x r.global_vars
-    | Poly_var   -> H_formal_var.add x r.poly_vars
-    | Local_var  -> H_local_var.add x r.local_vars
-    | Global_mem -> H_global_mem.add x r.global_mems
-    | Poly_mem   -> H_poly_mem.add x r.poly_mems
-    | Local_mem  -> H_local_mem.add x r.local_mems
+    | Global_var -> G.Var.H.add       x r.global_vars
+    | Poly_var   -> F.Poly.Var.H.add  x r.poly_vars
+    | Local_var  -> F.Local.Var.H.add x r.local_vars
+    | Global_mem -> G.Mem.H.add       x r.global_mems
+    | Poly_mem   -> F.Poly.Mem.H.add  x r.poly_mems
+    | Local_mem  -> F.Local.Mem.H.add x r.local_mems
 
   let add_some (e : some) r = let Some (k, x) = e in add k x r
 
   let sub r ~from =
-    H_global_var.sub r.global_vars ~from:from.global_vars;
-    H_formal_var.sub r.poly_vars ~from:from.poly_vars;
-    H_local_var.sub r.local_vars ~from:from.local_vars;
-    H_global_mem.sub r.global_mems ~from:from.global_mems;
-    H_poly_mem.sub r.poly_mems ~from:from.poly_mems;
-    H_local_mem.sub r.local_mems ~from:from.local_mems
+    G.Var.H.sub       r.global_var  ~from:from.global_vars;
+    F.Poly.Var.H.sub  r.poly_vars   ~from:from.poly_vars;
+    F.Local.Var.H.sub r.local_vars  ~from:from.local_vars;
+    G.Mem.H.sub       r.global_mems ~from:from.global_mems;
+    F.Poly.Mem.H.sub  r.poly_mems   ~from:from.poly_mems;
+    F.Local.Mem.H.sub r.local_mems  ~from:from.local_mems
 
-  let mem : type a. a K.t -> a -> _ = fun k x r ->
+  let mem : type a. a kind -> a -> _ = fun k x r ->
     match k with
-    | Global_var -> H_global_var.mem x r.global_vars
-    | Poly_var   -> H_formal_var.mem x r.poly_vars
-    | Local_var  -> H_local_var.mem x r.local_vars
-    | Global_mem -> H_global_mem.mem x r.global_mems
-    | Poly_mem   -> H_poly_mem.mem x r.poly_mems
-    | Local_mem  -> H_local_mem.mem x r.local_mems
+    | Global_var -> G.Var.H.mem       x r.global_vars
+    | Poly_var   -> F.Poly.Var.H.mem  x r.poly_vars
+    | Local_var  -> F.Local.Var.H.mem x r.local_vars
+    | Global_mem -> G.Mem.H.mem       x r.global_mems
+    | Poly_mem   -> F.Poly.Mem.H.mem  x r.poly_mems
+    | Local_mem  -> F.Local.Mem.H.mem x r.local_mems
 
   let mem_some (e : some) r = let Some (k, x) = e in mem k x r
 
   let intersects r1 r2 =
-    H_global_var.intersects r1.global_vars r2.global_vars ||
-    H_formal_var.intersects r1.poly_vars r2.poly_vars ||
-    H_local_var.intersects r1.local_vars r2.local_vars ||
-    H_global_mem.intersects r1.global_mems r2.global_mems ||
-    H_poly_mem.intersects r1.poly_mems r2.poly_mems ||
-    H_local_mem.intersects r1.local_mems r2.local_mems
+    G.Var.H.intersects       r1.global_vars r2.global_vars ||
+    F.Poly.Var.H.intersects  r1.poly_vars   r2.poly_vars   ||
+    F.Local.Var.H.intersects r1.local_vars  r2.local_vars  ||
+    G.Mem.H.intersects       r1.global_mems r2.global_mems ||
+    F.Poly.Mem.H.intersects  r1.poly_mems   r2.poly_mems   ||
+    F.Local.Mem.H.intersects r1.local_mems  r2.local_mems
 
-  let flag r = H_global_var.flag r.global_vars
+  let flag r = G.Var.H.flag r.global_vars
 
   let copy f r =
-    { global_vars = H_global_var.copy f r.global_vars;
-      poly_vars = H_formal_var.copy f r.poly_vars;
-      local_vars = H_local_var.copy f r.local_vars;
-      global_mems = H_global_mem.copy f r.global_mems;
-      poly_mems = H_poly_mem.copy f r.poly_mems;
-      local_mems = H_local_mem.copy f r.local_mems }
+    { global_vars = G.Var.H.copy      f r.global_vars;
+      poly_vars = F.Poly.Var.H.copy   f r.poly_vars;
+      local_vars = F.Local.Var.H.copy f r.local_vars;
+      global_mems = G.Mem.H.copy      f r.global_mems;
+      poly_mems = F.Poly.Mem.H.copy   f r.poly_mems;
+      local_mems = F.Local.Mem.H.copy f r.local_mems }
 
-  let iter_global_vars f r = H_global_var.iter f r.global_vars
-  let iter_poly_vars f r = H_formal_var.iter f r.poly_vars
-  let iter_local_vars f r = H_local_var.iter f r.local_vars
-  let iter_global_mems f r = H_global_mem.iter f r.global_mems
-  let iter_poly_mems f r = H_poly_mem.iter f r.poly_mems
-  let iter_local_mems f r = H_local_mem.iter f r.local_mems
+  let iter_global_vars f r = G.Var.H.iter       f r.global_vars
+  let iter_poly_vars   f r = F.Poly.Var.H.iter  f r.poly_vars
+  let iter_local_vars  f r = F.Local.Var.H.iter f r.local_vars
+  let iter_global_mems f r = G.Mem.H.iter       f r.global_mems
+  let iter_poly_mems   f r = F.Poly.Mem.H.iter  f r.poly_mems
+  let iter_local_mems  f r = F.Local.Mem.H.iter f r.local_mems
 
-  let fold_global_vars f r = H_global_var.fold f r.global_vars
-  let fold_poly_vars f r = H_formal_var.fold f r.poly_vars
-  let fold_local_vars f r = H_local_var.fold f r.local_vars
-  let fold_global_mems f r = H_global_mem.fold f r.global_mems
-  let fold_poly_mems f r = H_poly_mem.fold f r.poly_mems
-  let fold_local_mems f r = H_local_mem.fold f r.local_mems
+  let fold_global_vars f r = G.Var.H.fold       f r.global_vars
+  let fold_poly_vars   f r = F.Poly.Var.H.fold  f r.poly_vars
+  let fold_local_vars  f r = F.Local.Var.H.fold f r.local_vars
+  let fold_global_mems f r = G.Mem.H.fold       f r.global_mems
+  let fold_poly_mems   f r = F.Poly.Mem.H.fold  f r.poly_mems
+  let fold_local_mems  f r = F.Local.Mem.H.fold f r.local_mems
 
   let iter f r =
     iter_global_mems (fun m -> f @@ `Global_mem m) r;
-    iter_poly_mems   (fun m -> f @@ `Poly_mem m)   r;
-    iter_local_mems  (fun m -> f @@ `Local_mem m)  r;
+    iter_poly_mems   (fun m -> f @@ `Poly_mem   m) r;
+    iter_local_mems  (fun m -> f @@ `Local_mem  m) r;
     iter_global_vars (fun v -> f @@ `Global_var v) r;
-    iter_poly_vars   (fun v -> f @@ `Poly_var v)   r;
-    iter_local_vars  (fun v -> f @@ `Local_var v)  r
+    iter_poly_vars   (fun v -> f @@ `Poly_var   v) r;
+    iter_local_vars  (fun v -> f @@ `Local_var  v) r
 
   let fold f r =
     fold_global_mems (fun m -> f @@ `Global_mem m) r %>
-    fold_poly_mems   (fun m -> f @@ `Poly_mem m)   r %>
-    fold_local_mems  (fun m -> f @@ `Local_mem m)  r %>
+    fold_poly_mems   (fun m -> f @@ `Poly_mem   m) r %>
+    fold_local_mems  (fun m -> f @@ `Local_mem  m) r %>
     fold_global_vars (fun v -> f @@ `Global_var v) r %>
-    fold_poly_vars   (fun v -> f @@ `Poly_var v)   r %>
-    fold_local_vars  (fun v -> f @@ `Local_var v)  r
+    fold_poly_vars   (fun v -> f @@ `Poly_var   v) r %>
+    fold_local_vars  (fun v -> f @@ `Local_var  v) r
 
   let is_empty r =
-    H_global_var.is_empty r.global_vars &&
-    H_formal_var.is_empty r.poly_vars &&
-    H_local_var.is_empty r.local_vars &&
-    H_global_mem.is_empty r.global_mems &&
-    H_poly_mem.is_empty r.poly_mems &&
-    H_local_mem.is_empty r.local_mems
+    G.Var.H.is_empty       r.global_vars &&
+    F.Poly.Var.H.is_empty  r.poly_vars   &&
+    F.Local.Var.H.is_empty r.local_vars  &&
+    G.Mem.H.is_empty       r.global_mems &&
+    F.Poly.Mem.H.is_empty  r.poly_mems   &&
+    F.Local.Mem.H.is_empty r.local_mems
 
   let length r =
     List.fold_left
       (+)
       0
-      [H_global_var.length r.global_vars;
-       H_formal_var.length r.poly_vars;
-       H_local_var.length r.local_vars;
-       H_global_mem.length r.global_mems;
-       H_poly_mem.length r.poly_mems;
-       H_local_mem.length r.local_mems]
+      [G.Var.H.length       r.global_vars;
+       F.Poly.Var.H.length  r.poly_vars;
+       F.Local.Var.H.length r.local_vars;
+       G.Mem.H.length       r.global_mems;
+       F.Poly.Mem.H.length  r.poly_mems;
+       F.Local.Mem.H.length r.local_mems]
 
   let is_singleton r = length r = 1
 
   let pp fmt r =
     fprintf fmt "@[{gv:%a,@ pv:%a,@ lv:%a,@ gm:%a,@ pm:%a,@ lm:%a}@]"
-      H_global_var.pp r.global_vars
-      H_formal_var.pp r.poly_vars
-      H_local_var.pp r.local_vars
-      H_global_mem.pp r.global_mems
-      H_poly_mem.pp r.poly_mems
-      H_local_mem.pp r.local_mems
+      G.Var.H.pp       r.global_vars
+      F.Poly.Var.H.pp  r.poly_vars
+      F.Local.Var.H.pp r.local_vars
+      G.Mem.H.pp       r.global_mems
+      F.Poly.Mem.H.pp  r.poly_mems
+      F.Local.Mem.H.pp r.local_mems
 end
 
-module Fundec = struct include Fundec let pp = pretty end
-module Stmt = struct include Stmt let pp = pretty end
+module H_void_ptr_var = Reporting_bithashset (Void_ptr_var) ()
 
-module Requires : sig
-  type t
-
-  val create : Flag.t -> t
-  val import : from:t -> t -> unit
-  val add_body : fundec -> t -> unit
-  val add_stmt : stmt -> t -> unit
-  val copy : Flag.t -> t -> t
-
-  val iter_bodies : (fundec -> unit) -> t -> unit
-  val iter_stmts : (stmt -> unit) -> t -> unit
-  val has_body : fundec -> t -> bool
-  val has_stmt : stmt -> t -> bool
-end = struct
-  module H_fundec = Make_reporting_bithashset (Fundec) ()
-  module H_stmt = Make_reporting_bithashset (Stmt) ()
-
-  type t =
-    {
-      bodies : H_fundec.t;
-      stmts  : H_stmt.t
-    }
-
-  let create f = { bodies = H_fundec.create f; stmts = H_stmt.create f }
-  let import ~from r =
-    H_fundec.import ~from:from.bodies r.bodies;
-    H_stmt.import ~from:from.stmts r.stmts
-  let add_body f r = H_fundec.add f r.bodies
-  let add_stmt s r = H_stmt.add s r.stmts
-  let copy f r = { bodies = H_fundec.copy f r.bodies; stmts = H_stmt.copy f r.stmts }
-
-  let iter_bodies f r = H_fundec.iter f r.bodies
-  let iter_stmts f r = H_stmt.iter f r.stmts
-  let has_body f r = H_fundec.mem f r.bodies
-  let has_stmt s r = H_stmt.mem s r.stmts
-end
-
-module Void_ptr_var = Make_var (struct let is_ok vi = isVoidPtrType vi.vtype end)
-
-module H_void_ptr_var = Make_reporting_bithashset (Void_ptr_var) ()
-
-module type Effect = sig
-  type ('a, 'r) t
-  module W : Writes
-  module K : Reads_kind with module W = W
-  module type Reads = Reads with module W = W and module K = K
-  module type Assigns = Reporting_hashmap with type key = W.t and type 'a S.kind = 'a K.t and type S.some = K.some
-  type some =
-    | Some :
-        { reads : (module Reads with type t = 'r);
-          assigns : (module Assigns with type S.t = 'r and type t = 'a);
-          eff : ('a, 'r) t } -> some
-  val create : Flag.t -> some
-  val assigns : ('a, 'r) t -> 'a
-  val depends : ('a, 'r) t -> 'r
-  val add_result_dep : (_, _) t -> unit
-  val add_requires : Requires.t -> (_, _) t -> unit
-  val add_body_req : fundec -> (_, _) t -> unit
-  val add_stmt_req : stmt -> (_, _) t -> unit
-  val set_is_target : (_, _) t -> unit
-  val add_tracking_var : Void_ptr_var.t -> (_, _) t -> unit
-  val copy : Flag.t -> some -> some
-
-  val is_target : (_, _) t -> bool
-  val is_tracking_var : Void_ptr_var.t -> (_, _) t -> bool
-  val has_result_dep : (_, _) t -> bool
-  val iter_body_reqs : (fundec -> unit) -> some -> unit
-  val iter_stmt_reqs : (stmt -> unit) -> some -> unit
-  val has_body_req : fundec -> (_, _) t -> bool
-  val has_stmt_req : stmt -> (_, _) t -> bool
-  val has_stmt_req' : stmt -> some -> bool
-  val flag : (_, _) t -> Flag.t
-
-  val pp : formatter -> some -> unit
-end
-
-module Make_effect (W : Writes) : Effect with module W = W = struct
-  module W = W
-  module K = Make_reads_kind (W)
-  module Reads = Make_reads (W) (K)
-  module Assigns = Make_reporting_hashmap (W)
+module Effect
+    (R : Representant)
+    (U : Unifiable with module R := R)
+    (G : Global with module R := R and module U := U)
+  : Effect with module R := R and module U := U and module G := G = struct
 
   type ('a, 'r) t =
     {
@@ -638,19 +675,21 @@ module Make_effect (W : Writes) : Effect with module W = W = struct
               flag       : Flag.t;
     }
 
-  module type Reads = Reads with module W = W and module K = K
-  module type Assigns = Reporting_hashmap with type key = W.t and type 'a S.kind = 'a K.t and type S.some = K.some
+  module type Local = Local with module Repr := R and module U := U and module G := G
+
   type some =
     | Some :
-        { reads : (module Reads with type t = 'r);
-          assigns : (module Assigns with type S.t = 'r and type t = 'a);
+        { local : (module Local with type A.t = 'a and type R.t = 'r);
           eff : ('a, 'r) t } -> some
-  let create f : some =
-    let module R = Reads () in
-    let module A = Assigns (R) in
+
+  let create f fundec : some =
+    let module F = Function (R) (U) (struct let f = fundec end) () in
+    let module W = Writes (R) (U) (G) (F) in
+    let module R = Reads (R) (U) (G) (F) (W) in
+    let module A = Reporting_hashmap (W) (R) in
+    let module Local = struct module F = F module W = W module A = A module R = R end in
     Some {
-      reads   = (module R);
-      assigns = (module A);
+      local = (module Local);
       eff = {
         assigns    = A.create f;
         tracking   = H_void_ptr_var.create f;
@@ -673,15 +712,14 @@ module Make_effect (W : Writes) : Effect with module W = W = struct
   let has_stmt_req s e = Requires.has_stmt s e.requires
   let has_stmt_req' s (Some { eff; _ } : some) = has_stmt_req s eff
   let add_tracking_var v e = H_void_ptr_var.add v e.tracking
-  let copy f (Some { reads = (module R) as reads; assigns = (module A) as assigns; eff = e } : some) : some =
+  let copy f (Some { local = (module L) as local; eff = e } : some) : some =
     Some {
-      reads;
-      assigns;
+      local;
       eff = {
-        assigns    = A.copy f e.assigns;
+        assigns    = L.A.copy f e.assigns;
         tracking   = H_void_ptr_var.copy f e.tracking;
         is_target  = e.is_target;
-        depends    = R.copy f e.depends;
+        depends    = L.R.copy f e.depends;
         result_dep = e.result_dep;
         requires   = Requires.copy f e.requires;
         flag       = f }}
@@ -693,9 +731,9 @@ module Make_effect (W : Writes) : Effect with module W = W = struct
   let iter_stmt_reqs f (Some { eff; _ } : some) = Requires.iter_stmts f eff.requires
   let flag e = e.flag
 
-  let pp fmt (Some { reads = (module R); assigns = (module A); eff = e } : some) =
+  let pp fmt (Some { local = (module L); eff = e } : some) =
     fprintf fmt "@[{@[<2>ass:@\n%a;@]@\n@[<2>track:@\n%a;@]@\n@[<2>tar:@\n%B;@]@\n@[<2>deps:@\n%a@]@\n@[<2>RD:%B@]}@]"
-      A.pp e.assigns H_void_ptr_var.pp e.tracking e.is_target R.pp e.depends e.result_dep
+      L.A.pp e.assigns H_void_ptr_var.pp e.tracking e.is_target L.R.pp e.depends e.result_dep
 end
 
 module Field_key =
@@ -729,15 +767,30 @@ type 'eff t =
     effects     : 'eff H_fundec.t
   }
 
+module Readers (R : Representant) = struct
+   type mem = R.t * fieldinfo option
+
+  type readable =
+    [ `Global_var of varinfo
+    | `Poly_var   of varinfo
+    | `Local_var  of varinfo
+    | `Global_mem of mem
+    | `Poly_mem   of mem
+    | `Local_mem  of mem ]
+
+  type writable = [ readable | `Result ]
+end
+
 module type Info = sig
   module R : Representant
-  module U : Unifiable with type repr = R.t
-  module M : Memories with type r = R.t and type u = U.t
-  module W : Writes with module Memories = M
-  module E : Effect with module W = W
+  module U : Unifiable with module R := R
+  module G : Global with module R := R and module U := U
+  module E : Effect with module R := R and module U := U and module G := G
 
   type nonrec 'a offs = 'a offs
   type nonrec t = E.some t
+
+  include module type of Readers (R)
 
   val create : unit -> t
   val get : t -> Flag.t -> fundec -> E.some
@@ -745,16 +798,16 @@ module type Info = sig
   val clear : t -> unit
 end
 
-module Make (R : Representant) (U : Unifiable with type repr = R.t) () :
+module Make (R : Representant) (U : Unifiable with module R := R) () :
   Info with module R := R and module U := U = struct
 
-  module M = Make_memories (R) (U) ()
-  module W = Make_writes (M)
-  module E = Make_effect (W)
+  module G = Global (R) (U) ()
+  module E = Effect (R) (U) (G)
 
   type nonrec 'a offs = 'a offs
-
   type nonrec t = E.some t
+
+  include Readers (R)
 
   let create () =
     {
@@ -770,7 +823,7 @@ module Make (R : Representant) (U : Unifiable with type repr = R.t) () :
       H_fundec.find fi.effects f
     with
     | Not_found ->
-      let r = E.create fl in
+      let r = E.create fl f in
       H_fundec.replace fi.effects f r;
       r
 
