@@ -30,7 +30,8 @@ if [[ ! -f "$PROPERTYFILE" ]] || grep -q 'CHECK(.*,.*LTL(G.*!.*call(.*).*).*)' "
         PROPERTYFILE=config/specification/sv-comp-reachability.spc
     fi
     STASK="${TASK}.sliced.c"
-    ./frama-c-Crude_slicer.opt \
+
+    ./frama-c-Crude_slicer.native \
         -machdep gcc_x86_64 \
         -crude_slicer \
         -timeout 400 \
@@ -41,17 +42,22 @@ if [[ ! -f "$PROPERTYFILE" ]] || grep -q 'CHECK(.*,.*LTL(G.*!.*call(.*).*).*)' "
         -print \
         -ocode ${STASK} \
         ${TASK}
+
     if [[ ! -f "${STASK}" ]]; then
         STASK="${TASK}"
     fi
     rm -rf "$(find . -name '**.graphml')"
+
     ./scripts/cpa.sh "${OTHER[@]}" -spec "${PROPERTYFILE}" "${STASK}"
+
     IWITNESSFILE=$(find . -name "**.graphml")
-    OWITNESSFILE="$(dirname ${IWITNESSFILE})/restored_$(basename ${IWITNESSFILE})"
-    ./filter_witness.native \
-        -progfile "${TASK}" \
-        -o "${OWITNESSFILE}" \
-        "${IWITNESSFILE}"
+    if [[ -f "${IWITNESSFILE}" ]]; then
+        OWITNESSFILE="$(dirname ${IWITNESSFILE})/restored_$(basename ${IWITNESSFILE})"
+        ./filter_witness.native \
+            -progfile "${TASK}" \
+            -o "${OWITNESSFILE}" \
+            "${IWITNESSFILE}"
+    fi
     rm -rf "${IWITNESSFILE}"
 else
     echo "Verification result: UNKNOWN"
