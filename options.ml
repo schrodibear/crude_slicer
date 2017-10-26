@@ -20,21 +20,22 @@ include
     (struct
        let name = "Crude_slicer"
        let shortname = "Crude_slicer"
-       let help = "Crude slicer for preprocessing reachability verification tasks"
+       let help = "Crude slicer for preprocessing reachability verification tasks. Commit " ^ Version.commit ^
+                  " compiled on " ^ Version.date
      end)
 
 module Analysis =
   False
     (struct
       let option_name = "-crude_slicer"
-      let help = "perform crude slicing as preprocessing of a reachability verification task"
+      let help = "Perform crude slicing as preprocessing of a reachability verification task"
     end)
 
 module Use_ghosts =
   False
     (struct
       let option_name = "-use_ghosts"
-      let help = "make sliced out statements ghost instead of removing them"
+      let help = "Make sliced out statements ghost instead of removing them"
     end)
 
 module Target_functions =

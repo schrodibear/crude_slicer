@@ -11,8 +11,10 @@
 *.byte
 *.native
 *.opt
+version.ml
 Crude_slicer_DEP
 frama-c
+frama-c-static
 *.plugin.generated
 *.check_mli_exists
 META.*
