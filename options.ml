@@ -65,7 +65,8 @@ module Required_bodies =
       let help = "Special functions (allocation, error, assume...), which nontheless require implementations"
       let arg_name = ""
       let default =
-        Datatype.String.Set.of_list ["ldv_error"; "ldv_assume"; "ldv_malloc"; "ldv_zalloc"; "ldv_init_zalloc"]
+        Datatype.String.Set.of_list ["ldv_error"; "kmalloc"; "kzalloc";
+                                     "ldv_assume"; "ldv_malloc"; "ldv_zalloc"; "ldv_init_zalloc"]
     end)
 
 module Assume_functions =
