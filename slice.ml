@@ -468,16 +468,25 @@ module Make (Analysis : Region.Analysis) = struct
             | Instr (Set (lv, e, _))                                     -> assign s lv e;                SkipChildren
             | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _))
               when Options.Target_functions.mem vi.vname                 -> reach_target s;               SkipChildren
-            | Instr (Call (lvo,
+            | Instr (Call (lv,
                            { enode = Lval (Var vi, NoOffset) },
-                           arg :: _,
+                           (arg :: _ as args),
                            _))
               when Options.Alloc_functions.mem vi.vname                  ->
-              begin match lvo with
-              | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype  -> start_tracking s lv v arg;    SkipChildren
-              | Some lv when not (isVoidPtrType @@ typeOfLval lv)        -> alloc s lv arg;               SkipChildren
-              (* Unsound! Struct fields to be supported as tracking fields! *)
-              | Some _                                                   ->                               SkipChildren
+              let call () =
+                if Kf.mem_definition vi
+                then call s ?lv (Globals.Functions.get vi)
+                else stub s ?lv args
+              in
+              begin match lv with
+              | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype  ->(start_tracking s lv v arg;
+                                                                            call ();                      SkipChildren)
+              | Some lv when not (isVoidPtrType @@ typeOfLval lv)        ->(alloc s lv arg;
+                                                                            call ();                      SkipChildren)
+              | Some _                                                   -> call ();                      SkipChildren
+              (* ^^^
+                 Unsound! Struct fields should be supported as tracking fields!
+                 Or full support for reinterpretation should be implemented.    *)
               | None                                                     ->                               SkipChildren
               end;
             | Instr (Call (_,
@@ -664,11 +673,23 @@ module Make (Analysis : Region.Analysis) = struct
           | Instr (Call (lv,
                          { enode = Lval (Var vi, NoOffset) }, _, loc))
             when Options.Alloc_functions.mem vi.vname                   ->
+            let call () =
+              ignore @@
+              if Kf.mem_definition vi
+              then stmt ~vi @@ call s ?lv (Globals.Functions.get vi)
+              else stmt @@ stub lv
+            in
             begin match lv with
-            | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype   -> stmt ~vi @@ assign lv
-            | Some lv  when not (isVoidPtrType @@ typeOfLval lv)        -> stmt ~vi @@ alloc ~loc lv
-              (* Unsound! Struct fields to be supported as tracking fields! *)
-            | Some _ | None                                             -> SkipChildren
+            | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype   ->(call ();
+                                                                           stmt ~vi @@ assign lv)
+            | Some lv  when not (isVoidPtrType @@ typeOfLval lv)        ->(call ();
+                                                                           stmt ~vi @@ alloc ~loc lv)
+            | Some _                                                    ->(call ();
+                                                                           SkipChildren)
+              (* ^^^
+                 Unsound! Struct fields should be supported as tracking fields!
+                 Or full support for reinterpretation should be implemented!    *)
+            | None                                                      -> SkipChildren
             end;
           | Instr (Call (_,
                          { enode = Lval (Var vi, NoOffset) }, [e], _))
