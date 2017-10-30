@@ -246,9 +246,9 @@ module Goto_handling = struct
         when Options.Path_assume_functions.mem vi.vname                -> true
       | _                                                              -> false
 
-    let add_closure h =
+    let add_closure ?(stop=false) h =
       let rec add_closure s =
-        if not (H.mem h s || unreachable s) then begin
+        if not (H.mem h s || stop && unreachable s) then begin
           H.replace h s ();
           List.iter add_closure s.succs
         end
@@ -273,10 +273,15 @@ module Goto_handling = struct
         match
           may
             (fun s' ->
-               add_closure h s';
+               add_closure ~stop:true h s';
                if not (H.mem h r)
-               then begin add_closure h s; raise (Found r) end
-               else H.clear h)
+               then begin
+                 H.clear h;
+                 add_closure h s;
+                 add_closure h s';
+                 raise (Found r)
+               end else
+                 H.clear h)
             s';
           H.iter_sorted_by_entry
             ~cmp:(fun (s1, d1) (s2, d2) ->
