@@ -46,10 +46,13 @@ ifeq ($(FRAMAC_MAKE),yes)
 unexport $(FRAMAC_MAKE)
 endif
 
+.PHONY: version.ml
+
 version.ml:
 	$(eval COMMIT:=$(shell git show-ref master | head -n 1 | cut -d ' ' -f 1))
 	$(eval DATE:=$(shell date -R))
-	@printf "let commit = \"$(COMMIT)\"" >> $@
+	@printf "[@@@warning \"-32\"]\n" >$@
+	@printf "let commit = \"$(COMMIT)\"\n" >> $@
 	@printf "let date = \"$(DATE)\"" >> $@
 
 $(PLUGIN_DIR)/%.cmo:
