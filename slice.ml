@@ -816,7 +816,7 @@ module Make (Analysis : Region.Analysis) = struct
     module H_int = Datatype.Int.Hashtbl
 
     class sweeper () =
-      let required_bodies, main_filter =
+      let required_bodies, main_def, main_filter =
         let open Kernel_function in
         let result = H.create 256 in
         H.(iter
@@ -829,10 +829,10 @@ module Make (Analysis : Region.Analysis) = struct
              | No_Definition -> ())
           (Analyze.get_addressed_kfs ());
         match get_definition @@ Globals.Functions.find_by_name @@ Kernel.MainFunction.get () with
-        | d                  -> H.add result d (); result, Some (H.find filters d)
+        | d                  -> H.add result d (); result, Some d, Some (H.find filters d)
         | exception
             (Not_found
-            | No_Definition) ->                    result, None
+            | No_Definition) ->                    result, None, None
       in
       let irrelevant_lines = H_int.create 2048 in
       let del_stmt, del_var =
@@ -852,7 +852,7 @@ module Make (Analysis : Region.Analysis) = struct
            | _                                -> del_loc (Stmt.loc s)),
         del_loc ?no:None
       in
-      object
+      object(self)
         val mutable eff = I.E.create dummy_flag (emptyFunction "")
 
         method iter_irrelevant_lines f = H_int.iter f irrelevant_lines
@@ -868,6 +868,7 @@ module Make (Analysis : Region.Analysis) = struct
 
         method! vstmt_aux s =
           if not (I.E.has_stmt_req' s eff)
+          && not (opt_equal Fundec.equal main_def self#current_func && match s.skind with Return _ -> true | _ -> false)
           then begin
             del_stmt s;
             if Options.Use_ghosts.is_set ()
