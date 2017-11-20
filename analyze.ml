@@ -52,6 +52,13 @@ class direct_call_skipping_visitor = object(self)
       [@warning "-4"]
     | Call (lv, { enode = Lval (Var vi, NoOffset); _ }, args, _)
       when Kf.mem vi                                             -> avoid_direct_call lv args
+    | Local_init (vi, ConsInit (f, args, Plain_func), _)
+      when Kf.mem f                                              -> avoid_direct_call (some @@ var vi) args
+    | Local_init (_, ConsInit (_, _, Constructor), _)            -> Console.fatal "direct_skipping_visitor: C++ \
+                                                                                   constructors are unsupported"
+    | Local_init (_,
+                  (AssignInit _
+                  | ConsInit (_, _, Plain_func)), _)
     | Call _ | Set _ | Asm _ | Skip _ | Code_annot _             -> DoChildren
 end
 
@@ -107,15 +114,22 @@ let get_cg =
         let kf = the self#current_kf in
         begin match[@warning "-4"] i with
         | Call (_, { enode = Lval (Var vi, NoOffset); _ }, _, _)
+        | Local_init (_, ConsInit (vi, _, Plain_func), _)
           when Kf.mem vi                                         -> Cg.add_edge g kf (Globals.Functions.get vi)
+        | Local_init (_, ConsInit (_, _, Plain_func), _)         -> assert false (*
+                                                                      Indirect calls should not be encoded this way,
+                                                                      they should use Call with *vi *)
         | Call (_, e, _, _)                                      -> List.iter
                                                                       (fun kf' -> Cg.add_edge_e g (kf, `Approx, kf'))
                                                                       (callee_approx ?callee_approx:approx e)
+        | Local_init (_, ConsInit (_, _, Constructor), _)        -> Console.fatal "direct_skipping_visitor: C++ \
+                                                                                   constructors are unsupported"
+        | Local_init (_, AssignInit _, _)
         | _                                                      -> ()
         end;
         SkipChildren
     end)
-  (Ast.get ());
+    (Ast.get ());
   g, main
 
 let condensate =
@@ -137,8 +151,8 @@ let condensate =
     let l = Components.scc_list g in
     Cg.iter_edges_e
       (function
-        | f1, `Approx, f2 as e -> if not (Cg.mem_edge_e g (f1, `Precise, f2)) then Cg.remove_edge_e g e
-        | _                    -> ())
+      | f1, `Approx, f2 as e -> if not (Cg.mem_edge_e g (f1, `Precise, f2)) then Cg.remove_edge_e g e
+      | _                    -> ())
       g;
     let _, f = Components.scc g in
     List.(map @@ sort (fun f1 f2 -> f f1 - f f2)) l
@@ -149,22 +163,22 @@ let condensate =
 let cache_offsets =
   let open List in
   let module H = Hashtbl.Make
-      (struct
-        type t = (fieldinfo * typ) Info.offs
-        let rec hash =
-          function
-          | []                               -> 1
-          | `Field fi :: os                  -> 13 * hash os + 7 * Fieldinfo.hash fi + 5
-          | `Container_of_void (_, ty) :: os -> 13 * hash os + 7 * Typ.hash ty       + 3
-        let rec equal p1 p2 =
-          match p1, p2 with
-          | [],                                 []                                 -> true
-          | `Field fi1                  :: os1, `Field fi2                  :: os2
-            when Fieldinfo.equal fi1 fi2                                           -> equal os1 os2
-          | `Container_of_void (_, ty1) :: os1, `Container_of_void (_, ty2) :: os2
-            when Typ.equal ty1 ty2                                                 -> equal os1 os2
-          | _                                                                      -> false
-      end)
+                   (struct
+                     type t = (fieldinfo * typ) Info.offs
+                     let rec hash =
+                       function
+                       | []                               -> 1
+                       | `Field fi :: os                  -> 13 * hash os + 7 * Fieldinfo.hash fi + 5
+                       | `Container_of_void (_, ty) :: os -> 13 * hash os + 7 * Typ.hash ty       + 3
+                     let rec equal p1 p2 =
+                       match p1, p2 with
+                       | [],                                 []                                 -> true
+                       | `Field fi1                  :: os1, `Field fi2                  :: os2
+                         when Fieldinfo.equal fi1 fi2                                           -> equal os1 os2
+                       | `Container_of_void (_, ty1) :: os1, `Container_of_void (_, ty2) :: os2
+                         when Typ.equal ty1 ty2                                                 -> equal os1 os2
+                       | _                                                                      -> false
+                   end)
   in
   let h = H.create 4096 in
   let negate off = Integer.(rem (neg off) @@ add (max_unsigned_number @@ theMachine.theMachine.sizeof_ptr lsl 3) one) in
@@ -335,30 +349,37 @@ module Goto_handling = struct
           match s.skind with
           | Instr _
           | Return _
-          | If _ | Switch _ | Loop _
+          | If _ | Switch _
           | Block _
-          | UnspecifiedSequence _
+          | UnspecifiedSequence _ ->                                                        DoChildren
+
+          | Loop _                ->(let next' = next in
+                                     next <- s;                                             DoChildrenPost
+                                                                                              (fun s ->
+                                                                                                 next <- next'; s))
+
           | Throw _ | TryCatch _
-          | TryFinally _ | TryExcept _ -> DoChildren
+          | TryFinally _
+          | TryExcept _           -> Console.fatal "goto_visitor: C++ throw/try-catch/finally/except clauses \
+                                                    are unsupported"
 
           | AsmGoto _
           | Goto _
           | Break _
-          | Continue _                 ->
-            H.replace info.goto_next s next;
-            let sep, deps = separate return ~s':next s in
-            Console.debug ~level:4 "Found separator for statement %a@@L%d : %a@@L%d"
-              pp_stmt s (Stmt.lnum s) pp_stmt sep (Stmt.lnum sep);
-            let vi =
-              makeTempVar
-                ~insert:true
-                ~name:("goto_at_L" ^ string_of_int @@ Stmt.lnum s)
-                (Kernel_function.get_definition kf)
-                (TInt (IInt, []))
-            in
-            H.replace info.goto_vars s vi;
-            List.iter (fun s -> H.add info.stmt_vars s vi) deps;
-            SkipChildren
+          | Continue _            ->(H.replace info.goto_next s next;
+                                     let sep, deps = separate return ~s':next s in
+                                     Console.debug ~level:4
+                                       "Found separator for statement %a@@L%d : %a@@L%d"
+                                       pp_stmt s (Stmt.lnum s) pp_stmt sep (Stmt.lnum sep);
+                                     let vi =
+                                       makeTempVar
+                                         ~insert:true
+                                         ~name:("goto_at_L" ^ string_of_int @@ Stmt.lnum s)
+                                         (Kernel_function.get_definition kf)
+                                         (TInt (IInt, []))
+                                     in
+                                     H.replace info.goto_vars s vi;
+                                     List.iter (fun s -> H.add info.stmt_vars s vi) deps;   SkipChildren)
       end
   end
 end

@@ -57,8 +57,14 @@ let (%>) f g x = g (f x)
 let (!!) = Lazy.force
 let const f _x = f
 let const' f x _y = f x
-let curry f a b = f (a, b)
+let const2 c _ _ = c
+let const3 c _ _ _ = c
+let const4 c _ _ _ _ = c
+let ignore2 _ _ = ()
+let ignore3 _ _ _ = ()
+let ignore4 _ _ _ _  = ()
 
+let curry f a b = f (a, b)
 let on cond f x = if cond x then f x else ()
 let tap f e = f e; e
 

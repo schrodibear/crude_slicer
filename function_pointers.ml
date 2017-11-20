@@ -84,18 +84,21 @@ module Make (R : Region.Analysis) = struct
       method finish = ()
       method! vstmt s =
         match s.skind with
-        | Instr (Call _)           -> List.iter
-                                        (snd %>
-                                         R.H_map.iter
-                                           (fun u' u ->
-                                              let from, u =
-                                                match dir with
-                                                | `Forward  -> u,  u'
-                                                | `Backward -> u', u
-                                              in
-                                              H.import approx ~from u))
-                                        (R.maps s);                     SkipChildren
-        | _                        ->                                   DoChildren
+        | Instr (Call _)
+        | Instr
+            (Local_init
+               (_, ConsInit (_, _, Plain_func), _)) -> List.iter
+                                                         (snd %>
+                                                          R.H_map.iter
+                                                            (fun u' u ->
+                                                               let from, u =
+                                                                 match dir with
+                                                                 | `Forward  -> u,  u'
+                                                                 | `Backward -> u', u
+                                                               in
+                                                               H.import approx ~from u))
+                                                         (R.maps s);                     SkipChildren
+        | _                                         ->                                   DoChildren
     end in
     fun () ->
       Console.debug "Started function pointer approximation...";
@@ -106,7 +109,6 @@ module Make (R : Region.Analysis) = struct
         (object
           inherit f_opt_visitor funcs
           inherit! Analyze.direct_call_skipping_visitor
-
 
           method! vvrbl vi =
             begin match Globals.Functions.get vi with
@@ -193,10 +195,12 @@ let rewrite ~callee_approx =
         | Instr
             (Call
                (_,
-                { enode = Lval (Var vi, NoOffset); _ },
+                { enode = Lval (Var f, NoOffset); _ },
                 _,
-                _))
-          when Kf.mem vi                                 ->                                                SkipChildren
+                _)
+            | Local_init
+                (_, ConsInit (f, _, Plain_func), _))
+          when Kf.mem f                                  ->                                                SkipChildren
         | Instr (Call (lvo, e, args, loc))               -> approx (the self#current_kf) s lvo e args loc; SkipChildren
         | _                                              ->                                                DoChildren
     end)

@@ -41,6 +41,14 @@ module Make (Analysis : Region.Analysis) = struct
     let h = H.create 64 in
     fun ~loc lv -> H.memo h lv @@ fun lv -> Mem (new_exp ~loc @@ Lval lv), NoOffset
 
+  let rec fold_init f acc lv =
+    function
+    | SingleInit e            -> f acc lv e
+    | CompoundInit (_, inits) -> List.fold_left
+                                   (fun acc (off, init) -> fold_init f acc (addOffsetLval off lv) init)
+                                   acc
+                                   inits
+
   let is_var_sating p e =
     match (stripCasts e).enode with
     | Lval (Var v, NoOffset) when p v -> true
@@ -60,7 +68,7 @@ module Make (Analysis : Region.Analysis) = struct
       include Analysis.R
       include Analysis
       let of_var,    of_lval,    of_expr,    relevant_region,    arg_regions =
-          of_var ~f, of_lval ~f, of_expr ~f, relevant_region ~f, arg_regions ~f
+        of_var ~f, of_lval ~f, of_expr ~f, relevant_region ~f, arg_regions ~f
     end
     module U = Analysis.U
 
@@ -110,7 +118,7 @@ module Make (Analysis : Region.Analysis) = struct
         match lastOffset off with
         | Field (fi, NoOffset)
           when fi.faddrof
-             || not fi.fcomp.cstruct -> unless_comp fi.ftype R.(fun () -> w_mem @@ location @@ of_lval lv)
+            || not fi.fcomp.cstruct -> unless_comp fi.ftype R.(fun () -> w_mem @@ location @@ of_lval lv)
         | Field (fi, NoOffset)       -> unless_comp fi.ftype R.(fun () -> w_mem ~fi @@ location @@ of_lval lv)
         | Field _                    -> assert false
         | Index (_, NoOffset)        -> deref_mem R.(location @@ of_lval lv)
@@ -164,8 +172,8 @@ module Make (Analysis : Region.Analysis) = struct
                            (fun ty'' u'' ->
                               let r'' = U.repr u'' in
                               if not (R.equal r' r'')
-                                 && List.for_all isArithmeticOrPointerType [R.typ r'; R.typ r'']
-                                 && Ty.(snd @@ deref ty' = snd @@ deref ty'') then begin
+                              && List.for_all isArithmeticOrPointerType [R.typ r'; R.typ r'']
+                              && Ty.(snd @@ deref ty' = snd @@ deref ty'') then begin
                                 if A.mem (w_mem u') assigns || A.mem (w_mem u'') assigns then begin
                                   A.add_some (w_mem u')  (r_mem u'') assigns;
                                   A.add_some (w_mem u'') (r_mem u')  assigns
@@ -193,22 +201,22 @@ module Make (Analysis : Region.Analysis) = struct
           | Some (e, _), _
           | _,           Some (e, _) -> do_expr e;             SkipChildren
           | None,        None        ->
-              match e.enode with
-              | AddrOf  (Mem e, off)
-              | StartOf (Mem e, off) -> do_expr e; do_off off; SkipChildren
-              | Const _
-              | SizeOf _
-              | SizeOfStr _
-              | SizeOfE _
-              | AlignOf _
-              | AlignOfE _
-              | AddrOf _
-              | StartOf _            ->                        SkipChildren
-              | Lval _
-              | UnOp _
-              | BinOp _
-              | CastE  _
-              | Info _               ->                        DoChildren
+            match e.enode with
+            | AddrOf  (Mem e, off)
+            | StartOf (Mem e, off) -> do_expr e; do_off off; SkipChildren
+            | Const _
+            | SizeOf _
+            | SizeOfStr _
+            | SizeOfE _
+            | AlignOf _
+            | AlignOfE _
+            | AddrOf _
+            | StartOf _            ->                        SkipChildren
+            | Lval _
+            | UnOp _
+            | BinOp _
+            | CastE  _
+            | Info _               ->                        DoChildren
 
       method! vlval lv =
         f lv;
@@ -231,9 +239,12 @@ module Make (Analysis : Region.Analysis) = struct
     let prj_poly_var s params =
       let args =
         match s.skind with
-        | Instr (Call (_, _, args, _)) -> args
-        | _                            -> Console.fatal "Slice.project_reads: need the proper function call site: %a"
-                                            pp_stmt s
+        | Instr
+            (Call (_, _, args, _)
+            | Local_init (_, ConsInit (_, args, Plain_func), _)) -> args
+        | _                                                      -> Console.fatal "Slice.project_reads: need a proper \
+                                                                                   function call site: %a"
+                                                                      pp_stmt s
       in
       let open List in
       let args = take (length params) args in
@@ -312,19 +323,159 @@ module Make (Analysis : Region.Analysis) = struct
         F.iter import_reads reads;
         if result_dep then import_reads `Result
 
-    let is_tracking_var eff v = isVoidPtrType v.vtype && I.E.is_tracking_var (Void_ptr_var.of_varinfo v) eff
+    module type Actions = sig
+      val start : unit -> unit
+      val finish : unit -> unit
+      val is_tracking_var : varinfo -> bool
+      val start_tracking : stmt -> lval -> varinfo -> exp -> unit
+      val assign : stmt -> lval -> exp -> unit
+      val init : stmt -> lval -> init -> unit
+      val return : stmt -> exp option -> unit
+      val call : stmt -> ?lv:lval -> varinfo -> exp list -> unit
+      val icall : stmt -> ?lv:lval -> exp -> exp list -> unit
+      val alloc : stmt -> lval -> exp -> unit
+      val goto : stmt -> unit
+      val reach_target : stmt -> unit
+      val assume : stmt -> exp -> unit
+      val unreach : stmt -> unit
+      val if_ : stmt -> exp -> block -> block -> stmt visitAction
+      val switch : stmt -> exp -> block -> stmt visitAction
+      val block : stmt -> block -> stmt visitAction
+      val unordered : stmt -> (stmt * lval list * lval list * lval list * stmt ref list) list -> stmt visitAction
+    end
 
-    module Collect (M : sig val from : stmt -> F.t val info : I.t val eff : (A.t, F.t) I.E.t end) = struct
+    let visitor (module M : Actions) =
+      let open M in
+      let alloc' s ?lv f arg args =
+        let call () = call s ?lv f (arg :: args) in
+        begin match lv with
+        | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype ->(start_tracking s lv v arg;
+                                                                     call ())
+        | Some lv when not (isVoidPtrType @@ typeOfLval lv)       ->(alloc s lv arg;
+                                                                     call ())
+        | Some _                                                  -> call ()
+        (* ^^^ Unsound! Struct fields should be supported as tracking fields!
+            Or full support for reinterpretation should be implemented.    *)
+        | None                                                    -> ()
+        end;
+      in
+      object
+        method start = start ()
+        method finish = finish ()
+
+        inherit frama_c_inplace
+
+        method! vstmt s =
+          match s.skind with
+          | Instr (Set ((Var v, NoOffset as lv), e, _))
+            when isVoidPtrType v.vtype
+              && is_var_sating is_tracking_var e                       -> start_tracking s lv v e;      SkipChildren
+          | Instr (Set (lv, e, _))
+            when is_var_sating is_tracking_var e
+              && not (isVoidPtrType @@ typeOfLval lv)                  -> alloc s lv e;                 SkipChildren
+          | Instr (Set (lv, e, _))                                     -> assign s lv e;                SkipChildren
+          | Instr (Local_init (vi, AssignInit i, _))                   -> init s (var vi) i;            SkipChildren
+          | Instr (Call
+                     (_,
+                      { enode = Lval (Var f, NoOffset); _ },
+                      _, _))
+            when Options.Target_functions.mem f.vname                  -> reach_target s;               SkipChildren
+          | Instr (Call
+                     (lv,
+                      { enode = Lval (Var f, NoOffset) },
+                      (arg :: args), _))
+            when Options.Alloc_functions.mem f.vname                   -> alloc' s ?lv f arg args;      SkipChildren
+          | Instr (Local_init
+                     (vi, ConsInit (f, arg :: args, Plain_func), _))
+            when Options.Alloc_functions.mem f.vname                   -> alloc'
+                                                                            s
+                                                                            ~lv:(var vi)
+                                                                            f
+                                                                            arg
+                                                                            args;                       SkipChildren
+
+          | Instr (Call (_,
+                         { enode = Lval (Var f, NoOffset) }, [e], _))
+            when Options.Assume_functions.mem f.vname                  -> assume s e;                   SkipChildren
+          | Instr (Call (_,
+                         { enode = Lval (Var f, NoOffset) }, [], _))
+            when Options.Path_assume_functions.mem f.vname             -> unreach s;                    SkipChildren
+          | Instr (Call (lv,
+                         { enode = Lval (Var f, NoOffset) },
+                         args, _))                                     -> call s ?lv f args;            SkipChildren
+          | Instr (Local_init (vi, ConsInit (f, args, Plain_func), _)) -> call s ~lv:(var vi) f args;   SkipChildren
+          | Instr (Call (lv, e, args, _))                              -> icall s ?lv e args;           SkipChildren
+          | Instr (Local_init (_, ConsInit (_, _, Constructor), _) )   -> Console.fatal
+                                                                            "collector: C++ constructors \
+                                                                             are unsupported"
+          | Instr (Asm _ | Skip _ | Code_annot _)                      ->                               SkipChildren
+          | Return (e, _)                                              -> return s e;                   SkipChildren
+          | Goto _ | AsmGoto _ | Break _ | Continue _                  -> goto s;                       SkipChildren
+          | If (e, b1, b2, _)                                          -> if_ s e b1 b2
+          | Switch (e, b, _, _)                                        -> switch s e b
+          | Loop (_, b, _, _, _) | Block b                             -> block s b
+          | UnspecifiedSequence ss                                     -> unordered s ss
+          | Throw _ | TryCatch _ | TryFinally _ | TryExcept _          -> Console.fatal
+                                                                            "Unsupported features: exceptions \
+                                                                             and their handling"
+      end
+
+    module type Info = sig val info : I.t end
+
+    module type From = sig
+      val info : I.t
+      val from : stmt -> F.t
+      val do_children_under : exp -> stmt visitAction
+    end
+
+    module From (M : Info) : From = struct
+      include M
+      let under = Stack.create ()
+      let from =
+        let from = F.create dummy_flag in
+        fun s ->
+          F.clear from;
+          List.iter
+            (fun vi -> F.add_local_var (Local.Var.of_varinfo vi) from)
+            (H_stmt_conds.find_all M.info.stmt_vars s);
+          Stack.iter (fun from' -> F.import ~from:from' from) under;
+          from
+
+      let do_children_under e =
+        let r = F.create dummy_flag in
+        add_from_rval e r;
+        Stack.push r under;
+        DoChildrenPost (fun s -> ignore @@ Stack.pop under; s)
+    end
+
+    module Eff (M : Info ) = struct
+      let eff = extract M.info
+      open I.E
+      let assigns = assigns eff
+      let depends = depends eff
+      let has_result_dep () = has_result_dep eff
+      let has_stmt_req s = has_stmt_req s eff
+      let add_stmt_req s = add_stmt_req s eff
+      let has_body_req f = has_body_req f eff
+      let add_body_req f = add_body_req f eff
+      let set_is_target () = set_is_target eff
+      let is_tracking_var v = isVoidPtrType v.vtype && is_tracking_var (Void_ptr_var.of_varinfo v) eff
+      let add_tracking_var v = add_tracking_var v eff
+    end
+
+    module Collect (M : From) : Actions = struct
       open M
-      let assigns = I.E.assigns eff
-      let depends = I.E.depends eff
-      let set_is_target () = I.E.set_is_target eff
+      include Eff (M)
 
-      let add_transitive_closure () = add_transitive_closure assigns
-      let complement () = complement assigns depends
-      let close_depends () = close_depends assigns depends (I.E.has_result_dep eff)
-
-      let is_tracking_var = is_tracking_var eff
+      let start () = ()
+      let finish =
+        let add_transitive_closure () = add_transitive_closure assigns in
+        let close_depends () = close_depends assigns depends (has_result_dep ()) in
+        let complement () = complement assigns depends in
+        fun () ->
+          add_transitive_closure ();
+          close_depends ();
+          complement ()
 
       let comp_assign lv e from =
         let r_lv, r_e =
@@ -343,7 +494,6 @@ module Make (Analysis : Region.Analysis) = struct
              A.add_some w (r_mem ?fi @@ R.take path r_e) assigns;
              A.import_values w from assigns)
           (Ci.offsets ci)
-
       let gassign lv ?e from =
         add_from_lval lv from;
         may (fun e -> add_from_rval e from) e;
@@ -351,8 +501,8 @@ module Make (Analysis : Region.Analysis) = struct
         match w_lval lv with
         | Some w -> A.import_values w from assigns
         | None   -> comp_assign lv e from
-
       let assign s lv e = gassign lv ~e (from s)
+      let init s = fold_init (const @@ assign s) ()
       let return s eo =
         let from = from s in
         may
@@ -362,9 +512,10 @@ module Make (Analysis : Region.Analysis) = struct
              | TComp _ -> comp_assign (var @@ R.retvar @@ Kernel_function.get_vi C.f) e from
              | _       -> A.import_values `Result from assigns)
           eo
-      let reach_target s =
-        F.import ~from:(from s) depends;
-        set_is_target ()
+
+      let start_tracking s lv v arg =
+        assign s lv arg;
+        add_tracking_var @@ Void_ptr_var.of_varinfo v
 
       let call s ?lv ?e kf =
         let from = from s in
@@ -393,13 +544,6 @@ module Make (Analysis : Region.Analysis) = struct
              add_from_lval lv from;
              gassign lv from)
           lv
-
-      let alloc s lv e =
-        let from = from s in
-        let lv' = deref ~loc:(Stmt.loc s) lv in
-        add_from_rval e from;
-        gassign lv from;
-        gassign lv' from
       let stub s ?lv es =
         let from = from s in
         may
@@ -407,7 +551,33 @@ module Make (Analysis : Region.Analysis) = struct
              List.iter (fun e -> add_from_rval e from) es;
              gassign lv from)
           lv
+      let icall s ?lv e args =
+        let kfs = Analyze.callee_approx ?callee_approx e in
+        begin match kfs with
+        | []  -> stub s ?lv args
+        | kfs -> List.iter
+                   (fun kf ->
+                      if Kernel_function.is_definition kf
+                      then call s ?lv ~e kf
+                      else stub s ?lv args)
+                   kfs
+        end
+      let call s ?lv f args =
+        match Globals.Functions.get f with
+        | kf when Kernel_function.is_definition kf -> call s ?lv kf
+        | _                                        -> stub s ?lv args
+        | exception Not_found                      -> stub s ?lv args
+      let alloc s lv e =
+        let from = from s in
+        let lv' = deref ~loc:(Stmt.loc s) lv in
+        add_from_rval e from;
+        gassign lv from;
+        gassign lv' from
+
       let goto s = F.import ~from:(from s) @@ A.find (w_var @@ H_stmt.find info.goto_vars s) assigns
+      let reach_target s =
+        F.import ~from:(from s) depends;
+        set_is_target ()
       let import_trans ~from =
         let from' = F.copy dummy_flag from in
         F.iter (fun r -> F.import ~from:(A.find r assigns) from') from;
@@ -420,124 +590,83 @@ module Make (Analysis : Region.Analysis) = struct
       let unreach s =
         let from = from s in
         import_trans ~from
+
+      let if_ _ e _ _ = do_children_under e
+      let switch _ e _ = do_children_under e
+      let block _ _ = DoChildren
+      let unordered = block
     end
 
-    let collector info =
-      let eff = extract info in
-      let under = Stack.create () in
-      let from =
-        let from = F.create dummy_flag in
-        fun s ->
-          F.clear from;
-          List.iter
-            (fun vi -> F.add_local_var (Local.Var.of_varinfo vi) from)
-            (H_stmt_conds.find_all info.stmt_vars s);
-          Stack.iter (fun from' -> F.import ~from:from' from) under;
-          from
-      in
-      let module Collect = Collect (struct let from, info, eff = from, info, eff end) in
-      let open Collect in
-      object
-        method start = ()
-        method finish =
-          add_transitive_closure ();
-          close_depends ();
-          complement ()
+    let collector info = visitor (module Collect (From (struct let info = info end)))
 
-        inherit frama_c_inplace
+    module type Decide = sig
+      val info : I.t
+      val mark : stmt -> unit
+      val decide : stmt -> [< W.t] list -> unit
+      val surround : stmt -> stmt list -> unit
+    end
 
-        method! vstmt =
-          let start_tracking s lv v arg =
-            assign s lv arg;
-            I.E.add_tracking_var (Void_ptr_var.of_varinfo v) eff
-          in
-          let do_children_under e =
-            let r = F.create dummy_flag in
-            add_from_rval e r;
-            Stack.push r under;
-            DoChildrenPost (fun s -> ignore @@ Stack.pop under; s)
-          in
-          fun s ->
-            match s.skind with
-            | Instr (Set ((Var v, NoOffset as lv), e, _))
-              when isVoidPtrType v.vtype
-                && is_var_sating is_tracking_var e                       -> start_tracking s lv v e;      SkipChildren
-            | Instr (Set (lv, e, _))
-              when is_var_sating is_tracking_var e
-                && not (isVoidPtrType @@ typeOfLval lv)                  -> alloc s lv e;                 SkipChildren
-            | Instr (Set (lv, e, _))                                     -> assign s lv e;                SkipChildren
-            | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _))
-              when Options.Target_functions.mem vi.vname                 -> reach_target s;               SkipChildren
-            | Instr (Call (lv,
-                           { enode = Lval (Var vi, NoOffset) },
-                           (arg :: _ as args),
-                           _))
-              when Options.Alloc_functions.mem vi.vname                  ->
-              let call () =
-                if Kf.mem_definition vi
-                then call s ?lv (Globals.Functions.get vi)
-                else stub s ?lv args
-              in
-              begin match lv with
-              | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype  ->(start_tracking s lv v arg;
-                                                                            call ();                      SkipChildren)
-              | Some lv when not (isVoidPtrType @@ typeOfLval lv)        ->(alloc s lv arg;
-                                                                            call ();                      SkipChildren)
-              | Some _                                                   -> call ();                      SkipChildren
-              (* ^^^
-                 Unsound! Struct fields should be supported as tracking fields!
-                 Or full support for reinterpretation should be implemented.    *)
-              | None                                                     ->                               SkipChildren
-              end;
-            | Instr (Call (_,
-                           { enode = Lval (Var vi, NoOffset) }, [e], _))
-              when Options.Assume_functions.mem vi.vname                 -> assume s e;                   SkipChildren
-            | Instr (Call (_,
-                           { enode = Lval (Var vi, NoOffset) }, [], _))
-              when Options.Path_assume_functions.mem vi.vname            -> unreach s;                    SkipChildren
-            | Instr (Call (lv,
-                           { enode = Lval (Var vi, NoOffset) },
-                           _, _))
-              when Kf.mem_definition vi                                  -> call
-                                                                              s
-                                                                              ?lv
-                                                                              (Globals.Functions.get vi); SkipChildren
-            | Instr (Call (lv,
-                           { enode = Lval (Var _, NoOffset) },
-                           args, _))                                     -> stub s ?lv args;              SkipChildren
-            | Instr (Call (lv, e, args, _))                              ->
-              let kfs = Analyze.callee_approx ?callee_approx e in
-              begin match kfs with
-              | []                                                       -> stub s ?lv args;              SkipChildren
-              | kfs                                                      -> List.iter
-                                                                              (fun kf ->
-                                                                                 if Kernel_function.
-                                                                                      is_definition kf
-                                                                                 then call s ?lv ~e kf
-                                                                                 else stub s ?lv args)
-                                                                              kfs;                        SkipChildren
-              end
-            | Instr (Asm _ | Skip _ | Code_annot _)                      ->                               SkipChildren
-            | Return (e, _)                                              -> return s e;                   SkipChildren
-            | Goto _ | AsmGoto _ | Break _ | Continue _                  -> goto s;                       SkipChildren
-            | If (e, _, _, _) | Switch (e, _, _, _)                      -> do_children_under e
-            | Loop _  | Block _ | UnspecifiedSequence _                  ->                               DoChildren
-            | Throw _ | TryCatch _ | TryFinally _ | TryExcept _          -> failwith
-                                                                              "Unsupported features: exceptions \
-                                                                               and their handling"
-      end
+    module Decide (M : sig val info : I.t end) : Decide = struct
+      include M
+      include Eff (M)
 
-    module Mark
-        (M : sig val decide : [< W.t] list -> [ `Needed | `Not_yet ] val info : I.t val eff : (A.t, F.t) I.E.t end) =
-    struct
+      let mark s =
+        add_stmt_req s;
+        match s.skind with
+        | Instr (Call (_, { enode = Lval (Var vi, NoOffset); _ }, _, _))
+        | Instr (Local_init (_, ConsInit (vi, _, Plain_func), _))        ->
+          begin try                                                         add_body_req
+                                                                              (Kernel_function.get_definition @@
+                                                                               Globals.Functions.get vi)
+          with
+          | Kernel_function.No_Definition                                -> ()
+          end
+        | _                                                              -> ()
+
+      let decide s =
+        let intersects =
+          let reads = F.create dummy_flag in
+          fun l ->
+            F.clear reads;
+            List.iter
+              (function
+              | `Result          -> ()
+              | #W.readable as w -> F.(add_some (of_write w) reads))
+              l;
+            F.intersects reads depends
+        in
+        let rec mem_result =
+          function
+          | []           -> false
+          | `Result :: _ -> true
+          | #W.t  :: xs  -> mem_result xs
+        in
+        function
+        | []                                     -> ()
+        | [`Result]
+          when has_result_dep ()                 -> mark s
+        | [`Result]                              -> ()
+        | [#W.readable as w]
+          when F.(mem_some (of_write w) depends) -> mark s
+        | [#W.readable]                          -> ()
+        | (l : [< W.t] list)
+          when has_result_dep () && mem_result l
+            || intersects l                      -> mark s
+        | _                                      -> ()
+
+      let surround s stmts = if List.exists has_stmt_req stmts then add_stmt_req s
+    end
+
+    module Mark (M : Decide) : Actions = struct
       open M
-      let assigns = I.E.assigns eff
-      let depends = I.E.depends eff
+      include Eff (M)
 
-      let complement () = complement assigns depends
-      let close_depends () = close_depends assigns depends (I.E.has_result_dep eff)
-
-      let is_tracking_var = is_tracking_var eff
+      let start () =
+        let close_depends () = close_depends assigns depends (has_result_dep ()) in
+        let complement () = complement assigns depends in
+        close_depends ();
+        complement ()
+      let finish () = ()
 
       let comp_assign lv =
         let r_lv = R.(location @@ of_lval lv) in
@@ -548,11 +677,11 @@ module Make (Analysis : Region.Analysis) = struct
                                    pp_lval lv pp_typ ty
         in
         List.map (fun (path, fi) -> w_mem ?fi @@ R.take path r_lv) (Ci.offsets ci)
-
       let gassign lv = match w_lval lv with Some w -> [w] | None -> comp_assign lv
-      let assign = decide % gassign
-      let return eo =
-        decide @@
+      let assign s = const' @@ decide s % gassign
+      let init s = decide s %% fold_init (const @@ const' gassign) []
+      let return s eo =
+        decide s @@
         may_map
           (fun e ->
              match e.enode, unrollType @@ typeOf e with
@@ -562,6 +691,9 @@ module Make (Analysis : Region.Analysis) = struct
              | _                -> [`Result])
           ~dft:[]
           eo
+
+      let start_tracking = ignore4
+
       let call s ?lv kf =
         let I.E.Some { local = (module L');
                        eff = eff' } =
@@ -586,153 +718,44 @@ module Make (Analysis : Region.Analysis) = struct
             (I.E.assigns eff')
             []
         in
-        if I.E.is_target eff' then `Needed else decide writes
+        if I.E.is_target eff' then mark s else decide s writes
+      let stub s = may (decide s % gassign)
+      let icall s ?lv e _args =
+        let kfs = Analyze.callee_approx ?callee_approx e in
+        match kfs with
+        | []  -> stub s lv
+        | kfs ->(let kfs =
+                   List.filter
+                     (fun kf ->
+                        if Kernel_function.is_definition kf
+                        then (call s ?lv kf; has_body_req (Kernel_function.get_definition kf))
+                        else (stub s lv;     false))
+                     kfs
+                 in
+                 may Exp.(fun approx -> Hashtbl.replace approx (underef_mem e) kfs) callee_approx)
+      let call s ?lv f _args =
+        match Globals.Functions.get f with
+        | kf when Kernel_function.is_definition kf -> call s ?lv kf
+        | _                                        -> stub s lv
+        | exception Not_found                      -> stub s lv
+      let alloc s lv _ = decide s @@ gassign lv @ gassign (deref ~loc:(Stmt.loc s) lv)
 
-      let alloc ~loc lv = decide @@ gassign lv @ gassign (deref ~loc lv)
-      let stub = may_map (decide % gassign) ~dft:`Not_yet
-      let goto s = decide @@ [`Local_var (Local.Var.of_varinfo @@ H_stmt.find info.goto_vars s)]
-      let assume e =
+      let goto s = decide s [`Local_var (Local.Var.of_varinfo @@ H_stmt.find info.goto_vars s)]
+      let reach_target  = mark
+      let assume s e =
         let r = ref [] in
         visit_rval (fun lv -> may (fun w -> r := w :: !r) @@ w_lval lv) e;
-        decide !r
-      let unreach = `Needed
+        decide s !r
+      let unreach = mark
+
+      let block s b = surround s b.bstmts
+      let if_ s _ b1 b2 = DoChildrenPost (fun s' -> block s b1; block s b2; s')
+      let block s b = DoChildrenPost (fun s' -> block s b; s')
+      let switch s _ = block s
+      let unordered s ss = DoChildrenPost (fun s' -> surround s @@ List.map (fun (s, _, _, _, _) -> s) ss; s')
     end
 
-    let marker info =
-      let eff = extract info in
-      let depends = I.E.depends eff in
-      let has_result_dep () = I.E.has_result_dep eff in
-      let reads = F.create dummy_flag in
-      let decide =
-        let decide needed = if needed then `Needed else `Not_yet in
-        let single w = decide F.(mem_some (of_write w) depends) in
-        let intersects l =
-          F.clear reads;
-          List.iter
-            (function
-              | `Result          -> ()
-              | #W.readable as w -> F.(add_some (of_write w) reads))
-            l;
-          F.intersects reads depends
-        in
-        let rec mem_result =
-          function
-          | []           -> false
-          | `Result :: _ -> true
-          | #W.t  :: xs  -> mem_result xs
-        in
-        function
-        | []                               -> `Not_yet
-        | [`Result] when has_result_dep () -> `Needed
-        | [`Result]                        -> `Not_yet
-        | [#W.readable as w]               -> single w
-        | (l : [< W.t] list)               -> decide (has_result_dep () && mem_result l || intersects l)
-      in
-      let module Mark = Mark (struct let decide, info, eff = decide, info, eff end) in
-      let open Mark in
-      object
-        method start =
-          close_depends ();
-          complement ()
-        method finish = ()
-
-        inherit frama_c_inplace
-        method! vstmt s =
-          let mark vi =
-            I.E.add_stmt_req s eff;
-            may
-              (fun vi ->
-                 try
-                   I.E.add_body_req (Kernel_function.get_definition @@ Globals.Functions.get vi) eff
-                 with
-                 | Kernel_function.No_Definition -> ())
-              vi
-          in
-          let stmt ?vi verdict =
-            begin match verdict with
-            | `Not_yet -> ()
-            | `Needed  -> mark vi
-            end;
-            SkipChildren
-          in
-          let try_all e f l =
-            let kfs = List.filter (fun kf -> match f kf with `Needed -> true | `Not_yet -> false) l in
-            may Exp.(fun approx -> Hashtbl.replace approx (underef_mem e) kfs) callee_approx;
-            List.iter (mark % some % Kernel_function.get_vi) kfs;
-            SkipChildren
-          in
-          let stmts stmts = if List.exists (fun s -> I.E.has_stmt_req s eff) stmts then I.E.add_stmt_req s eff in
-          let block b = stmts b.bstmts in
-          match s.skind with
-          | Instr (Set (lv, e, loc))
-            when is_var_sating is_tracking_var e
-              && not (isVoidPtrType @@ typeOfLval lv)                   -> stmt @@ alloc ~loc lv
-          | Instr (Set (lv, _, _))                                      -> stmt @@ assign lv
-          | Instr (Call (_, { enode = Lval (Var vi, NoOffset) }, _, _))
-            when Options.Target_functions.mem vi.vname                  -> mark (Some vi); SkipChildren
-          | Instr (Call (lv,
-                         { enode = Lval (Var vi, NoOffset) }, _, loc))
-            when Options.Alloc_functions.mem vi.vname                   ->
-            let call () =
-              ignore @@
-              if Kf.mem_definition vi
-              then stmt ~vi @@ call s ?lv (Globals.Functions.get vi)
-              else stmt @@ stub lv
-            in
-            begin match lv with
-            | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype   ->(call ();
-                                                                           stmt ~vi @@ assign lv)
-            | Some lv  when not (isVoidPtrType @@ typeOfLval lv)        ->(call ();
-                                                                           stmt ~vi @@ alloc ~loc lv)
-            | Some _                                                    ->(call ();
-                                                                           SkipChildren)
-              (* ^^^
-                 Unsound! Struct fields should be supported as tracking fields!
-                 Or full support for reinterpretation should be implemented!    *)
-            | None                                                      -> SkipChildren
-            end;
-          | Instr (Call (_,
-                         { enode = Lval (Var vi, NoOffset) }, [e], _))
-            when Options.Assume_functions.mem vi.vname                  -> stmt ~vi @@ assume e
-          | Instr (Call (_,
-                         { enode = Lval (Var vi, NoOffset) }, [], _))
-            when Options.Path_assume_functions.mem vi.vname             -> stmt ~vi @@ unreach
-          | Instr (Call (lv,
-                         { enode = Lval (Var vi, NoOffset) }, _, _))
-            when Kf.mem_definition vi                                   -> stmt ~vi
-                                                                             (call
-                                                                                s
-                                                                                ?lv
-                                                                                (Globals.Functions.get vi))
-          | Instr (Call (lv,
-                         { enode = Lval (Var _, NoOffset) }, _, _))     -> stmt @@ stub lv
-          | Instr (Call (lv, e, _, _))                                  ->
-            let kfs = Analyze.callee_approx ?callee_approx e in
-            begin match kfs with
-            | []                                                       -> stmt @@ stub lv
-            | kfs                                                      -> try_all
-                                                                            e
-                                                                            (fun kf ->
-                                                                               if Kernel_function.is_definition kf
-                                                                               then call s ?lv kf
-                                                                               else stub lv)
-                                                                             kfs
-            end
-          | Instr (Asm _ | Skip _ | Code_annot _)                       -> SkipChildren
-          | Return (e, _)                                               -> stmt @@ return e
-          | Goto _ | AsmGoto _ | Break _ | Continue _                   -> stmt @@ goto s
-          | If (_, b1, b2, _)                                           -> DoChildrenPost
-                                                                             (fun s -> block b1; block b2; s)
-          | Switch (_, b, _, _) | Loop (_, b, _, _, _) | Block  b       -> DoChildrenPost (fun s -> block b; s)
-          | UnspecifiedSequence ss                                      -> DoChildrenPost
-                                                                             (fun s ->
-                                                                                stmts @@
-                                                                                List.map (fun (s, _, _, _, _) -> s) ss;
-                                                                                s)
-          | Throw _ | TryCatch _ | TryFinally _ | TryExcept _           -> failwith
-                                                                             "Unsupported features: exceptions \
-                                                                              and their handling"
-      end
+    let marker info = visitor (module Mark (Decide (struct let info = info end)))
 
     let filter_init info =
       let eff = extract info in
@@ -748,7 +771,7 @@ module Make (Analysis : Region.Analysis) = struct
                                       l |> fun l ->
                                     if l <> [] then Some (CompoundInit (ty, l)) else None
         in
-        opt_bind (filter @@ var v) init.init
+        opt_bind (filter @@ var v) init
   end
 
   module Make (M : sig val info : I.t end) = struct
@@ -845,10 +868,10 @@ module Make (Analysis : Region.Analysis) = struct
            match s.skind with
            | Goto (_, loc)
              when H_stmt.mem info.goto_next s -> del_loc
-                                                     ~no:(fst @@
-                                                          Stmt.loc @@
-                                                          H_stmt.find info.goto_next s).Lexing.pos_lnum
-                                                     loc
+                                                   ~no:(fst @@
+                                                        Stmt.loc @@
+                                                        H_stmt.find info.goto_next s).Lexing.pos_lnum
+                                                   loc
            | _                                -> del_loc (Stmt.loc s)),
         del_loc ?no:None
       in
@@ -861,32 +884,44 @@ module Make (Analysis : Region.Analysis) = struct
 
         method! vfunc f =
           let name = f.svar.vname in
-          if Options.(Alloc_functions.mem name || Assume_functions.mem name || Path_assume_functions.mem name ||
-                      Target_functions.mem name)
+          if Options.(Alloc_functions.mem name
+                      || Assume_functions.mem name
+                      || Path_assume_functions.mem name
+                      || Target_functions.mem name)
           then                                  SkipChildren
           else (eff <- I.get info dummy_flag f; DoChildren)
 
         method! vstmt_aux s =
+          let skip () = { s with skind = Instr (Skip (Stmt.loc s)); labels = collect_labels s } in
           if not (I.E.has_stmt_req' s eff)
           && not (opt_equal Fundec.equal main_def self#current_func && match s.skind with Return _ -> true | _ -> false)
           then begin
             del_stmt s;
             if Options.Use_ghosts.is_set ()
-            then (s.ghost <- true; DoChildren)
-            else                   ChangeTo { s with skind = Instr (Skip (Stmt.loc s)); labels = collect_labels s }
-          end
-          else                     DoChildren
+            then (s.ghost <- true;                          DoChildren)
+            else                                            ChangeTo (skip ())
+          end else
+            match s.skind with
+            | Instr (Local_init (vi, AssignInit init, loc)) ->
+              begin match (H.find filters (the self#current_func)) vi (Some init) with
+              | Some init                                -> ChangeTo
+                                                              { s with
+                                                                skind = Instr (Local_init (vi, AssignInit init, loc)) }
+              | None                                     ->(del_stmt s;
+                                                            ChangeTo (skip ()))
+              end
+            | _                                          -> DoChildren
 
         method! vblock _ = DoChildrenPost (tap shrink_block)
 
         method! vglob_aux g =
           match g, main_filter with
           | GFun (f, _),          _
-            when not (H.mem required_bodies f)     ->                                   ChangeTo []
-          | GVar (vi, init, loc), Some main_filter ->(init.init <- main_filter vi init;
+            when not (H.mem required_bodies f)     ->                                        ChangeTo []
+          | GVar (vi, init, loc), Some main_filter ->(init.init <- main_filter vi init.init;
                                                       if init.init = None then
-                                                        del_var loc;                    SkipChildren)
-          | _                                      ->                                   DoChildren
+                                                        del_var loc;                         SkipChildren)
+          | _                                      ->                                        DoChildren
       end
 
     module H_lab = Label.Hashtbl
@@ -946,9 +981,9 @@ module Make (Analysis : Region.Analysis) = struct
       may ((|>) ()) after_sweeping_funcs;
       Rmtmps.removeUnusedTemps
         ~isRoot:(function
-          | GFun (f, _) when f.svar.vname = Kernel.MainFunction.get ()
-                          || hasAttribute Kf.stub_attr f.svar.vattr    -> true
-          | _                                                          -> false)
+        | GFun (f, _) when f.svar.vname = Kernel.MainFunction.get ()
+                        || hasAttribute Kf.stub_attr f.svar.vattr    -> true
+        | _                                                          -> false)
         file
 
     let clear () =

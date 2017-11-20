@@ -657,7 +657,7 @@ end = functor (O : Separation_options) () -> struct
   let check1 f u = check2 (const' f) u ()
 
   let arrow,        deref,        dot,        container,        dot_void,        container_of_void =
-      check2 arrow, check1 deref, check2 dot, check2 container, check1 dot_void, check2 container_of_void
+    check2 arrow, check1 deref, check2 dot, check2 container, check1 dot_void, check2 container_of_void
 
   let arrows f u = H_f.iter f u h_arrow
   let derefs f u = H'.iter f u h_deref
@@ -804,13 +804,10 @@ end = functor (O : Separation_options) () -> struct
 
   type 'x reflector =
     { reflect2 : 'k. 'h -> 'o -> 'o -> 'u -> ('u -> 'k -> 'fl * 'u) -> 'k -> 'u -> unit }
-    constraint 'x = < o : 'o; u : 'u; h : 'h; fl : 'fl; .. >
-
-  let const4 c _ _ _ _ = c
-  let ignore4 _ _ _ _  = ()
+    constraint 'x = < o: 'o; u: 'u; h: 'h; fl: 'fl; ..>;;
 
   let traverse
-      ~symm ?(guard=const4 true) ~reflect2 ?(pre=ignore4) ?(update=ignore4) ?(post=ignore4) =
+        ~symm ?(guard=const4 true) ~reflect2 ?(pre=ignore4) ?(update=ignore4) ?(post=ignore4) =
     let reflect_all h =
       let key = Key.of_unifiable in
       let open Origin in
@@ -1807,14 +1804,37 @@ module Analysis
                                                                                                 (tap self#vexpr_post)
     method private virtual vstmt_post : stmt -> unit
     method! vstmt s =
+      let vis = (self :> frama_c_visitor) in
       match s.skind with
-      | Instr (Call (lv, { enode = Lval (Var vi, NoOffset); _ }, args, _)) when Kf.mem vi ->
-        may (ignore % visitFramacLval (self :> frama_c_visitor)) lv;
-        List.iter (ignore % visitFramacExpr (self :> frama_c_visitor)) args;
-        self#vstmt_post s;
-        SkipChildren
-      | _ -> DoChildrenPost (tap self#vstmt_post)
+      | Instr
+          (Call (lv, { enode = Lval (Var f, NoOffset); _ }, args, _))
+        when Kf.mem f                                                 ->(may
+                                                                           (ignore % visitFramacLval vis)
+                                                                           lv;
+                                                                         List.iter
+                                                                           (ignore % visitFramacExpr vis)
+                                                                           args;
+                                                                         self#vstmt_post s;                SkipChildren)
+      | Instr
+          (Local_init (vi, ConsInit (f, args, Plain_func), _))
+        when Kf.mem f                                                 ->(ignore @@
+                                                                         visitFramacVarDecl vis vi;
+                                                                         List.iter
+                                                                           (ignore % visitFramacExpr vis)
+                                                                           args;
+                                                                         self#vstmt_post s;                SkipChildren)
+      | Instr (Local_init (_, ConsInit (_, _, Constructor), _))       -> Console.fatal "skipping_visitor: C++ \
+                                                                                        constructors are unsupported"
+      |_                                                              -> DoChildrenPost (tap self#vstmt_post)
   end
+
+  let init_var ?f vi =
+    let rec loop lv =
+      function
+      | SingleInit e        -> unify_exprs ?f (expr_of_lval ~loc:e.eloc lv) e
+      | CompoundInit (_, l) -> List.iter (fun (off, init) -> loop (addOffsetLval off lv) init) l
+    in
+    loop @@ var vi
 
   let callee_approx = C.callee_approx
 
@@ -1841,13 +1861,22 @@ module Analysis
         in
         match stmt.skind with
         | Instr (Set (lv, e, loc))                       -> unify_exprs ~f (expr_of_lval ~loc lv) e
+        | Instr (Local_init (vi, AssignInit init, _))    -> init_var ~f vi init
         | Instr
             (Call
                (lvo,
-                { enode = Lval (Var vi, NoOffset); _ },
+                { enode = Lval (Var f', NoOffset); _ },
                 args, _))
-          when Kf.mem vi                                 -> replay_on_call ~stmt ~f (Globals.Functions.get vi)
-                                                              lvo args
+          when Kf.mem f'                                 -> replay_on_call ~stmt ~f
+                                                              (Globals.Functions.get f') lvo args
+        | Instr
+            (Local_init
+               (vi, ConsInit (f', args, Plain_func), _)) -> replay_on_call ~stmt ~f
+                                                              (Globals.Functions.get f') (Some (var vi)) args
+        | Instr
+            (Local_init
+               (_, ConsInit (_, _, Constructor), _))     -> Console.fatal "unifier: C++ \
+                                                                           constructors are unsupported"
         | Instr (Call (lvo, e, args, _))                 -> List.iter
                                                               (fun kf -> replay_on_call ~stmt ~f kf lvo args)
                                                               (Analyze.callee_approx ?callee_approx e)
@@ -1896,15 +1925,7 @@ module Analysis
       end in
       ignore @@ visitFramacFunction vis fundec
 
-  let init_var ?f vi { init } =
-    let rec loop lv =
-      function
-      | SingleInit e        -> unify_exprs ?f (expr_of_lval ~loc:e.eloc lv) e
-      | CompoundInit (_, l) -> List.iter (fun (off, init) -> loop (addOffsetLval off lv) init) l
-    in
-    may (loop @@ var vi) init
-
-  let init_globals () = Globals.Vars.iter init_var
+  let init_globals () = Globals.Vars.iter (fun vi { init } -> may (init_var vi) init)
 
   let pp_globals fmttr = Globals.Vars.iter (fun vi _ -> pp_region_of fmttr pp_varinfo vi @@ of_var vi)
 
@@ -1972,15 +1993,16 @@ module Analysis
     match s.skind with
     | Instr
         (Call
-           (_, { enode = Lval (Var vi, NoOffset); _ },
-            _, _))
-      when Kf.mem vi                                   ->(let kf = Globals.Functions.get vi in
-                                                          [kf, H_call.find h_maps (s, kf)])
-    | Instr (Call (_, e, _, _))                        -> List.map
-                                                            (fun kf -> kf, H_call.find h_maps (s, kf))
-                                                            (Analyze.callee_approx ?callee_approx e)
-    | _                                                -> Console.fatal "Can't get region maps from \
-                                                                         non-function-call statement"
+           (_, { enode = Lval (Var f, NoOffset); _ },
+            _, _)
+        | Local_init (_, ConsInit (f, _, Plain_func), _))
+      when Kf.mem f                                       ->(let kf = Globals.Functions.get f in
+                                                             [kf, H_call.find h_maps (s, kf)])
+    | Instr (Call (_, e, _, _))                           -> List.map
+                                                               (fun kf -> kf, H_call.find h_maps (s, kf))
+                                                               (Analyze.callee_approx ?callee_approx e)
+    | _                                                   -> Console.fatal "Can't get region maps from \
+                                                                            non-function-call statement"
 
   let param_regions kf = H_k.memo h_params kf param_regions
 
