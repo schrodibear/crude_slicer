@@ -43,6 +43,27 @@ module Make (Analysis : Analysis) = struct
 
   let builtin_expect = Str.regexp @@ Options.Builtin_expect_regexp.get ()
 
+  let mark_lval =
+    let rec mark_offset =
+      function
+      | NoOffset        -> ()
+      | Field (fi, off) -> fi.faddrof <- true; mark_offset off
+      | Index (_, off)  -> mark_offset off
+    in
+    function
+    | Var vi, off -> vi.vaddrof <- true; mark_offset off
+    | Mem _,  off -> mark_offset off
+
+  let cast_init vi =
+    let rec loop ty =
+      function
+      | SingleInit e
+        when need_cast ty (typeOf e) -> SingleInit (mkCast ~force:false ~overflow:Check ~e ~newt:ty)
+      | SingleInit _ as i            -> i
+      | CompoundInit (_, is)         -> CompoundInit (ty, List.map (fun (off, i) -> off, loop (typeOffset ty off) i) is)
+    in
+    loop vi.vtype
+
   class rewriter = object(self)
     inherit frama_c_inplace
 
@@ -67,7 +88,8 @@ module Make (Analysis : Analysis) = struct
       | _,              Some (e, offs)            -> let e = visit e in mark offs; ChangeTo (dot ~loc offs e)
       | _                                         ->
         match e.enode with
-        | CastE (ty, _, e)                        -> cast ty e; DoChildren
+        | AddrOf lv | StartOf lv                  -> mark_lval lv; DoChildren
+        | CastE (ty, _, e)                        -> cast ty e;    DoChildren
         | BinOp
             ((Eq | Ne as op),
              { enode = CastE (ty, _, e1); _ },
@@ -80,7 +102,7 @@ module Make (Analysis : Analysis) = struct
                                                        (mkBinOp ~loc op
                                                           (mkCast ~force:false ~overflow:Check ~e:e1 ~newt:(typeOf e2))
                                                           e2,
-                                                       id)
+                                                        id)
         | _                                       -> DoChildren
 
     method! vstmt s =
@@ -89,8 +111,14 @@ module Make (Analysis : Analysis) = struct
                      { enode =
                          Lval (Var { vname; _ }, NoOffset); _ },
                      [e; _], loc))
-        when Str.string_match builtin_expect vname 0             -> s.skind <- Instr (Set (lv, e, loc)); DoChildren
-      | _                                                        ->                                      DoChildren
+        when Str.string_match builtin_expect vname 0             -> s.skind <- Instr (Set (lv, e, loc));    DoChildren
+      | Instr (Local_init (vi, AssignInit init, loc))            ->(s.skind <-
+                                                                      Instr
+                                                                        (Local_init
+                                                                           (vi,
+                                                                            AssignInit (cast_init vi init),
+                                                                            loc));                          DoChildren)
+      | _                                                        ->                                         DoChildren
 
     method! vglob_aux =
       function
@@ -113,8 +141,8 @@ module Make (Analysis : Analysis) = struct
     let exists_glob_name n =
       try ignore @@ Globals.Vars.find_from_astinfo n VGlobal; true
       with Not_found ->
-        try ignore @@ Globals.Functions.find_by_name n;       true
-        with Not_found ->                                     false
+      try ignore @@ Globals.Functions.find_by_name n;         true
+      with Not_found ->                                       false
     in
     let rec next vis old n =
       let n = n + 1 in

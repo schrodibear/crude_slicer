@@ -162,23 +162,24 @@ let condensate =
 
 let cache_offsets =
   let open List in
-  let module H = Hashtbl.Make
-                   (struct
-                     type t = (fieldinfo * typ) Info.offs
-                     let rec hash =
-                       function
-                       | []                               -> 1
-                       | `Field fi :: os                  -> 13 * hash os + 7 * Fieldinfo.hash fi + 5
-                       | `Container_of_void (_, ty) :: os -> 13 * hash os + 7 * Typ.hash ty       + 3
-                     let rec equal p1 p2 =
-                       match p1, p2 with
-                       | [],                                 []                                 -> true
-                       | `Field fi1                  :: os1, `Field fi2                  :: os2
-                         when Fieldinfo.equal fi1 fi2                                           -> equal os1 os2
-                       | `Container_of_void (_, ty1) :: os1, `Container_of_void (_, ty2) :: os2
-                         when Typ.equal ty1 ty2                                                 -> equal os1 os2
-                       | _                                                                      -> false
-                   end)
+  let module H =
+    Hashtbl.Make
+      (struct
+        type t = (fieldinfo * typ) Info.offs
+        let rec hash =
+          function
+          | []                               -> 1
+          | `Field fi :: os                  -> 13 * hash os + 7 * Fieldinfo.hash fi + 5
+          | `Container_of_void (_, ty) :: os -> 13 * hash os + 7 * Typ.hash ty       + 3
+        let rec equal p1 p2 =
+          match p1, p2 with
+          | [],                                 []                                 -> true
+          | `Field fi1                  :: os1, `Field fi2                  :: os2
+            when Fieldinfo.equal fi1 fi2                                           -> equal os1 os2
+          | `Container_of_void (_, ty1) :: os1, `Container_of_void (_, ty2) :: os2
+            when Typ.equal ty1 ty2                                                 -> equal os1 os2
+          | _                                                                      -> false
+      end)
   in
   let h = H.create 4096 in
   let negate off = Integer.(rem (neg off) @@ add (max_unsigned_number @@ theMachine.theMachine.sizeof_ptr lsl 3) one) in

@@ -14,7 +14,7 @@
 version.ml
 Crude_slicer_DEP
 frama-c
-frama-c-static
+frama-c-minimal
 *.plugin.generated
 *.check_mli_exists
 META.*
