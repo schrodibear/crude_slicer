@@ -872,6 +872,8 @@ module Make (Analysis : Region.Analysis) = struct
                                                         Stmt.loc @@
                                                         H_stmt.find info.goto_next s).Lexing.pos_lnum
                                                    loc
+           | Instr (Local_init (vi, _, loc))  ->(vi.vdefined <- false;
+                                                 del_loc loc)
            | _                                -> del_loc (Stmt.loc s)),
         del_loc ?no:None
       in
