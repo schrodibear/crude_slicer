@@ -43,6 +43,10 @@ module Make (Analysis : Analysis) = struct
 
   let builtin_expect = Str.regexp @@ Options.Builtin_expect_regexp.get ()
 
+  let alloca = Options.Alloca_function.get ()
+
+  let ensure_alloca_function_present () = Kf.ensure_proto voidPtrType alloca [theMachine.typeOfSizeOf] false
+
   let mark_lval =
     let rec mark_offset =
       function
@@ -64,77 +68,96 @@ module Make (Analysis : Analysis) = struct
     in
     loop vi.vtype
 
-  class rewriter = object(self)
-    inherit frama_c_inplace
+  class rewriter =
+    let alloca = ensure_alloca_function_present (); Kernel_function.get_vi @@ Globals.Functions.find_by_name alloca in
+    object(self)
+      inherit frama_c_inplace
 
-    method! vexpr e =
-      let loc = e.eloc in
-      let visit = visitFramacExpr (self :> frama_c_visitor) in
-      let cast ty e =
-        let ty' = let ty' = typeOf e in if isIntegralType ty' then ty else ty' in
-        let ty, ty' = map_pair Ty.deref_once (ty, ty') in
-        if not (Ty.compatible ty ty') then
-          match
-            Ci.(match_deep_first_subfield_of ty ty',
-                match_deep_first_subfield_of ty' ty)
-          with
-          | Some offs, _
-          | _,         Some offs                               -> mark offs
-          | _                                                  -> ()
-      in
-      let container_of = Exp.container_of ~loc in
-      match match_container_of2 e.enode, match_dot e.enode with
-      | Some (e, offs), _                         -> let e = visit e in mark offs; ChangeTo (container_of offs e)
-      | _,              Some (e, offs)            -> let e = visit e in mark offs; ChangeTo (dot ~loc offs e)
-      | _                                         ->
-        match e.enode with
-        | AddrOf lv | StartOf lv                  -> mark_lval lv; DoChildren
-        | CastE (ty, _, e)                        -> cast ty e;    DoChildren
-        | BinOp
-            ((Eq | Ne as op),
-             { enode = CastE (ty, _, e1); _ },
-             { enode = CastE (ty', _, e2); _ },
-             _)
-          when
-            not
-              (need_cast ty theMachine.upointType
-               || need_cast ty ty')               -> ChangeToPost
-                                                       (mkBinOp ~loc op
-                                                          (mkCast ~force:false ~overflow:Check ~e:e1 ~newt:(typeOf e2))
-                                                          e2,
-                                                        id)
-        | _                                       -> DoChildren
+      method! vexpr e =
+        let loc = e.eloc in
+        let visit = visitFramacExpr (self :> frama_c_visitor) in
+        let cast ty e =
+          let ty' = let ty' = typeOf e in if isIntegralType ty' then ty else ty' in
+          let ty, ty' = map_pair Ty.deref_once (ty, ty') in
+          if not (Ty.compatible ty ty') then
+            match
+              Ci.(match_deep_first_subfield_of ty ty',
+                  match_deep_first_subfield_of ty' ty)
+            with
+            | Some offs, _
+            | _,         Some offs                               -> mark offs
+            | _                                                  -> ()
+        in
+        let container_of = Exp.container_of ~loc in
+        match match_container_of2 e.enode, match_dot e.enode with
+        | Some (e, offs), _                         -> let e = visit e in mark offs; ChangeTo (container_of offs e)
+        | _,              Some (e, offs)            -> let e = visit e in mark offs; ChangeTo (dot ~loc offs e)
+        | _                                         ->
+          match e.enode with
+          | AddrOf lv | StartOf lv                  -> mark_lval lv; DoChildren
+          | CastE (ty, _, e)                        -> cast ty e;    DoChildren
+          | BinOp
+              ((Eq | Ne as op),
+               { enode = CastE (ty, _, e1); _ },
+               { enode = CastE (ty', _, e2); _ },
+               _)
+            when
+              not
+                (need_cast ty theMachine.upointType
+                 || need_cast ty ty')               -> ChangeToPost
+                                                         (mkBinOp ~loc op
+                                                            (mkCast
+                                                               ~force:false ~overflow:Check ~e:e1 ~newt:(typeOf e2))
+                                                            e2,
+                                                          id)
+          | _                                       -> DoChildren
 
-    method! vstmt s =
-      match s.skind with
-      | Instr (Call (Some lv,
-                     { enode =
-                         Lval (Var { vname; _ }, NoOffset); _ },
-                     [e; _], loc))
-        when Str.string_match builtin_expect vname 0             -> s.skind <- Instr (Set (lv, e, loc));    DoChildren
-      | Instr (Local_init (vi, AssignInit init, loc))            ->(s.skind <-
-                                                                      Instr
-                                                                        (Local_init
-                                                                           (vi,
-                                                                            AssignInit (cast_init vi init),
-                                                                            loc));                          DoChildren)
-      | _                                                        ->                                         DoChildren
+      method! vstmt s =
+        match s.skind with
+        | Instr
+            (Call
+               (Some lv,
+                { enode =
+                    Lval (Var { vname; _ }, NoOffset); _ },
+                [e; _], loc))
+          when Str.string_match builtin_expect vname 0      -> s.skind <- Instr (Set (lv, e, loc));    DoChildren
+        | Instr
+            (Local_init
+               (vi,
+                ConsInit ({ vname = "__fc_vla_alloc"; _ },
+                          ([_] as args),
+                          Plain_func),
+                loc))                                       ->(s.skind <-
+                                                                 Instr
+                                                                   (Local_init
+                                                                      (vi,
+                                                                       ConsInit
+                                                                         (alloca, args, Plain_func),
+                                                                       loc));                          DoChildren)
 
-    method! vglob_aux =
-      function
-      | GFun (f, _)
-        when Options.Required_bodies.mem f.svar.vname      -> DoChildren
-      | GFun (d, loc)
-        when Options.(Alloc_functions.mem  d.svar.vname ||
-                      Assume_functions.mem d.svar.vname ||
-                      Target_functions.mem d.svar.vname)   ->(let kf = Globals.Functions.get d.svar in
-                                                              kf.fundec <-
-                                                                Declaration
-                                                                  (d.sspec, d.svar, Some d.sformals, d.svar.vdecl);
-                                                              ChangeTo [GFunDecl (d.sspec, d.svar, loc)])
-      | _                                                  -> DoChildren
+        | Instr (Local_init (vi, AssignInit init, loc))     ->(s.skind <-
+                                                                 Instr
+                                                                   (Local_init
+                                                                      (vi,
+                                                                       AssignInit (cast_init vi init),
+                                                                       loc));                          DoChildren)
+        | _                                                 ->                                         DoChildren
 
-  end
+      method! vglob_aux =
+        function
+        | GFun (f, _)
+          when Options.Required_bodies.mem f.svar.vname      -> DoChildren
+        | GFun (d, loc)
+          when Options.(Alloc_functions.mem  d.svar.vname ||
+                        Assume_functions.mem d.svar.vname ||
+                        Target_functions.mem d.svar.vname)   ->(let kf = Globals.Functions.get d.svar in
+                                                                kf.fundec <-
+                                                                  Declaration
+                                                                    (d.sspec, d.svar, Some d.sformals, d.svar.vdecl);
+                                                                ChangeTo [GFunDecl (d.sspec, d.svar, loc)])
+        | _                                                  -> DoChildren
+
+    end
 
   let unique_param_names =
     let name old n = old ^ if n = 0 then "" else string_of_int n in
