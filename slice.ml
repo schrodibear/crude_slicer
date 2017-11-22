@@ -58,6 +58,8 @@ module Make (Analysis : Region.Analysis) = struct
 
   let callee_approx = Analysis.callee_approx
 
+  let new_callee_approx = Exp.List_hashtbl.(may_map copy ~dft:(create 16) callee_approx)
+
   module Make_local
       (C : sig val f : kernel_function end)
       (L : I.E.Local) = struct
@@ -331,8 +333,8 @@ module Make (Analysis : Region.Analysis) = struct
       val assign : stmt -> lval -> exp -> unit
       val init : stmt -> lval -> init -> unit
       val return : stmt -> exp option -> unit
-      val call : stmt -> ?lv:lval -> varinfo -> exp list -> unit
-      val icall : stmt -> ?lv:lval -> exp -> exp list -> unit
+      val call : stmt -> ?lv:lval -> ?e:exp -> kernel_function -> unit
+      val stub : stmt -> ?lv:lval -> ?e:exp -> exp list -> unit
       val alloc : stmt -> lval -> exp -> unit
       val goto : stmt -> unit
       val reach_target : stmt -> unit
@@ -346,8 +348,14 @@ module Make (Analysis : Region.Analysis) = struct
 
     let visitor (module M : Actions) =
       let open M in
+      let dcall s ?lv f args =
+        match Globals.Functions.get f with
+        | kf when Kernel_function.is_definition kf -> call s ?lv kf
+        | _                                        -> stub s ?lv args
+        | exception Not_found                      -> stub s ?lv args
+      in
       let alloc' s ?lv f arg args =
-        let call () = call s ?lv f (arg :: args) in
+        let call () = dcall s ?lv f (arg :: args) in
         begin match lv with
         | Some (Var v, NoOffset as lv) when isVoidPtrType v.vtype ->(start_tracking s lv v arg;
                                                                      call ())
@@ -358,6 +366,18 @@ module Make (Analysis : Region.Analysis) = struct
             Or full support for reinterpretation should be implemented.    *)
         | None                                                    -> ()
         end;
+      in
+      let icall s ?lv e args =
+        let kfs = Analyze.callee_approx ?callee_approx e in
+        Exp.(List_hashtbl.replace new_callee_approx (underef_mem e) []);
+        match kfs with
+        | []  -> stub s ?lv args
+        | kfs -> List.iter
+                   (fun kf ->
+                      if Kernel_function.is_definition kf
+                      then call s ?lv ~e kf
+                      else stub s ?lv ~e args)
+                   kfs
       in
       object
         method start = start ()
@@ -402,8 +422,8 @@ module Make (Analysis : Region.Analysis) = struct
             when Options.Path_assume_functions.mem f.vname             -> unreach s;                    SkipChildren
           | Instr (Call (lv,
                          { enode = Lval (Var f, NoOffset) },
-                         args, _))                                     -> call s ?lv f args;            SkipChildren
-          | Instr (Local_init (vi, ConsInit (f, args, Plain_func), _)) -> call s ~lv:(var vi) f args;   SkipChildren
+                         args, _))                                     -> dcall s ?lv f args;           SkipChildren
+          | Instr (Local_init (vi, ConsInit (f, args, Plain_func), _)) -> dcall s ~lv:(var vi) f args;  SkipChildren
           | Instr (Call (lv, e, args, _))                              -> icall s ?lv e args;           SkipChildren
           | Instr (Local_init (_, ConsInit (_, _, Constructor), _) )   -> Console.fatal
                                                                             "collector: C++ constructors \
@@ -544,29 +564,14 @@ module Make (Analysis : Region.Analysis) = struct
              add_from_lval lv from;
              gassign lv from)
           lv
-      let stub s ?lv es =
+      let stub s ?lv ?e es =
         let from = from s in
+        may (fun e -> add_from_rval e from) e;
         may
           (fun lv ->
              List.iter (fun e -> add_from_rval e from) es;
              gassign lv from)
           lv
-      let icall s ?lv e args =
-        let kfs = Analyze.callee_approx ?callee_approx e in
-        begin match kfs with
-        | []  -> stub s ?lv args
-        | kfs -> List.iter
-                   (fun kf ->
-                      if Kernel_function.is_definition kf
-                      then call s ?lv ~e kf
-                      else stub s ?lv args)
-                   kfs
-        end
-      let call s ?lv f args =
-        match Globals.Functions.get f with
-        | kf when Kernel_function.is_definition kf -> call s ?lv kf
-        | _                                        -> stub s ?lv args
-        | exception Not_found                      -> stub s ?lv args
       let alloc s lv e =
         let from = from s in
         let lv' = deref ~loc:(Stmt.loc s) lv in
@@ -601,8 +606,8 @@ module Make (Analysis : Region.Analysis) = struct
 
     module type Decide = sig
       val info : I.t
-      val mark : stmt -> unit
-      val decide : stmt -> [< W.t] list -> unit
+      val mark : ?kf:kernel_function -> stmt -> unit
+      val decide : stmt -> ?kf:kernel_function -> [< W.t] list -> unit
       val surround : stmt -> stmt list -> unit
     end
 
@@ -610,20 +615,24 @@ module Make (Analysis : Region.Analysis) = struct
       include M
       include Eff (M)
 
-      let mark s =
-        add_stmt_req s;
-        match s.skind with
-        | Instr (Call (_, { enode = Lval (Var vi, NoOffset); _ }, _, _))
-        | Instr (Local_init (_, ConsInit (vi, _, Plain_func), _))        ->
-          begin try                                                         add_body_req
-                                                                              (Kernel_function.get_definition @@
-                                                                               Globals.Functions.get vi)
-          with
-          | Kernel_function.No_Definition                                -> ()
-          end
-        | _                                                              -> ()
+      let mark =
+        let add_body_req kf = Kernel_function.(try add_body_req @@ get_definition kf with No_Definition -> ()) in
+        fun ?kf s ->
+          add_stmt_req s;
+          match s.skind with
+          | Instr (Call (_, { enode = Lval (Var vi, NoOffset); _ }, _, _))
+          | Instr (Local_init (_, ConsInit (vi, _, Plain_func), _))        -> add_body_req (Globals.Functions.get vi)
+          | Instr (Call (_, e, _, _))
+            when has_some kf                                               ->(let e = Exp.underef_mem e in
+                                                                              Exp.List_hashtbl.(
+                                                                                replace
+                                                                                  new_callee_approx
+                                                                                  e
+                                                                                  (the kf ::
+                                                                                   find_all new_callee_approx e)))
+          | _                                                              -> ()
 
-      let decide s =
+      let decide s ?kf =
         let intersects =
           let reads = F.create dummy_flag in
           fun l ->
@@ -644,14 +653,14 @@ module Make (Analysis : Region.Analysis) = struct
         function
         | []                                     -> ()
         | [`Result]
-          when has_result_dep ()                 -> mark s
+          when has_result_dep ()                 -> mark ?kf s
         | [`Result]                              -> ()
         | [#W.readable as w]
-          when F.(mem_some (of_write w) depends) -> mark s
+          when F.(mem_some (of_write w) depends) -> mark ?kf s
         | [#W.readable]                          -> ()
         | (l : [< W.t] list)
           when has_result_dep () && mem_result l
-            || intersects l                      -> mark s
+            || intersects l                      -> mark ?kf s
         | _                                      -> ()
 
       let surround s stmts = if List.exists has_stmt_req stmts then add_stmt_req s
@@ -694,7 +703,7 @@ module Make (Analysis : Region.Analysis) = struct
 
       let start_tracking = ignore4
 
-      let call s ?lv kf =
+      let call s ?lv ?e:_ kf =
         let I.E.Some { local = (module L');
                        eff = eff' } =
           I.get info R.flag @@ Kernel_function.get_definition kf
@@ -718,35 +727,17 @@ module Make (Analysis : Region.Analysis) = struct
             (I.E.assigns eff')
             []
         in
-        if I.E.is_target eff' then mark s else decide s writes
-      let stub s = may (decide s % gassign)
-      let icall s ?lv e _args =
-        let kfs = Analyze.callee_approx ?callee_approx e in
-        match kfs with
-        | []  -> stub s lv
-        | kfs ->(let kfs =
-                   List.filter
-                     (fun kf ->
-                        if Kernel_function.is_definition kf
-                        then (call s ?lv kf; has_body_req (Kernel_function.get_definition kf))
-                        else (stub s lv;     false))
-                     kfs
-                 in
-                 may Exp.(fun approx -> Hashtbl.replace approx (underef_mem e) kfs) callee_approx)
-      let call s ?lv f _args =
-        match Globals.Functions.get f with
-        | kf when Kernel_function.is_definition kf -> call s ?lv kf
-        | _                                        -> stub s lv
-        | exception Not_found                      -> stub s lv
+        if I.E.is_target eff' then mark ~kf s else decide s ~kf writes
+      let stub s ?lv ?e:_ _ = may (decide s % gassign) lv
       let alloc s lv _ = decide s @@ gassign lv @ gassign (deref ~loc:(Stmt.loc s) lv)
 
       let goto s = decide s [`Local_var (Local.Var.of_varinfo @@ H_stmt.find info.goto_vars s)]
-      let reach_target  = mark
+      let reach_target s = mark s
       let assume s e =
         let r = ref [] in
         visit_rval (fun lv -> may (fun w -> r := w :: !r) @@ w_lval lv) e;
         decide s !r
-      let unreach = mark
+      let unreach s = mark s
 
       let block s b = surround s b.bstmts
       let if_ s _ b1 b2 = DoChildrenPost (fun s' -> block s b1; block s b2; s')
@@ -857,6 +848,7 @@ module Make (Analysis : Region.Analysis) = struct
             (Not_found
             | No_Definition) ->                    result, None, None
       in
+      let () = may (fun approx -> Exp.List_hashtbl.(clear approx; iter (add approx) new_callee_approx)) callee_approx in
       let irrelevant_lines = H_int.create 2048 in
       let del_stmt, del_var =
         let del_loc ?no (start, stop) =

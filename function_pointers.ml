@@ -57,8 +57,8 @@ module Make (R : Region.Analysis) = struct
       let add h u kf =
         let r = U.repr u in
         H.replace (try find h r with Not_found -> let h' = H.create 4 in add h r h'; h') kf ()
-      let iter h f u = try H.iter f @@ find h (U.repr u) with Not_found -> ()
-      let import h ~from u = iter h (const' @@ add h u) from
+      let iter h f u = try H.iter (const' f) @@ find h (U.repr u) with Not_found -> ()
+      let import h ~from u = iter h (add h u) from
       let find_all h u = try H.fold (const' List.cons) (find h @@ U.repr u) [] with Not_found -> []
     end in
     let module H_e = Exp.List_hashtbl in
