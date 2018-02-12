@@ -445,7 +445,7 @@ module Make (Analysis : Region.Analysis) = struct
     module type From = sig
       val info : I.t
       val from : stmt -> F.t
-      val do_children_under : exp -> stmt visitAction
+      val do_children_under : ?post:(stmt -> unit) -> exp -> stmt visitAction
     end
 
     module From (M : Info) : From = struct
@@ -461,11 +461,11 @@ module Make (Analysis : Region.Analysis) = struct
           Stack.iter (fun from' -> F.import ~from:from' from) under;
           from
 
-      let do_children_under e =
+      let do_children_under ?post e =
         let r = F.create dummy_flag in
         add_from_rval e r;
         Stack.push r under;
-        DoChildrenPost (fun s -> ignore @@ Stack.pop under; s)
+        DoChildrenPost (fun s -> may ((|>) s) post; ignore @@ Stack.pop under; s)
     end
 
     module Eff (M : Info ) = struct
@@ -605,8 +605,7 @@ module Make (Analysis : Region.Analysis) = struct
     let collector info = visitor (module Collect (From (struct let info = info end)))
 
     module type Decide = sig
-      val info : I.t
-      val from : stmt -> F.t
+      include From
       val mark : ?kf:kernel_function -> stmt -> unit
       val decide : stmt -> ?kf:kernel_function -> [< W.t] list -> unit
       val surround : stmt -> stmt list -> unit
@@ -749,9 +748,9 @@ module Make (Analysis : Region.Analysis) = struct
         decide_trans s ~from
 
       let block s b = surround s b.bstmts
-      let if_ s _ b1 b2 = DoChildrenPost (fun s' -> block s b1; block s b2; s')
+      let if_ s e b1 b2 = do_children_under ~post:(fun _ -> block s b1; block s b2) e
+      let switch s e b = do_children_under ~post:(fun _ -> block s b) e
       let block s b = DoChildrenPost (fun s' -> block s b; s')
-      let switch s _ = block s
       let unordered s ss = DoChildrenPost (fun s' -> surround s @@ List.map (fun (s, _, _, _, _) -> s) ss; s')
     end
 
