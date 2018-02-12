@@ -120,7 +120,7 @@ module Make (Analysis : Region.Analysis) = struct
         match lastOffset off with
         | Field (fi, NoOffset)
           when fi.faddrof
-            || not fi.fcomp.cstruct -> unless_comp fi.ftype R.(fun () -> w_mem @@ location @@ of_lval lv)
+            || not fi.fcomp.cstruct  -> unless_comp fi.ftype R.(fun () -> w_mem @@ location @@ of_lval lv)
         | Field (fi, NoOffset)       -> unless_comp fi.ftype R.(fun () -> w_mem ~fi @@ location @@ of_lval lv)
         | Field _                    -> assert false
         | Index (_, NoOffset)        -> deref_mem R.(location @@ of_lval lv)
@@ -606,6 +606,7 @@ module Make (Analysis : Region.Analysis) = struct
 
     module type Decide = sig
       val info : I.t
+      val from : stmt -> F.t
       val mark : ?kf:kernel_function -> stmt -> unit
       val decide : stmt -> ?kf:kernel_function -> [< W.t] list -> unit
       val surround : stmt -> stmt list -> unit
@@ -614,6 +615,8 @@ module Make (Analysis : Region.Analysis) = struct
     module Decide (M : sig val info : I.t end) : Decide = struct
       include M
       include Eff (M)
+
+      include From (M)
 
       let mark =
         let add_body_req kf = Kernel_function.(try add_body_req @@ get_definition kf with No_Definition -> ()) in
@@ -733,11 +736,17 @@ module Make (Analysis : Region.Analysis) = struct
 
       let goto s = decide s [`Local_var (Local.Var.of_varinfo @@ H_stmt.find info.goto_vars s)]
       let reach_target s = mark s
+      let decide_trans s ~from =
+        let from' = F.copy dummy_flag from in
+        F.iter (fun r -> F.import ~from:(A.find r assigns) from') from;
+        decide s @@ F.fold List.cons from' []
       let assume s e =
-        let r = ref [] in
-        visit_rval (fun lv -> may (fun w -> r := w :: !r) @@ w_lval lv) e;
-        decide s !r
-      let unreach s = mark s
+        let from = from s in
+        add_from_rval e from;
+        decide_trans s ~from
+      let unreach s =
+        let from = from s in
+        decide_trans s ~from
 
       let block s b = surround s b.bstmts
       let if_ s _ b1 b2 = DoChildrenPost (fun s' -> block s b1; block s b2; s')
