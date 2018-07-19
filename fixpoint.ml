@@ -15,6 +15,8 @@
 (* limitations under the License.                                             *)
 (******************************************************************************)
 
+[@@@warning "-44"]
+
 open Cil_types
 open Visitor
 
