@@ -23,6 +23,7 @@ let () =
        if Options.Analysis.get () then begin
          Kernel.Machdep.set "gcc_x86_64";
          Kernel.Constfold.off ();
+         Kernel.LogicalOperators.on ();
          Kernel.DoCollapseCallCast.off ()
        end)
 
