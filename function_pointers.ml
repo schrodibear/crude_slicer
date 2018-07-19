@@ -185,10 +185,27 @@ let rewrite ~callee_approx =
         Exp.(List_hashtbl.find_all callee_approx e)
         (stub ())
   in
+  let protos =
+    let open Kernel_function in
+    let ps = Hashtbl.create 16 in
+    Exp.List_hashtbl.iter
+      (const @@ List.iter @@ fun kf ->
+       ignore @@
+       Hashtbl.memo ps kf @@ fun kf ->
+       let ty = get_type kf in
+       let d = makeGlobalVar ~temp:false (get_name kf) ty in
+       setFormalsDecl d ty;
+       d.vstorage <- (get_vi kf).vstorage;
+       GFunDecl (empty_funspec (), d, get_location kf))
+      callee_approx;
+    Hashtbl.fold (const List.cons) ps []
+  in
   ensure_nondet_int_function_present ();
   visitFramacFile
     (object(self)
       inherit frama_c_inplace
+
+      val mutable protos = protos
 
       method! vstmt s =
         match s.skind with
@@ -203,5 +220,16 @@ let rewrite ~callee_approx =
           when Kf.mem f                                  ->                                                SkipChildren
         | Instr (Call (lvo, e, args, loc))               -> approx (the self#current_kf) s lvo e args loc; SkipChildren
         | _                                              ->                                                DoChildren
+
+      method! vglob_aux =
+        function
+        | GFun  ({ svar = vi; _}, _)
+        | GFunDecl (_, vi, _) as g
+          when not (Builtin_functions.mem vi.vname)
+            && not (is_builtin vi)
+            && not (hasAttribute "fc_stdlib" vi.vattr)
+            && vi.vsource                              ->(let gs = protos @ [g] in
+                                                          protos <- [];            DoChildrenPost (const gs))
+        | _                                            ->                          DoChildren
     end)
     (Ast.get ())
