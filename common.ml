@@ -378,7 +378,7 @@ module Kf = struct
       let file = Ast.get () in
       let fs = empty_funspec () in
       let params = List.mapi (fun i ty -> "arg" ^ string_of_int i, ty, []) argtys in
-      let vi = makeGlobalVar name @@ TFun (rtyp, Some params, vararg, []) in
+      let vi = makeGlobalVar ~source:false name @@ TFun (rtyp, Some params, vararg, []) in
       let loc = Location.unknown in
       file.globals <- GFunDecl (fs, vi, loc) :: file.globals;
       Globals.Functions.add @@ Declaration (fs, vi, Some (List.map makeFormalsVarDecl params), loc)
