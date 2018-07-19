@@ -972,7 +972,9 @@ module Make (Analysis : Region.Analysis) = struct
       visitFramacFile (new cfg_fixupper ()) file;
       Cfg.clearFileCFG ~clear_id:false file;
       Cfg.computeFileCFG file;
-      may (fun callee_approx -> Function_pointers.rewrite ~callee_approx) callee_approx;
+      may
+        (fun callee_approx -> if Options.Rewrite_indirect_calls.get () then Function_pointers.rewrite ~callee_approx)
+        callee_approx;
       Rmtmps.removeUnusedTemps
         ~isRoot:(
           function

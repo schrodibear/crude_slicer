@@ -197,6 +197,13 @@ module Summaries =
       let help = "Switch summaries generation"
     end)
 
+module Rewrite_indirect_calls =
+  True
+    (struct
+      let option_name = "-rewrite_indirect_calls"
+      let help = "Switch rewriting of function pointer calls"
+    end)
+
 module Builtin_expect_regexp =
   String
     (struct
