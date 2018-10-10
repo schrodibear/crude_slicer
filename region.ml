@@ -313,13 +313,13 @@ module Make_unifiable (R : Representant) () : Unifiable with type repr = R.t = s
       in
       let choice =
         match R.choose r1 r2 with
-        | `First | `Second as c -> c
-        | `Any                  ->
+        | `First | `Second as c            -> c
+        | `Any                             ->
           let k1, k2 = rank r1, rank r2 in
-          if      k1 > k2                                            then `First
-          else if k2 > k1                                            then `Second
-          else if has_some (R.exp r1)                                then `First
-          else                                                            `Second
+          if      k1 > k2                then `First
+          else if k2 > k1                then `Second
+          else if has_some (R.exp r1)    then `First
+          else                                `Second
       in
       match choice with
       | `First  -> set r1 ~as_repr_of:r2

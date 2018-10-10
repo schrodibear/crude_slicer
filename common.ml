@@ -74,6 +74,9 @@ let map_pair f (a, b) = f a, f b
 
 let some x = Some x
 
+type (_, _) eq =
+  | Refl : ('a, 'a) eq
+
 module List = struct
   include List
 
