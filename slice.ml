@@ -201,7 +201,7 @@ module Make (Analysis : Region.Analysis) = struct
         fun e ->
           match R.match_container_of1 e.enode, R.match_container_of2 e.enode with
           | Some (e, _), _
-          | _,           Some (e, _) -> do_expr e;             SkipChildren
+          | _,           Some (e, _) -> do_expr e;           SkipChildren
           | None,        None        ->
             match e.enode with
             | AddrOf  (Mem e, off)

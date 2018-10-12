@@ -13,6 +13,11 @@
             }
         ]
     },
+    "files.watcherExclude": {
+        "**/.git/objects/**": true,
+        "**/.git/subtree-cache/**": true,
+        "**/frama-c/*/**": true
+    },
     "files.exclude": {
         "**/.git": true,
         "**/.svn": true,

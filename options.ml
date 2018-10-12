@@ -123,6 +123,24 @@ module Choice_function =
       let default = "__VERIFIER_choose"
     end)
 
+module Uniformity_flag_function =
+  String
+    (struct
+      let option_name = "-uniformity_flag_function"
+      let help = "May specify an alternative name for __VERIFIER_is_uniform_region"
+      let arg_name = "name"
+      let default = "__VERIFIER_is_uniform_region"
+    end)
+
+module Evaluation_function =
+  String
+    (struct
+      let option_name = "-evaluation_function"
+      let help = "May specify an alternative name for __VERIFIER_eval_region"
+      let arg_name = "name"
+      let default = "__VERIFIER_eval_region"
+    end)
+
 module Stub_postfix =
   String
     (struct

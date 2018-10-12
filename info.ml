@@ -15,6 +15,8 @@
 (* limitations under the License.                                             *)
 (******************************************************************************)
 
+[@@@warning "-42-44-45"]
+
 open Cil
 open Cil_types
 open Cil_printer
@@ -22,7 +24,7 @@ open Cil_datatype
 
 open Format
 open Extlib
-open! Common
+open Common
 open Data
 
 module type Private_index = sig
@@ -143,6 +145,7 @@ module type Function = sig
     module Var : Variable
     module Mem : Memory with module R := R and module U := U
   end
+  val f : fundec
 end
 
 module type Writes = sig
@@ -150,17 +153,24 @@ module type Writes = sig
   module U : Unifiable with module R := R
   module G : Global    with module R := R and module U := U
   module F : Function  with module R := R and module U := U
-  type readable =
+  type frameable =
     [ `Global_var of G.Var.t
     | `Poly_var   of F.Poly.Var.t
-    | `Local_var  of F.Local.Var.t
     | `Global_mem of G.Mem.t
-    | `Poly_mem   of F.Poly.Mem.t
+    | `Poly_mem   of F.Poly.Mem.t ]
+
+  type readable =
+    [ frameable
+    | `Local_var  of F.Local.Var.t
     | `Local_mem  of F.Local.Mem.t ]
 
   type t = [ readable  | `Result ]
 
   include Hashed_ordered_printable with type t := t
+  val equal' : [< t] -> [< t] -> bool
+  val compare' : [< t] -> [< t] -> int
+  val hash' : [< t] -> int
+  val pp' : formatter -> [< t] -> unit
 end
 
 type ('w, _) reads = ..
@@ -234,6 +244,7 @@ module type Op = sig
   type unary =
     [ `Cast of ikind
     | `Minus
+    | `Bw_neg
     | `Neg ]
   type binary =
     [ `Plus
@@ -261,9 +272,15 @@ type _ readable = ..
 module type Readables = sig
   type r
   type _ readable += W : r readable
+  val f : fundec
 end
 
 type 'r readables = (module Readables with type r = 'r)
+
+let eq_readables (type r1 r2) ((module R1) : r1 readables) (((module R2) : r2 readables)) : (r1, r2) eq =
+  match R1.W with
+  | R2.W -> Refl
+  | _    -> Console.fatal "Info.eq_readables: different witnesses"
 
 type (_, _, _) binding = ..
 
@@ -271,15 +288,15 @@ module Symbolic : sig
   module Op : Op
   module Id : Private_index
   type 'r node =
-    | Const of Integer.t
+    | Const of Integer.t * ikind
     | Read of 'r
     | Nondet of stmt * lval
     | Top
     | Bot
-    | Ite of exp * 'r t * 'r t * 'r t
-    | Unary of Op.unary * 'r t
-    | Binary of Op.binary * 'r t * 'r t
-    | Let : ('cr, 'r, 'e) binding * 'e * 'r t -> 'cr node (* Should be handled from the INSIDE! *)
+    | Ite of exp * 'r t * 'r t * 'r t * typ
+    | Unary of Op.unary * 'r t * typ
+    | Binary of Op.binary * 'r t * 'r t * typ
+    | Let : stmt * ('cr, 'r, 'e) binding * 'e * 'r t -> 'cr node (* Should be handled from the INSIDE! *)
   and 'r t = private
     {
       node : 'r node;
@@ -287,7 +304,7 @@ module Symbolic : sig
     }
   val mk : 'r node -> 'r t
   module Node : sig
-    type he = { f : 'cr 'r 'e . ('cr, 'r, 'e) binding -> 'e -> int }
+    type he = { f : 'cr 'r 'e. ('cr, 'r, 'e) binding -> 'e -> int }
     val hash : ('r -> int) -> he -> 'r node -> int
     type ee = { f : 'cr 'r1 'e1 'r2 'e2. ('cr, 'r1, 'e1) binding -> 'e1 -> ('cr, 'r2, 'e2) binding -> 'e2 -> bool }
     val equal : ('r -> 'r -> bool) -> ee -> 'r node -> 'r node -> bool
@@ -300,15 +317,15 @@ end = struct
   module Id = Make_index ()
   module rec Op : Op = Op
   type 'r node =
-    | Const of Integer.t
+    | Const of Integer.t * ikind
     | Read of 'r
     | Nondet of stmt * lval
     | Top
     | Bot
-    | Ite of exp * 'r t * 'r t * 'r t
-    | Unary of Op.unary * 'r t
-    | Binary of Op.binary * 'r t * 'r t
-    | Let : ('cr, 'r, 'e) binding * 'e * 'r t -> 'cr node
+    | Ite of exp * 'r t * 'r t * 'r t * typ
+    | Unary of Op.unary * 'r t * typ
+    | Binary of Op.binary * 'r t * 'r t * typ
+    | Let : stmt * ('cr, 'r, 'e) binding * 'e * 'r t -> 'cr node
   and 'r t =
     {
       node : 'r node;
@@ -316,32 +333,39 @@ end = struct
     }
   module Node = struct
     type he = { f : 'cr 'r 'e . ('cr, 'r, 'e) binding -> 'e -> int }
-    let hash hr he =
+    let hash hr he : _ node -> _ =
       function
-      | Const c            -> 11 * Integer.hash c + 1
-      | Read r             -> 11 * hr r + 2
-      | Nondet (s, l)      -> 11 * (257 * Stmt.hash s + Lval.hash l) + 3
-      | Top                -> 4
-      | Bot                -> 5
-      | Ite (c, i, t, e)   -> 11 * Id.(105871 * Exp.hash c + hash i.id + 1351 * hash t.id + 257 * hash e.id) + 6
-      | Unary (u, a)       -> 11 * (257 * Hashtbl.hash u + Id.hash a.id) + 7
-      | Binary (b, v1, v2) -> 11 * Id.(1351 * Hashtbl.hash b + 257 * hash v1.id + hash v2.id) + 8
-      | Let (b, e, v)      -> 11 * (257 * he.f b e + Id.hash v.id) + 9
+      | Const (c, k)          -> 11 * (257 * Integer.hash c + Hashtbl.hash k) + 1
+      | Read r                -> 11 * hr r + 2
+      | Nondet (s, l)         -> 11 * (257 * Stmt.hash s + Lval.hash l) + 3
+      | Top                   -> 4
+      | Bot                   -> 5
+      | Ite (c, i, t, e, ty)  -> 11 * Id.(105871 * Exp.hash c + hash i.id + 1351 * hash t.id + 257 * hash e.id
+                                          + Typ.hash ty) + 6
+      | Unary (u, a, t)       -> 11 * (1351 * Hashtbl.hash u + 257 * Id.hash a.id + Typ.hash t) + 7
+      | Binary (b, v1, v2, t) -> 11 * Id.(105871 * Hashtbl.hash b + 1351 * hash v1.id + 257 * hash v2.id + Typ.hash t)
+                                 + 8
+      | Let (s, b, e, v)      -> 11 * (1351 * Stmt.hash s + 257 * he.f b e + Id.hash v.id) + 9
     type ee = { f : 'cr 'r1 'e1 'r2 'e2. ('cr, 'r1, 'e1) binding -> 'e1 -> ('cr, 'r2, 'e2) binding -> 'e2 -> bool }
-    let equal er ee n1 n2 =
+    let equal er (ee : ee) (n1 : _ node) (n2 : _ node) =
       match n1, n2 with
-      | Const c1,              Const c2             -> Integer.equal c1 c2
-      | Read r1,               Read r2              -> er r1 r2
-      | Nondet (s1, l1),       Nondet (s2, l2)      -> Stmt.equal s1 s2 && Lval.equal l1 l2
-      | Top,                   Top
-      | Bot,                   Bot                  -> true
-      | Ite (c1, i1, t1, e1),  Ite (c2, i2, t2, e2) -> Exp.equal c1 c2 &&
-                                                       Id.(equal i1.id i2.id &&
-                                                           equal t1.id t2.id &&
-                                                           equal e1.id e2.id)
-      | Unary (u1, a1),        Unary (u2, a2)       -> u1 = u2 && Id.equal a1.id a2.id
-      | Binary (b1, v11, v12), Binary(b2, v21, v22) -> b1 = b2 && Id.(equal v11.id v21.id && equal v12.id v22.id)
-      | Let (b1, e1, v1),      Let (b2, e2, v2)     -> ee.f b1 e1 b2 e2 && Id.equal v1.id v2.id
+      | Const (c1, k1),            Const (c2, k2)            -> Integer.equal c1 c2 && k1 = k2
+      | Read r1,                   Read r2                   -> er r1 r2
+      | Nondet (s1, l1),           Nondet (s2, l2)           -> Stmt.equal s1 s2 && Lval.equal l1 l2
+      | Top,                       Top
+      | Bot,                       Bot                       -> true
+      | Ite (c1, i1, t1, e1, ty1), Ite (c2, i2, t2, e2, ty2) -> Exp.equal c1 c2 &&
+                                                                Id.(equal i1.id i2.id &&
+                                                                    equal t1.id t2.id &&
+                                                                    equal e1.id e2.id) &&
+                                                                Typ.equal ty1 ty2
+      | Unary (u1, a1, t1),        Unary (u2, a2, t2)        -> u1 = u2 && Id.equal a1.id a2.id && Typ.equal t1 t2
+      | Binary (b1, v11, v12, t1), Binary(b2, v21, v22, t2)  -> b1 = b2 &&
+                                                                Id.(equal v11.id v21.id && equal v12.id v22.id) &&
+                                                                Typ.equal t1 t2
+      | Let (s1, b1, e1, v1),      Let (s2, b2, e2, v2)      -> Stmt.equal s1 s2 &&
+                                                                ee.f b1 e1 b2 e2 &&
+                                                                Id.equal v1.id v2.id
       | (Const _
         | Read _
         | Nondet _
@@ -350,7 +374,7 @@ end = struct
         | Ite _
         | Unary _
         | Binary _
-        | Let _),              _                    -> false
+        | Let _),                  _                         -> false
   end
 
   let id = ref ~-1
@@ -366,43 +390,44 @@ end = struct
     let pp = pp ppr ppe in
     let pr f = Format.fprintf fmt f in
     match u.node with
-    | Const i            -> pr "%s" (Integer.to_string i)
-    | Read r             -> pr "%a" ppr r
-    | Nondet (s, l)      -> pr "*_(%d,%a)" s.sid Lval.pretty l
-    | Top                -> pr "T"
-    | Bot                -> pr "_|_"
-    | Ite (c, i, t, e)   -> pr "(@[%a (%d)@ ?@ %a@ :@ %a@])" pp i c.eid pp t pp e
-    | Unary (u, a)       ->(pr "(@[";
-                            begin match u with
-                            | `Cast i -> pr "(%a)" Cil_printer.pp_ikind i
-                            | `Minus  -> pr "-"
-                            | `Neg    -> pr "!"
-                            end;
-                            pr " %a@])" pp a)
-    | Binary (b, a1, a2) ->(pr "([@%a@ " pp a1;
-                            pr @@
-                            begin match b with
-                            | `Plus        -> "+"
-                            | `Minus       -> "-"
-                            | `Mult        -> "*"
-                            | `Div         -> "/"
-                            | `Mod         -> "%%"
-                            | `Shift_left  -> "<<"
-                            | `Shift_right -> ">>"
-                            | `Lt          -> "<"
-                            | `Gt          -> ">"
-                            | `Le          -> "<="
-                            | `Ge          -> ">="
-                            | `Eq          -> "=="
-                            | `Ne          -> "!="
-                            | `Bw_and      -> "&"
-                            | `Bw_xor      -> "^"
-                            | `Bw_or       -> "|"
-                            | `And         -> "&&"
-                            | `Or          -> "||"
-                            end;
-                            pr "@ %a])" pp a2)
-    | Let (b, e, _)      -> ppe.f fmt b e
+    | Const (i, _)          -> pr "%s" (Integer.to_string i)
+    | Read r                -> pr "%a" ppr r
+    | Nondet (s, l)         -> pr "*_(%d,%a)" s.sid Lval.pretty l
+    | Top                   -> pr "T"
+    | Bot                   -> pr "_|_"
+    | Ite (c, i, t, e, _)   -> pr "(@[%a (%d)@ ?@ %a@ :@ %a@])" pp i c.eid pp t pp e
+    | Unary (u, a, _)       ->(pr "(@[";
+                               begin match u with
+                               | `Cast i -> pr "(%a)" Cil_printer.pp_ikind i
+                               | `Minus  -> pr "-"
+                               | `Bw_neg -> pr "~"
+                               | `Neg    -> pr "!"
+                               end;
+                               pr " %a@])" pp a)
+    | Binary (b, a1, a2, _) ->(pr "([@%a@ " pp a1;
+                               pr @@
+                               begin match b with
+                               | `Plus        -> "+"
+                               | `Minus       -> "-"
+                               | `Mult        -> "*"
+                               | `Div         -> "/"
+                               | `Mod         -> "%%"
+                               | `Shift_left  -> "<<"
+                               | `Shift_right -> ">>"
+                               | `Lt          -> "<"
+                               | `Gt          -> ">"
+                               | `Le          -> "<="
+                               | `Ge          -> ">="
+                               | `Eq          -> "=="
+                               | `Ne          -> "!="
+                               | `Bw_and      -> "&"
+                               | `Bw_xor      -> "^"
+                               | `Bw_or       -> "|"
+                               | `And         -> "&&"
+                               | `Or          -> "||"
+                               end;
+                               pr "@ %a])" pp a2)
+    | Let (_, b, e, _)      -> ppe.f fmt b e
 end
 
 module type Summary = sig
@@ -423,26 +448,29 @@ module type Summary = sig
         global_mems : 'r t G.Mem.M.t
       }
 
-    type nonrec t = W.readable t
+    type u = W.frameable t
+    type t
+
+    val eq : (t, u) eq
 
     include Hashed_printable with type t := t
-    module H : Hashtbl.S with type key := t
+    module H : FCHashtbl.S with type key := t
 
-    module Readable : Readables with type r = W.readable
+    module Readable : Readables with type r = W.frameable
 
-    val readable : W.readable readables
+    val readable : W.frameable readables
 
     type (_, _, _) binding += W : 'r readables -> ('cr, 'r, 'cr env) binding
 
-    val const : Integer.t -> t
-    val read : W.readable -> t
+    val const : Integer.t -> ikind -> t
+    val read : W.frameable -> t
     val nondet : stmt -> lval -> t
     val top : t
     val bot : t
-    val ite : exp -> t -> t -> t -> t
-    val unary : Op.unary -> t -> t
-    val binary : Op.binary -> t -> t -> t
-    val prj : 'r readables -> 'r env -> t -> 'r Symbolic.t
+    val ite : exp -> t -> t -> t -> typ -> t
+    val unary : Op.unary -> t -> typ -> t
+    val binary : Op.binary -> t -> t -> typ -> t
+    val prj : stmt -> 'r readables -> 'r env -> t -> 'r Symbolic.t
 
     val strengthen : stmt -> lval -> t -> t
     val covers : t -> t -> bool
@@ -452,7 +480,7 @@ module type Summary = sig
   type u =
     {
       pre        : Symbolic.t;
-      post       : W.readable Symbolic.env;
+      post       : W.frameable Symbolic.env;
       local_vars : Symbolic.t F.Local.Var.M.t;
       local_mems : Symbolic.t F.Local.Mem.M.t
     }
@@ -668,6 +696,7 @@ module Function (R : Representant) (U : Unifiable with module R := R) (F : sig v
         (struct let is_ok r = match R.kind r with `Poly f when String.equal f F.f.svar.vname -> true | _ -> false end)
         ()
   end
+  let f = F.f
 end
 
 module Writes
@@ -677,12 +706,15 @@ module Writes
     (F : Function with module R := R and module U := U) :
   Writes with module R := R and module U := U and module G := G and module F := F = struct
 
-  type readable =
+  type frameable =
     [ `Global_var of G.Var.t
     | `Poly_var   of F.Poly.Var.t
-    | `Local_var  of F.Local.Var.t
     | `Global_mem of G.Mem.t
-    | `Poly_mem   of F.Poly.Mem.t
+    | `Poly_mem   of F.Poly.Mem.t ]
+
+  type readable =
+    [ frameable
+    | `Local_var  of F.Local.Var.t
     | `Local_mem  of F.Local.Mem.t ]
 
   type t = [ readable | `Result ]
@@ -717,7 +749,7 @@ module Writes
     | `Local_mem m1, `Local_mem m2    -> F.Local.Mem.compare m1 m2
     | `Local_mem _,   _               -> -1
     | `Result,        `Result         -> 0
-    | `Result,        _               -> 1
+    | `Result,        #t              -> 1
 
   let equal w1 w2 =
     match[@warning "-4"] w1, w2 with
@@ -728,7 +760,7 @@ module Writes
     | `Poly_mem m1,   `Poly_mem m2   -> F.Poly.Mem.equal  m1 m2
     | `Local_mem m1,  `Local_mem m2  -> F.Local.Mem.equal m1 m2
     | `Result,        `Result        -> true
-    | _                              -> false
+    | #t,             #t             -> false
 
   let hash =
     function
@@ -750,6 +782,11 @@ module Writes
     | `Poly_mem m   -> pp "'%a" F.Poly.Mem.pp  m
     | `Local_mem m  -> pp "~%a" F.Local.Mem.pp m
     | `Result       -> pp "!R"
+
+  let compare' = compare
+  let equal' = equal
+  let hash' = hash
+  let pp' = pp
 end
 
 module Reads
@@ -952,25 +989,27 @@ module Summary
         global_mems : 'r t G.Mem.M.t
       }
 
-    type nonrec t = W.readable t
+    type u = W.frameable t
+    type t = u
+
+    let eq = Refl
 
     module Readable = struct
-      type r = W.readable
+      type r = W.frameable
       type _ readable += W : r readable
+      let f = F.f
     end
 
-    let readable : W.readable readables = (module Readable)
+    let readable : W.frameable readables = (module Readable)
 
     type (_, _, _) binding += W : 'r readables -> ('cr, 'r, 'cr env) binding
 
     module Bare = struct
       open Node
       type t = E : 'r readables * 'r node -> t
-      let hash (type r) (r : r readable) (n : r node) =
+      let hash (type r) (r : r readables) (n : r node) =
         hash
-          (match r with
-          | Readable.W -> (W.hash :> W.readable -> _)
-          | _          -> fun _ -> Console.fatal "Symbolic.Bare.hash: unexpected witness" : r -> _)
+          (fun f -> let Refl = eq_readables r readable in W.hash' f : r -> _)
           { f = fun (type cr r e) (w : (cr, r, e) binding) (e : e) ->
               match w with
               | W _ ->(let fold hash v u acc = 15487399 * acc + 105871 * hash v + Id.hash u.id in
@@ -980,12 +1019,10 @@ module Summary
                        G.Mem.M.fold (fold G.Mem.hash) e.global_mems 0)
               | _   -> Console.fatal "Symbolic.Bare.hash: unexpected witness" }
           n
-      let hash (E ((module R), n)) = hash R.W n
-      let equal (type r) (r1 : r readable) (n1 : r node) (r2 : r readable) (n2 : r node) =
+      let hash (E (r, n)) = hash r n
+      let equal (type r) (r1 : r readables) (n1 : r node) (r2 : r readables) (n2 : r node) =
         equal
-          (match r1, r2 with
-          | Readable.(W, W) -> (W.equal :> W.readable -> W.readable -> _)
-          | _               -> fun _ -> Console.fatal "Symbolic.Bare.equal: unexpected witness" : r -> r -> _ )
+          (fun f -> let Refl = eq_readables r1 readable in W.equal' f : r -> r -> _)
           { f = fun (type cr r1 e1 r2 e2)
               (w1 : (cr, r1, e1) binding) (e1 : e1) (w2 : (cr, r2, e2) binding) (e2 : e2) ->
               match w1, w2 with
@@ -996,45 +1033,44 @@ module Summary
                             G.Mem.M.equal by_id e1.global_mems e2.global_mems)
               | _        -> Console.fatal "Symbolic.Bare.equal: unexpected witness" }
           n1 n2
-      let equal (E ((module R1), n1)) (E ((module R2), n2)) =
+      let equal (E ((module R1) as r1, n1)) (E ((module R2) as r2, n2)) =
         match R1.W with
-        | R2.W -> equal R1.W n1 R2.W n2
+        | R2.W -> equal r1 n1 r2 n2
         | _    -> false
     end
 
     type mk = { f : 'r. 'r readables -> 'r node -> 'r Symbolic.t }
-    let mk =
+    let mk : mk =
       let module Ex = struct type ex = E : 'r readables * 'r Symbolic.t -> ex end in
       let module H = Hashtbl.Make (Bare) in
       let h = H.create 128 in
-      { f = fun (type r) ((module R) as r : r readables) (n : r node) : r Symbolic.t ->
-          let Ex.E ((module R1), r) =
-            let key = Bare.E (r, n) in try H.find h key with Not_found -> let r = Ex.E (r, mk n) in H.add h key r; r
+      { f = fun (type r) (r0 : r readables) (n : r node) : r Symbolic.t ->
+          let Ex.E (r1, r) =
+            let key = Bare.E (r0, n) in try H.find h key with Not_found -> let r = Ex.E (r0, mk n) in H.add h key r; r
           in
-          match R1.W with
-          | R.W -> r
-          | _   -> Console.fatal "Symbolic.mk: got unexpected symbolic value after hashconsing" }
+          let Refl = eq_readables r0 r1 in
+          r }
     let mk' = mk.f readable
 
-    let const i = mk' @@ Const i
+    let const i k = mk' @@ Const (i, k)
     let read r = mk' @@ Read r
     let nondet s l = mk' @@ Nondet (s, l)
     let top = mk' Top
     let bot = mk' Bot
-    let ite c i t e = mk' @@ Ite (c, i, t, e)
-    let unary u a = mk' @@ Unary (u, a)
-    let binary b a1 a2 = mk' @@ Binary (b, a1, a2)
-    let prj r e v = mk.f r @@ Let (W readable, e, v)
+    let ite c i t e ty = mk' @@ Ite (c, i, t, e, ty)
+    let unary u a t = mk' @@ Unary (u, a, t)
+    let binary b a1 a2 t = mk' @@ Binary (b, a1, a2, t)
+    let prj s r e v = mk.f r @@ Let (s, W readable, e, v)
 
     let hash = hash
     let equal = equal
 
-    module H = Hashtbl.Make (struct type nonrec t = t let hash = hash let equal = equal end)
+    module H = FCHashtbl.Make (struct type nonrec t = t let hash = hash let equal = equal end)
 
     let pp =
       let pp_id fmt v = fprintf fmt "%a" Id.pp v.id in
       pp
-        (W.pp :> _ -> W.readable -> _)
+        W.pp'
         { f = fun (type cr r e) fmt (w : (cr, r, e) binding) (e : e) ->
             match w with
             | W _ -> Pretty_utils
@@ -1045,7 +1081,7 @@ module Summary
                          (pp_iter2 ~sep:",@ " ~between:" -> " G.Mem.M.iter G.Mem.pp pp_id) e.global_mems)
             |_    -> Console.fatal "Symbolic.pp: unexpected witness" }
 
-    let rec strengthen s l v =
+    let strengthen s l v =
       match v.node with
       | Const _
       | Read _
@@ -1060,7 +1096,7 @@ module Summary
       match v1.node, v2.node with
       | Top,       _
       | _,         Bot   -> true
-      | n1,        n2
+      | _,         _
         when equal v1 v2 -> true
       | (Const _
         | Read _
@@ -1073,83 +1109,92 @@ module Summary
     let merge v1 v2 =
       match v1.node, v2.node with
       | Top,  _
-      | _,                    Top                  -> top
-      | Bot,                  _                    -> v1
-      | _,                    Bot                  -> v2
-      | Ite (c1, i1, t1, e1), Ite (c2, i2, t2, e2)
+      | _,                         Top                       -> top
+      | Bot,                       _                         -> v1
+      | _,                         Bot                       -> v2
+      | Ite (c1, i1, t1, e1, ty1), Ite (c2, i2, t2, e2, ty2)
         when Exp.equal c1 c2
           && equal i1 i2
           && (t1.node = Bot || t2.node = Bot)
-          && (e1.node = Bot || e2.node = Bot)      -> ite
-                                                        c1
-                                                        i1
-                                                        (if t2.node = Bot then t1 else t2)
-                                                        (if e2.node = Bot then e1 else e2)
-      | n1,                   n2
-        when equal v1 v2                           -> v1
-      | _,    _                                    -> top
+          && (e1.node = Bot || e2.node = Bot)
+          && Typ.equal ty1 ty2                               -> ite
+                                                                  c1
+                                                                  i1
+                                                                  (if t2.node = Bot then t1 else t2)
+                                                                  (if e2.node = Bot then e1 else e2)
+                                                                  ty1
+      | _,                         _
+        when equal v1 v2                                     -> v1
+      |(Const _
+       | Read _
+       | Nondet _
+       | Ite _
+       | Unary _
+       | Binary _
+       | Let _),                   _                         -> top
   end
 
   type u =
     {
       pre        : Symbolic.t;
-      post       : W.readable Symbolic.env;
+      post       : W.frameable Symbolic.env;
       local_vars : Symbolic.t F.Local.Var.M.t;
       local_mems : Symbolic.t F.Local.Mem.M.t
     }
 
   type t = u
   let eq = Refl
+
+  open Symbolic
   let empty =
-    Symbolic.
-      {
-        pre = top;
-        post =
-          {
-            poly_vars   = F.Poly.Var.M.empty;
-            poly_mems   = F.Poly.Mem.M.empty;
-            global_vars = G.Var.M.empty;
-            global_mems = G.Mem.M.empty
-          };
-        local_vars = F.Local.Var.M.empty;
-        local_mems = F.Local.Mem.M.empty
-      }
+    {
+      pre = top;
+      post =
+        {
+          poly_vars   = F.Poly.Var.M.empty;
+          poly_mems   = F.Poly.Mem.M.empty;
+          global_vars = G.Var.M.empty;
+          global_mems = G.Mem.M.empty
+        };
+      local_vars = F.Local.Var.M.empty;
+      local_mems = F.Local.Mem.M.empty
+    }
   let strengthen stmt f s =
-    let strengthen map wr = map @@ Symbolic.strengthen stmt % f % wr in
+    let strengthen_ map wr = map @@ strengthen stmt % f % wr in
     {
       pre = s.pre;
       post =
         {
-          poly_vars   = strengthen F.Poly.Var.M.mapi  (fun v -> `Poly_var v)   s.post.poly_vars;
-          poly_mems   = strengthen F.Poly.Mem.M.mapi  (fun m -> `Poly_mem m)   s.post.poly_mems;
-          global_vars = strengthen G.Var.M.mapi       (fun v -> `Global_var v) s.post.global_vars;
-          global_mems = strengthen G.Mem.M.mapi       (fun m -> `Global_mem m) s.post.global_mems
+          poly_vars   = strengthen_ F.Poly.Var.M.mapi  (fun v -> `Poly_var v)   s.post.poly_vars;
+          poly_mems   = strengthen_ F.Poly.Mem.M.mapi  (fun m -> `Poly_mem m)   s.post.poly_mems;
+          global_vars = strengthen_ G.Var.M.mapi       (fun v -> `Global_var v) s.post.global_vars;
+          global_mems = strengthen_ G.Mem.M.mapi       (fun m -> `Global_mem m) s.post.global_mems
         };
-      local_vars      = strengthen F.Local.Var.M.mapi (fun v -> `Local_var v)  s.local_vars;
-      local_mems      = strengthen F.Local.Mem.M.mapi (fun m -> `Local_mem m)  s.local_mems
+      local_vars      = strengthen_ F.Local.Var.M.mapi (fun v -> `Local_var v)  s.local_vars;
+      local_mems      = strengthen_ F.Local.Mem.M.mapi (fun m -> `Local_mem m)  s.local_mems
     }
   let covers s1 s2 =
-    Symbolic.covers s2.pre s1.pre &&
-    let covers find m k v = try Symbolic.covers (find k m) v with Not_found -> false in
-    F.Poly.Var.M.(for_all  (covers find s1.post.poly_vars)   s2.post.poly_vars) &&
-    F.Poly.Mem.M.(for_all  (covers find s1.post.poly_mems)   s2.post.poly_mems) &&
-    G.Var.M.(for_all       (covers find s1.post.global_vars) s2.post.global_vars) &&
-    G.Mem.M.(for_all       (covers find s1.post.global_mems) s2.post.global_mems) &&
-    F.Local.Var.M.(for_all (covers find s1.local_vars)       s2.local_vars) &&
-    F.Local.Mem.M.(for_all (covers find s1.local_mems)       s2.local_mems)
+    covers s2.pre s1.pre &&
+    let covers_ find m k v = try covers (find k m) v with Not_found -> false in
+    F.Poly.Var.M.(for_all  (covers_ find s1.post.poly_vars)   s2.post.poly_vars) &&
+    F.Poly.Mem.M.(for_all  (covers_ find s1.post.poly_mems)   s2.post.poly_mems) &&
+    G.Var.M.(for_all       (covers_ find s1.post.global_vars) s2.post.global_vars) &&
+    G.Mem.M.(for_all       (covers_ find s1.post.global_mems) s2.post.global_mems) &&
+    F.Local.Var.M.(for_all (covers_ find s1.local_vars)       s2.local_vars) &&
+    F.Local.Mem.M.(for_all (covers_ find s1.local_mems)       s2.local_mems)
   let merge s1 s2 =
-    let merge _ = opt_fold @@ some %% swap (opt_fold Symbolic.merge) in
+    let merge_ _ = opt_fold @@ some %% swap (opt_fold merge) in
     {
-      pre = Symbolic.merge s1.pre s2.pre;
+      pre = merge s1.pre s2.pre;
       post =
         {
-          poly_vars   = F.Poly.Var.M.merge  merge s1.post.poly_vars   s2.post.poly_vars;
-          poly_mems   = F.Poly.Mem.M.merge  merge s1.post.poly_mems   s2.post.poly_mems;
-          global_vars = G.Var.M.merge       merge s1.post.global_vars s2.post.global_vars;
-          global_mems = G.Mem.M.merge       merge s1.post.global_mems s2.post.global_mems;
+          poly_vars   = F.Poly.Var.M.merge  merge_ s1.post.poly_vars   s2.post.poly_vars;
+          poly_mems   = F.Poly.Mem.M.merge  merge_ s1.post.poly_mems   s2.post.poly_mems;
+          global_vars = G.Var.M.merge       merge_ s1.post.global_vars s2.post.global_vars;
+          global_mems = G.Mem.M.merge       merge_ s1.post.global_mems s2.post.global_mems;
         };
-      local_vars      = F.Local.Var.M.merge merge s1.local_vars       s2.local_vars;
-      local_mems      = F.Local.Mem.M.merge merge s1.local_mems       s2.local_mems
+      local_vars      = F.Local.Var.M.merge merge_ s1.local_vars       s2.local_vars;
+      local_mems      = F.Local.Mem.M.merge merge_ s1.local_mems       s2.local_mems
     }
 end
 
