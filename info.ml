@@ -153,11 +153,16 @@ module type Writes = sig
   module U : Unifiable with module R := R
   module G : Global    with module R := R and module U := U
   module F : Function  with module R := R and module U := U
-  type frameable =
+  type frameable_var =
     [ `Global_var of G.Var.t
-    | `Poly_var   of F.Poly.Var.t
-    | `Global_mem of G.Mem.t
+    | `Poly_var   of F.Poly.Var.t ]
+
+  type frameable_mem =
+    [ `Global_mem of G.Mem.t
     | `Poly_mem   of F.Poly.Mem.t ]
+
+  type frameable =
+    [ frameable_var | frameable_mem ]
 
   type readable =
     [ frameable
@@ -242,7 +247,7 @@ end
 
 module type Op = sig
   type unary =
-    [ `Cast of ikind
+    [ `Cast of typ
     | `Minus
     | `Bw_neg
     | `Neg ]
@@ -267,114 +272,163 @@ module type Op = sig
     | `Or ]
 end
 
-type _ readable = ..
+type (_, _) readable = ..
 
 module type Readables = sig
-  type r
-  type _ readable += W : r readable
+  type v
+  type m
+  type (_, _) readable += W : (v, m) readable
   val f : fundec
 end
 
-type 'r readables = (module Readables with type r = 'r)
+type ('v, 'm) readables = (module Readables with type v = 'v and type m = 'm)
 
-let eq_readables (type r1 r2) ((module R1) : r1 readables) (((module R2) : r2 readables)) : (r1, r2) eq =
+let eq_readables (type v1 m1 v2 m2) ((module R1) : (v1, m1) readables) (((module R2) : (v2, m2) readables))
+  : (v1 * m1, v2 * m2) eq =
   match R1.W with
   | R2.W -> Refl
   | _    -> Console.fatal "Info.eq_readables: different witnesses"
 
-type (_, _, _) binding = ..
+type 'x binding = .. constraint 'x = < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee >
 
 module Symbolic : sig
   module Op : Op
   module Id : Private_index
-  type 'r node =
-    | Const of Integer.t * ikind
-    | Read of 'r
-    | Nondet of stmt * lval
+  type v = [`V]
+  type m = [`M]
+  type 'a any = [< v | m ] as 'a
+  type ('v, 'm, 'k) node =
     | Top
     | Bot
-    | Ite of exp * 'r t * 'r t * 'r t * typ
-    | Unary of Op.unary * 'r t * typ
-    | Binary of Op.binary * 'r t * 'r t * typ
-    | Let : stmt * ('cr, 'r, 'e) binding * 'e * 'r t -> 'cr node (* Should be handled from the INSIDE! *)
-  and 'r t = private
+    | Cst of Integer.t * ikind
+    | Var of 'v
+    | Mem : 'm -> (_, 'm, m) node
+    | Ndt of stmt * lval
+    | Una of Op.unary * ('v, 'm, v) t * typ
+    | Bin of Op.binary * ('v, 'm, v) t * ('v, 'm, v) t * typ
+    | Sel of ('v, 'm, m) t * ('v, 'm, v) t
+    | Upd : ('v, 'm, m) t * ('v, 'm, v) t * ('v, 'm, v) t -> ('v, 'm, m) node
+    | Ite : exp * ('v, 'm, v) t * ('v, 'm, 'k) t * ('v, 'm, 'k) t * typ -> ('v, 'm, 'k) node
+    | Let : stmt * < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee > binding * 'cee * ('cev, 'cem, 'k) t
+      -> ('crv, 'crm, 'k) node (* Should be handled from the INSIDE! *)
+  and ('v, 'm, 'k) t = private
     {
-      node : 'r node;
+      node : ('v, 'm, 'k) node;
       id   : Id.t
     }
-  val mk : 'r node -> 'r t
+  val mk : ('v, 'm, 'k) node -> ('v, 'm, 'k) t
   module Node : sig
-    type he = { f : 'cr 'r 'e. ('cr, 'r, 'e) binding -> 'e -> int }
-    val hash : ('r -> int) -> he -> 'r node -> int
-    type ee = { f : 'cr 'r1 'e1 'r2 'e2. ('cr, 'r1, 'e1) binding -> 'e1 -> ('cr, 'r2, 'e2) binding -> 'e2 -> bool }
-    val equal : ('r -> 'r -> bool) -> ee -> 'r node -> 'r node -> bool
+    type ('crv, 'crm) he =
+      { f : 'cev 'cem 'cee. < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee > binding -> 'cee -> int }
+    [@@unboxed]
+    val hash : ('v -> int) -> ('m -> int) -> ('v, 'm) he -> ('v, 'm, 'k) node -> int
+    type ('crv, 'crm) ee =
+      { f : 'cev1 'cem1 'cee1 'cev2 'cem2 'cee2.
+              < crv : 'crv; crm : 'crm; cev : 'cev1; cem : 'cem1; cee : 'cee1 > binding
+          -> 'cee1
+          -> < crv : 'crv; crm : 'crm; cev : 'cev2; cem : 'cem2; cee : 'cee2 > binding
+          -> 'cee2
+          -> bool }
+    [@@unboxed]
+    val equal : ('v -> 'v -> bool) -> ('m -> 'm -> bool) -> ('v, 'm) ee
+      -> ('v, 'm, 'k1) node -> ('v, 'm, 'k2) node -> bool
   end
-  val hash : 'r t -> int
-  val equal : 'r t -> 'r t -> bool
-  type pe = { f : 'cr 'r 'e. formatter -> ('cr, 'r, 'e) binding -> 'e -> unit }
-  val pp : (formatter -> 'r -> unit) -> pe -> formatter -> 'r t -> unit
+  val compare : _ t -> _ t -> int
+  val equal : _ t -> _ t -> bool
+  val hash : _ t -> int
+  type ('crv, 'crm) pe =
+    { f : 'cev 'cem 'cee.
+            formatter -> < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee > binding -> 'cee -> unit }
+  [@@unboxed]
+  val pp : (formatter -> 'v -> unit) -> (formatter -> 'm -> unit) -> ('v ,'m) pe -> formatter -> ('v, 'm, 'k) t -> unit
 end = struct
   module Id = Make_index ()
   module rec Op : Op = Op
-  type 'r node =
-    | Const of Integer.t * ikind
-    | Read of 'r
-    | Nondet of stmt * lval
+  type v = [`V]
+  type m = [`M]
+  type 'a any = [< v | m ] as 'a
+  type ('v, 'm, 'k) node =
     | Top
     | Bot
-    | Ite of exp * 'r t * 'r t * 'r t * typ
-    | Unary of Op.unary * 'r t * typ
-    | Binary of Op.binary * 'r t * 'r t * typ
-    | Let : stmt * ('cr, 'r, 'e) binding * 'e * 'r t -> 'cr node
-  and 'r t =
+    | Cst of Integer.t * ikind
+    | Var of 'v
+    | Mem : 'm -> (_, 'm, m) node
+    | Ndt of stmt * lval
+    | Una of Op.unary * ('v, 'm, v) t * typ
+    | Bin of Op.binary * ('v, 'm, v) t * ('v, 'm, v) t * typ
+    | Sel of ('v, 'm, m) t * ('v, 'm, v) t
+    | Upd : ('v, 'm, m) t * ('v, 'm, v) t * ('v, 'm, v) t -> ('v, 'm, m) node
+    | Ite : exp * ('v, 'm, v) t * ('v, 'm, 'k) t * ('v, 'm, 'k) t * typ -> ('v, 'm, 'k) node
+    | Let : stmt * < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee > binding * 'cee * ('cev, 'cem, 'k) t
+      -> ('crv, 'crm, 'k) node (* Should be handled from the INSIDE! *)
+  and ('v, 'm, 'k) t =
     {
-      node : 'r node;
+      node : ('v, 'm, 'k) node;
       id   : Id.t
     }
   module Node = struct
-    type he = { f : 'cr 'r 'e . ('cr, 'r, 'e) binding -> 'e -> int }
-    let hash hr he : _ node -> _ =
-      function
-      | Const (c, k)          -> 11 * (257 * Integer.hash c + Hashtbl.hash k) + 1
-      | Read r                -> 11 * hr r + 2
-      | Nondet (s, l)         -> 11 * (257 * Stmt.hash s + Lval.hash l) + 3
-      | Top                   -> 4
-      | Bot                   -> 5
-      | Ite (c, i, t, e, ty)  -> 11 * Id.(105871 * Exp.hash c + hash i.id + 1351 * hash t.id + 257 * hash e.id
-                                          + Typ.hash ty) + 6
-      | Unary (u, a, t)       -> 11 * (1351 * Hashtbl.hash u + 257 * Id.hash a.id + Typ.hash t) + 7
-      | Binary (b, v1, v2, t) -> 11 * Id.(105871 * Hashtbl.hash b + 1351 * hash v1.id + 257 * hash v2.id + Typ.hash t)
-                                 + 8
-      | Let (s, b, e, v)      -> 11 * (1351 * Stmt.hash s + 257 * he.f b e + Id.hash v.id) + 9
-    type ee = { f : 'cr 'r1 'e1 'r2 'e2. ('cr, 'r1, 'e1) binding -> 'e1 -> ('cr, 'r2, 'e2) binding -> 'e2 -> bool }
-    let equal er (ee : ee) (n1 : _ node) (n2 : _ node) =
-      match n1, n2 with
-      | Const (c1, k1),            Const (c2, k2)            -> Integer.equal c1 c2 && k1 = k2
-      | Read r1,                   Read r2                   -> er r1 r2
-      | Nondet (s1, l1),           Nondet (s2, l2)           -> Stmt.equal s1 s2 && Lval.equal l1 l2
-      | Top,                       Top
-      | Bot,                       Bot                       -> true
-      | Ite (c1, i1, t1, e1, ty1), Ite (c2, i2, t2, e2, ty2) -> Exp.equal c1 c2 &&
-                                                                Id.(equal i1.id i2.id &&
-                                                                    equal t1.id t2.id &&
-                                                                    equal e1.id e2.id) &&
-                                                                Typ.equal ty1 ty2
-      | Unary (u1, a1, t1),        Unary (u2, a2, t2)        -> u1 = u2 && Id.equal a1.id a2.id && Typ.equal t1 t2
-      | Binary (b1, v11, v12, t1), Binary(b2, v21, v22, t2)  -> b1 = b2 &&
-                                                                Id.(equal v11.id v21.id && equal v12.id v22.id) &&
-                                                                Typ.equal t1 t2
-      | Let (s1, b1, e1, v1),      Let (s2, b2, e2, v2)      -> Stmt.equal s1 s2 &&
-                                                                ee.f b1 e1 b2 e2 &&
-                                                                Id.equal v1.id v2.id
-      | (Const _
-        | Read _
-        | Nondet _
-        | Top
-        | Bot
-        | Ite _
-        | Unary _
-        | Binary _
-        | Let _),                  _                         -> false
+    type ('crv, 'crm) he =
+      { f : 'cev 'cem 'cee. < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee > binding -> 'cee -> int }
+    [@@unboxed]
+    let hash =
+      let hi v = Id.hash v.id in
+      fun (type k) hv hm he : ((_, _, k) node -> _) ->
+        function
+        | Top                  -> 1
+        | Bot                  -> 2
+        | Cst (c, i)           -> 13 * (257 * Integer.hash c + Hashtbl.hash i) + 3
+        | Var v                -> 13 * hv v + 4
+        | Mem m                -> 13 * hm m + 5
+        | Ndt (s, l)           -> 13 * (257 * Stmt.hash s + Lval.hash l) + 6
+        | Una (u, a, t)        -> 13 * (1351 * Hashtbl.hash u + 257 * hi a + Typ.hash t) + 7
+        | Bin (b, v1, v2, t)   -> 11 * (105871 * Hashtbl.hash b + 1351 * hi v1 + 257 * hi v2 + Typ.hash t) + 8
+        | Sel (m, a)           -> 13 * (257 * hi m + hi a) + 9
+        | Upd (m, a, v)        -> 13 * (1351 * hi m + 257 * hi a + hi v) + 10
+        | Ite (c, i, t, e, ty) -> 13 * (105871 * Exp.hash c + hi i + 1351 * hi t + 257 * hi e + Typ.hash ty) + 11
+        | Let (s, b, e, v)     -> 13 * (1351 * Stmt.hash s + 257 * he.f b e + hi v) + 12
+    type ('crv, 'crm) ee =
+      { f : 'cev1 'cem1 'cee1 'cev2 'cem2 'cee2.
+              < crv : 'crv; crm : 'crm; cev : 'cev1; cem : 'cem1; cee : 'cee1 > binding
+          -> 'cee1
+          -> < crv : 'crv; crm : 'crm; cev : 'cev2; cem : 'cem2; cee : 'cee2 > binding
+          -> 'cee2
+          -> bool }
+    [@@unboxed]
+    let equal =
+      let ei v1 v2 = Id.equal v1.id v2.id in
+      fun (type k1 k2) ev em (ee : (_, _) ee) (n1 : (_, _ , k1) node) (n2 : (_, _, k2) node) ->
+        match n1, n2 with
+        | Top,                       Top
+        | Bot,                       Bot                       -> true
+        | Cst (c1, k1),              Cst (c2, k2)              -> Integer.equal c1 c2 && k1 = k2
+        | Var v1,                    Var v2                    -> ev v1 v2
+        | Mem m1,                    Mem m2                    -> em m1 m2
+        | Ndt (s1, l1),              Ndt (s2, l2)              -> Stmt.equal s1 s2 && Lval.equal l1 l2
+        | Una (u1, a1, t1),          Una (u2, a2, t2)          -> u1 = u2 && ei a1 a2 && Typ.equal t1 t2
+        | Bin (b1, v11, v12, t1),    Bin (b2, v21, v22, t2)    -> b1 = b2 && ei v11 v21 && ei v12 v22 &&
+                                                                  Typ.equal t1 t2
+        | Sel (m1, a1),              Sel (m2, a2)              -> ei m1 m2 && ei a1 a2
+        | Upd (m1, a1, v1),          Upd (m2, a2, v2)          -> ei m1 m2 && ei a1 a2 && ei v1 v2
+        | Ite (c1, i1, t1, e1, ty1), Ite (c2, i2, t2, e2, ty2) -> Exp.equal c1 c2 &&
+                                                                  ei i1 i2 &&
+                                                                  ei t1 t2 &&
+                                                                  ei e1 e2 &&
+                                                                  Typ.equal ty1 ty2
+        | Let (s1, b1, e1, v1),      Let (s2, b2, e2, v2)      -> Stmt.equal s1 s2 &&
+                                                                  ee.f b1 e1 b2 e2 &&
+                                                                  ei v1 v2
+        |(Top
+         | Bot
+         | Cst _
+         | Var _
+         | Ndt _
+         | Una _
+         | Bin _
+         | Sel _
+         | Ite _
+         | Let _),                   _                         -> false
+        | Mem _,                     _                         -> false
+        | Upd _,                     _                         -> false
   end
 
   let id = ref ~-1
@@ -383,28 +437,36 @@ end = struct
 
   let hash { id; _ } = Id.coerce id
 
-  let equal u1 u2 = Id.equal u1.id u2.id
+  let equal v1 v2 = Id.equal v1.id v2.id
 
-  type pe = { f : 'cr 'r 'e. formatter -> ('cr, 'r, 'e) binding -> 'e -> unit }
-  let rec pp ppr ppe fmt u =
-    let pp = pp ppr ppe in
-    let pr f = Format.fprintf fmt f in
-    match u.node with
-    | Const (i, _)          -> pr "%s" (Integer.to_string i)
-    | Read r                -> pr "%a" ppr r
-    | Nondet (s, l)         -> pr "*_(%d,%a)" s.sid Lval.pretty l
-    | Top                   -> pr "T"
-    | Bot                   -> pr "_|_"
-    | Ite (c, i, t, e, _)   -> pr "(@[%a (%d)@ ?@ %a@ :@ %a@])" pp i c.eid pp t pp e
-    | Unary (u, a, _)       ->(pr "(@[";
+  let compare v1 v2 = Id.compare v1.id v2.id
+
+  type ('crv, 'crm) pe = { f : 'cev 'cem 'cee.
+                                 formatter
+                             -> < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee > binding
+                             -> 'cee
+                             -> unit }
+  [@@unboxed]
+  let rec pp : type k. _ -> _ -> _ -> _ -> (_, _ , k) t -> _ =
+    fun ppv ppm ppe fmt u ->
+      let pp f = pp ppv ppm ppe f in
+      let pr f = Format.fprintf fmt f in
+      match u.node with
+      | Top                 -> pr "T"
+      | Bot                 -> pr "_|_"
+      | Cst (i, _)          -> pr "%s" (Integer.to_string i)
+      | Var v               -> pr "%a" ppv v
+      | Mem m               -> pr "%a" ppm m
+      | Ndt (s, l)          -> pr "*_(%d,%a)" s.sid Lval.pretty l
+      | Una (u, a, _)       ->(pr "(@[";
                                begin match u with
-                               | `Cast i -> pr "(%a)" Cil_printer.pp_ikind i
+                               | `Cast t -> pr "(%a)" Cil_printer.pp_typ t
                                | `Minus  -> pr "-"
                                | `Bw_neg -> pr "~"
                                | `Neg    -> pr "!"
                                end;
                                pr " %a@])" pp a)
-    | Binary (b, a1, a2, _) ->(pr "([@%a@ " pp a1;
+      | Bin (b, a1, a2, _)  ->(pr "([@%a@ " pp a1;
                                pr @@
                                begin match b with
                                | `Plus        -> "+"
@@ -427,7 +489,10 @@ end = struct
                                | `Or          -> "||"
                                end;
                                pr "@ %a])" pp a2)
-    | Let (_, b, e, _)      -> ppe.f fmt b e
+      | Sel (m, a)          -> pr "%a[@[%a@]]" pp m pp a
+      | Upd (m, a, v)       -> pr "%a[@[%a@]@ <-@ @[%a@]]" pp m pp a pp v
+      | Ite (c, i, t, e, _) -> pr "(@[%a (%d)@ ?@ %a@ :@ %a@])" pp i c.eid pp t pp e
+      | Let (_, b, e, _)    -> ppe.f fmt b e
 end
 
 module type Summary = sig
@@ -440,49 +505,81 @@ module type Summary = sig
   module Symbolic : sig
     open Symbolic
 
-    type 'r env =
+    type ('v, 'm) env =
       {
-        poly_vars   : 'r t F.Poly.Var.M.t;
-        poly_mems   : 'r t F.Poly.Mem.M.t;
-        global_vars : 'r t G.Var.M.t;
-        global_mems : 'r t G.Mem.M.t
+        poly_vars   : ('v, 'm, v) t F.Poly.Var.M.t;
+        poly_mems   : ('v, 'm, m) t F.Poly.Mem.M.t;
+        global_vars : ('v, 'm, v) t G.Var.M.t;
+        global_mems : ('v, 'm, m) t G.Mem.M.t
       }
 
-    type u = W.frameable t
-    type t
+    type 'k u = (W.frameable_var, W.frameable_mem, 'k) t
+    type tv
+    type tm
 
-    val eq : (t, u) eq
+    val eq : (tv * tm, v u * m u) eq
 
-    include Hashed_printable with type t := t
-    module H : FCHashtbl.S with type key := t
+    val compare : 'k u -> 'k u -> int
+    val equal : 'k u -> 'k u -> bool
+    val hash : 'k u -> int
 
-    module Readable : Readables with type r = W.frameable
+    module Readable : Readables with type v = W.frameable_var and type m = W.frameable_mem
 
-    val readable : W.frameable readables
+    val readable : (W.frameable_var, W.frameable_mem) readables
 
-    type (_, _, _) binding += W : 'r readables -> ('cr, 'r, 'cr env) binding
+    type _ binding +=
+        W : ('v, 'm) readables -> < crv : 'crv; crm : 'crm; cev : 'v; cem : 'm; cee : ('crv, 'crm) env > binding
 
-    val const : Integer.t -> ikind -> t
-    val read : W.frameable -> t
-    val nondet : stmt -> lval -> t
-    val top : t
-    val bot : t
-    val ite : exp -> t -> t -> t -> typ -> t
-    val unary : Op.unary -> t -> typ -> t
-    val binary : Op.binary -> t -> t -> typ -> t
-    val prj : stmt -> 'r readables -> 'r env -> t -> 'r Symbolic.t
+    module V : sig
+      type t = tv
 
-    val strengthen : stmt -> lval -> t -> t
-    val covers : t -> t -> bool
-    val merge : t -> t -> t
+      include With_containers with type t := t
+
+      val top : t
+      val bot : t
+      val cst : Integer.t -> ikind -> t
+      val var : W.frameable_var -> t
+      val ndt : stmt -> lval -> t
+      val una : Op.unary -> t -> typ -> t
+      val bin : Op.binary -> t -> t -> typ -> t
+      val sel : tm -> t -> t
+      val ite : exp -> t -> t -> t -> typ -> t
+      val prj : stmt -> ('v, 'm) readables -> ('v, 'm) env -> t -> ('v, 'm, v) Symbolic.t
+
+      val strengthen : stmt -> lval -> t -> t
+      val covers : t -> t -> bool
+      val merge : t -> t -> t
+    end
+    module M : sig
+      type t = tm
+
+      include With_containers with type t := t
+
+      val top : t
+      val bot : t
+      val cst : Integer.t -> ikind -> t
+      val var : W.frameable_var -> t
+      val mem : W.frameable_mem -> t
+      val ndt : stmt -> lval -> t
+      val una : Op.unary -> tv -> typ -> t
+      val bin : Op.binary -> tv -> tv -> typ -> t
+      val sel : tm -> tv -> t
+      val upd : tm -> tv -> tv -> t
+      val ite : exp -> tv -> t -> t -> typ -> t
+      val prj : stmt -> ('v, 'm) readables -> ('v, 'm) env -> t -> ('v, 'm, m) Symbolic.t
+
+      val strengthen : stmt -> lval -> t -> t
+      val covers : t -> t -> bool
+      val merge : t -> t -> t
+    end
   end
 
   type u =
     {
-      pre        : Symbolic.t;
-      post       : W.frameable Symbolic.env;
-      local_vars : Symbolic.t F.Local.Var.M.t;
-      local_mems : Symbolic.t F.Local.Mem.M.t
+      pre        : Symbolic.V.t;
+      post       : (W.frameable_var, W.frameable_mem) Symbolic.env;
+      local_vars : Symbolic.V.t F.Local.Var.M.t;
+      local_mems : Symbolic.M.t F.Local.Mem.M.t
     }
 
   type t
@@ -705,12 +802,15 @@ module Writes
     (G : Global with module R := R and module U := U)
     (F : Function with module R := R and module U := U) :
   Writes with module R := R and module U := U and module G := G and module F := F = struct
+  type frameable_var =
+    [  `Global_var of G.Var.t
+    | `Poly_var   of F.Poly.Var.t ]
 
-  type frameable =
-    [ `Global_var of G.Var.t
-    | `Poly_var   of F.Poly.Var.t
-    | `Global_mem of G.Mem.t
+  type frameable_mem =
+    [ `Global_mem of G.Mem.t
     | `Poly_mem   of F.Poly.Mem.t ]
+
+  type frameable = [ frameable_var | frameable_mem ]
 
   type readable =
     [ frameable
@@ -981,36 +1081,43 @@ module Summary
   module Symbolic = struct
     open Symbolic
 
-    type 'r env =
+    type ('v, 'm) env =
       {
-        poly_vars   : 'r t F.Poly.Var.M.t;
-        poly_mems   : 'r t F.Poly.Mem.M.t;
-        global_vars : 'r t G.Var.M.t;
-        global_mems : 'r t G.Mem.M.t
+        poly_vars   : ('v, 'm, v) t F.Poly.Var.M.t;
+        poly_mems   : ('v, 'm, m) t F.Poly.Mem.M.t;
+        global_vars : ('v, 'm, v) t G.Var.M.t;
+        global_mems : ('v, 'm, m) t G.Mem.M.t
       }
 
-    type u = W.frameable t
-    type t = u
+    type 'k u = (W.frameable_var, W.frameable_mem, 'k) t
+    type tv = v u
+    type tm = m u
 
     let eq = Refl
 
     module Readable = struct
-      type r = W.frameable
-      type _ readable += W : r readable
+      type v = W.frameable_var
+      type m = W.frameable_mem
+      type (_, _) readable += W : (v, m) readable
       let f = F.f
     end
 
-    let readable : W.frameable readables = (module Readable)
+    let readable : (W.frameable_var, W.frameable_mem) readables = (module Readable)
 
-    type (_, _, _) binding += W : 'r readables -> ('cr, 'r, 'cr env) binding
+    type _ binding +=
+        W : ('v, 'm) readables -> < crv : 'crv; crm : 'crm; cev : 'v; cem : 'm; cee : ('crv, 'crm) env > binding
 
     module Bare = struct
       open Node
-      type t = E : 'r readables * 'r node -> t
-      let hash (type r) (r : r readables) (n : r node) =
+      type _ k =
+        | V : v k
+        | M : m k
+      type t = E : ('v, 'm) readables * 'k k * ('v, 'm, 'k) node -> t
+      let hash (type v m) (r : (v, m) readables) (n : (v, m, _) node) =
         hash
-          (fun f -> let Refl = eq_readables r readable in W.hash' f : r -> _)
-          { f = fun (type cr r e) (w : (cr, r, e) binding) (e : e) ->
+          (fun f -> let Refl = eq_readables r readable in W.hash' f : v -> _)
+          (fun f -> let Refl = eq_readables r readable in W.hash' f : m -> _)
+          { f = fun (type e cv cm) (w : < crv : v; crm : m; cev : cv; cem : cm; cee : e > binding) (e : e) ->
               match w with
               | W _ ->(let fold hash v u acc = 15487399 * acc + 105871 * hash v + Id.hash u.id in
                        15487399 * F.Poly.Var.M.fold (fold F.Poly.Var.hash) e.poly_vars 0 +
@@ -1019,12 +1126,15 @@ module Summary
                        G.Mem.M.fold (fold G.Mem.hash) e.global_mems 0)
               | _   -> Console.fatal "Symbolic.Bare.hash: unexpected witness" }
           n
-      let hash (E (r, n)) = hash r n
-      let equal (type r) (r1 : r readables) (n1 : r node) (r2 : r readables) (n2 : r node) =
+      let hash ( E (r, _, n)) = hash r n
+      let equal
+            (type v m) (r : (v, m) readables) (n1 : (v, m, _) node) (n2 : (v, m, _) node) =
         equal
-          (fun f -> let Refl = eq_readables r1 readable in W.equal' f : r -> r -> _)
-          { f = fun (type cr r1 e1 r2 e2)
-              (w1 : (cr, r1, e1) binding) (e1 : e1) (w2 : (cr, r2, e2) binding) (e2 : e2) ->
+          (fun f -> let Refl = eq_readables r readable in W.equal' f : v -> v -> _)
+          (fun f -> let Refl = eq_readables r readable in W.equal' f : m -> m -> _)
+          { f = fun (type cv1 cm1 cv2 cm2 e1 e2)
+              (w1 : < crv : v; crm : m; cev : cv1; cem : cm1; cee : e1 > binding) (e1 : e1)
+              (w2 : < crv : v; crm : m; cev : cv2; cem : cm2; cee : e2 > binding) (e2 : e2) ->
               match w1, w2 with
               | W _, W _ ->(let by_id v1 v2 = Id.equal v1.id v2.id in
                             F.Poly.Var.M.equal by_id e1.poly_vars e2.poly_vars &&
@@ -1033,45 +1143,55 @@ module Summary
                             G.Mem.M.equal by_id e1.global_mems e2.global_mems)
               | _        -> Console.fatal "Symbolic.Bare.equal: unexpected witness" }
           n1 n2
-      let equal (E ((module R1) as r1, n1)) (E ((module R2) as r2, n2)) =
+      let equal (E ((module R1) as r1 , _, n1)) (E ((module R2), _, n2)) =
         match R1.W with
-        | R2.W -> equal r1 n1 r2 n2
+        | R2.W -> equal r1 n1 n2
         | _    -> false
     end
 
-    type mk = { f : 'r. 'r readables -> 'r node -> 'r Symbolic.t }
+    type mk = { f : 'v 'm 'k. ('v, 'm) readables -> 'k Bare.k -> ('v, 'm, 'k) node -> ('v, 'm, 'k) t } [@@unboxed]
     let mk : mk =
-      let module Ex = struct type ex = E : 'r readables * 'r Symbolic.t -> ex end in
+      let module Ex = struct type t = E : ('v, 'm) readables * 'k Bare.k * ('v, 'm, 'k) Symbolic.t -> t end in
       let module H = Hashtbl.Make (Bare) in
       let h = H.create 128 in
-      { f = fun (type r) (r0 : r readables) (n : r node) : r Symbolic.t ->
-          let Ex.E (r1, r) =
-            let key = Bare.E (r0, n) in try H.find h key with Not_found -> let r = Ex.E (r0, mk n) in H.add h key r; r
+      { f = fun (type v m k) ((module R0) as r : (v, m) readables) (k0 : k Bare.k) n : (v, m, k) t ->
+          let Ex.E ((module R1), k1, v) =
+            let k = Bare.E (r, k0, n) in
+            try
+              H.find h k
+            with Not_found ->
+              let r = Ex.E (r, k0, mk n) in
+              H.add h k r;
+              r
           in
-          let Refl = eq_readables r0 r1 in
-          r }
-    let mk' = mk.f readable
+          match R1.W, (k1, k0) with
+          | R0.W, Bare.(V, V)      -> v
+          | R0.W, Bare.(M, M)      -> v
+          | _,    Bare.(V, _)      -> Console.fatal "Symbolic.mk: unexpected witness"
+          | _,    Bare.(M, _)      -> Console.fatal "Symbolic.mk: unexpected witness" }
 
-    let const i k = mk' @@ Const (i, k)
-    let read r = mk' @@ Read r
-    let nondet s l = mk' @@ Nondet (s, l)
-    let top = mk' Top
-    let bot = mk' Bot
-    let ite c i t e ty = mk' @@ Ite (c, i, t, e, ty)
-    let unary u a t = mk' @@ Unary (u, a, t)
-    let binary b a1 a2 t = mk' @@ Binary (b, a1, a2, t)
-    let prj s r e v = mk.f r @@ Let (s, W readable, e, v)
+    let mk' k = mk.f readable k
 
-    let hash = hash
-    let equal = equal
+    let top k = mk' k Top
+    let bot k = mk' k Bot
+    let cst k i t = mk' k @@ Cst (i, t)
+    let var k v = mk' k @@ Var v
+    let mem m = mk' Bare.M @@ Mem m
+    let ndt k s l = mk' k @@ Ndt (s, l)
+    let una k u a t = mk' k @@ Una (u, a, t)
+    let bin k b a1 a2 t = mk' k @@ Bin (b, a1, a2, t)
+    let sel k m a = mk' k @@ Sel (m, a)
+    let upd m a v = mk' Bare.M @@ Upd (m, a, v)
+    let ite k c i t e ty = mk' k @@ Ite (c, i, t, e, ty)
+    let prj k s r e v = mk.f r k @@ Let (s, W readable, e, v)
 
-    module H = FCHashtbl.Make (struct type nonrec t = t let hash = hash let equal = equal end)
-
-    let pp =
+    let pp fmt =
       let pp_id fmt v = fprintf fmt "%a" Id.pp v.id in
       pp
         W.pp'
-        { f = fun (type cr r e) fmt (w : (cr, r, e) binding) (e : e) ->
+        W.pp'
+        { f = fun (type v m e)
+            fmt (w : < crv : W.frameable_var; crm : W.frameable_mem; cev : v; cem : m; cee : e > binding) (e : e) ->
             match w with
             | W _ -> Pretty_utils
                      .(fprintf fmt "(@[[{%a}@ {%a}@ {%a}@ {%a}]@ @] ...)"
@@ -1080,66 +1200,141 @@ module Summary
                          (pp_iter2 ~sep:",@ " ~between:" -> " G.Var.M.iter G.Var.pp pp_id) e.global_vars
                          (pp_iter2 ~sep:",@ " ~between:" -> " G.Mem.M.iter G.Mem.pp pp_id) e.global_mems)
             |_    -> Console.fatal "Symbolic.pp: unexpected witness" }
+        fmt
 
-    let strengthen s l v =
+    let strengthen (type k) k s l (v : (_, _, k) t) : (_, _, k) t =
       match v.node with
-      | Const _
-      | Read _
-      | Nondet _
       | Bot
-      | Unary _
-      | Binary _
+      | Cst _
+      | Var _
+      | Ndt _
+      | Una _
+      | Bin _
+      | Sel _
       | Ite _
-      | Let _     -> v
-      | Top       -> nondet s l
-    let covers v1 v2 =
+      | Let _ -> v
+      | Mem _ -> v
+      | Upd _ -> v
+      | Top   -> ndt k s l
+    let covers (type k) (v1 : (_, _ , k) t) (v2 : (_, _, k) t) =
       match v1.node, v2.node with
       | Top,       _
-      | _,         Bot   -> true
+      | _,        Bot    -> true
       | _,         _
         when equal v1 v2 -> true
-      | (Const _
-        | Read _
-        | Nondet _
-        | Bot
+      | (Bot
+        | Cst _
+        | Var _
+        | Ndt _
+        | Una _
+        | Bin _
+        | Sel _
         | Ite _
-        | Unary _
-        | Binary _
-        | Let _),  _     -> false
-    let merge v1 v2 =
-      match v1.node, v2.node with
-      | Top,  _
-      | _,                         Top                       -> top
-      | Bot,                       _                         -> v1
-      | _,                         Bot                       -> v2
-      | Ite (c1, i1, t1, e1, ty1), Ite (c2, i2, t2, e2, ty2)
-        when Exp.equal c1 c2
-          && equal i1 i2
-          && (t1.node = Bot || t2.node = Bot)
-          && (e1.node = Bot || e2.node = Bot)
-          && Typ.equal ty1 ty2                               -> ite
-                                                                  c1
-                                                                  i1
-                                                                  (if t2.node = Bot then t1 else t2)
-                                                                  (if e2.node = Bot then e1 else e2)
-                                                                  ty1
-      | _,                         _
-        when equal v1 v2                                     -> v1
-      |(Const _
-       | Read _
-       | Nondet _
-       | Ite _
-       | Unary _
-       | Binary _
-       | Let _),                   _                         -> top
+        | Let _), _      -> false
+      | Mem _,    _      -> false
+      | Upd _,    _      -> false
+    let rec merge : type k. k Bare.k -> (_, _, k) t -> (_, _, k) t -> (_, _, k) t =
+      fun k v1 v2 ->
+        match v1.node, v2.node with
+        | Top,  _
+        | _,                         Top                       -> top k
+        | Bot,                       _                         -> v1
+        | _,                         Bot                       -> v2
+        | Ite (c1, i1, t1, e1, ty1), Ite (c2, i2, t2, e2, ty2)
+          when Exp.equal c1 c2
+            && equal i1 i2
+            && Typ.equal ty1 ty2                               -> ite k
+                                                                    c1
+                                                                    i1
+                                                                    (merge k t1 t2)
+                                                                    (merge k e1 e2)
+                                                                    ty1
+        | _,                         _
+          when equal v1 v2                                     -> v1
+        |(Cst _
+         | Var _
+         | Ndt _
+         | Una _
+         | Bin  _
+         | Sel _
+         | Ite _
+         | Let _),                   _                         -> top k
+        | Mem _,                     _                         -> top k
+        | Upd _,                     _                         -> top k
+
+    module V = struct
+      module T = struct
+        type t = tv
+        let hash = hash
+        let equal = equal
+        let compare = compare
+      end
+      include T
+      module H = FCHashtbl.Make (T)
+      module M = FCMap.Make (T)
+      module S = FCSet.Make (T)
+
+      open Bare
+      let top = top V
+      let bot = bot V
+      let cst = cst V
+      let var = var V
+      let ndt = ndt V
+      let una = una V
+      let bin = bin V
+      let sel = sel V
+      let ite = ite V
+      let prj r = prj V r
+
+      let strengthen = strengthen V
+      let covers = covers
+      let merge = merge V
+      let pp = pp
+    end
+
+    module M = struct
+      module T = struct
+        type t = tm
+        let hash = hash
+        let equal = equal
+        let compare = compare
+      end
+      include T
+      module H = FCHashtbl.Make (T)
+      module M = FCMap.Make (T)
+      module S = FCSet.Make (T)
+
+      open Bare
+      let top = top M
+      let bot = bot M
+      let cst = cst M
+      let var = var M
+      let mem = mem
+      let ndt = ndt M
+      let una = una M
+      let bin = bin M
+      let sel = sel M
+      let upd = upd
+      let ite = ite M
+      let prj r = prj M r
+
+      let strengthen = strengthen M
+      let covers = covers
+      let merge = merge M
+      let pp = pp
+    end
+
+    let compare = compare
+    let equal = equal
+    let hash = hash
   end
 
   type u =
     {
-      pre        : Symbolic.t;
-      post       : W.frameable Symbolic.env;
-      local_vars : Symbolic.t F.Local.Var.M.t;
-      local_mems : Symbolic.t F.Local.Mem.M.t
+      pre        : Symbolic.V.t;
+      post       : (W.frameable_var, W.frameable_mem) Symbolic.env;
+      local_vars : Symbolic.V.t F.Local.Var.M.t;
+      local_mems : Symbolic.M.t F.Local.Mem.M.t
     }
 
   type t = u
@@ -1148,7 +1343,7 @@ module Summary
   open Symbolic
   let empty =
     {
-      pre = top;
+      pre = V.top;
       post =
         {
           poly_vars   = F.Poly.Var.M.empty;
@@ -1160,18 +1355,19 @@ module Summary
       local_mems = F.Local.Mem.M.empty
     }
   let strengthen stmt f s =
-    let strengthen_ map wr = map @@ strengthen stmt % f % wr in
+    let strengthen streng map wr = map @@ streng stmt % f % wr in
+    let strengthen_v f = strengthen V.strengthen f and strengthen_m f = strengthen M.strengthen f in
     {
       pre = s.pre;
       post =
         {
-          poly_vars   = strengthen_ F.Poly.Var.M.mapi  (fun v -> `Poly_var v)   s.post.poly_vars;
-          poly_mems   = strengthen_ F.Poly.Mem.M.mapi  (fun m -> `Poly_mem m)   s.post.poly_mems;
-          global_vars = strengthen_ G.Var.M.mapi       (fun v -> `Global_var v) s.post.global_vars;
-          global_mems = strengthen_ G.Mem.M.mapi       (fun m -> `Global_mem m) s.post.global_mems
+          poly_vars   = strengthen_v F.Poly.Var.M.mapi  (fun v -> `Poly_var v)   s.post.poly_vars;
+          poly_mems   = strengthen_m F.Poly.Mem.M.mapi  (fun m -> `Poly_mem m)   s.post.poly_mems;
+          global_vars = strengthen_v G.Var.M.mapi       (fun v -> `Global_var v) s.post.global_vars;
+          global_mems = strengthen_m G.Mem.M.mapi       (fun m -> `Global_mem m) s.post.global_mems
         };
-      local_vars      = strengthen_ F.Local.Var.M.mapi (fun v -> `Local_var v)  s.local_vars;
-      local_mems      = strengthen_ F.Local.Mem.M.mapi (fun m -> `Local_mem m)  s.local_mems
+      local_vars      = strengthen_v F.Local.Var.M.mapi (fun v -> `Local_var v)  s.local_vars;
+      local_mems      = strengthen_m F.Local.Mem.M.mapi (fun m -> `Local_mem m)  s.local_mems
     }
   let covers s1 s2 =
     covers s2.pre s1.pre &&
@@ -1183,18 +1379,19 @@ module Summary
     F.Local.Var.M.(for_all (covers_ find s1.local_vars)       s2.local_vars) &&
     F.Local.Mem.M.(for_all (covers_ find s1.local_mems)       s2.local_mems)
   let merge s1 s2 =
-    let merge_ _ = opt_fold @@ some %% swap (opt_fold merge) in
+    let merge mrg _ = opt_fold @@ some %% swap (opt_fold mrg) in
+    let merge_v x = merge V.merge x and merge_m x = merge M.merge x in
     {
-      pre = merge s1.pre s2.pre;
+      pre = V.merge s1.pre s2.pre;
       post =
         {
-          poly_vars   = F.Poly.Var.M.merge  merge_ s1.post.poly_vars   s2.post.poly_vars;
-          poly_mems   = F.Poly.Mem.M.merge  merge_ s1.post.poly_mems   s2.post.poly_mems;
-          global_vars = G.Var.M.merge       merge_ s1.post.global_vars s2.post.global_vars;
-          global_mems = G.Mem.M.merge       merge_ s1.post.global_mems s2.post.global_mems;
+          poly_vars   = F.Poly.Var.M.merge  merge_v s1.post.poly_vars   s2.post.poly_vars;
+          poly_mems   = F.Poly.Mem.M.merge  merge_m s1.post.poly_mems   s2.post.poly_mems;
+          global_vars = G.Var.M.merge       merge_v s1.post.global_vars s2.post.global_vars;
+          global_mems = G.Mem.M.merge       merge_m s1.post.global_mems s2.post.global_mems;
         };
-      local_vars      = F.Local.Var.M.merge merge_ s1.local_vars       s2.local_vars;
-      local_mems      = F.Local.Mem.M.merge merge_ s1.local_mems       s2.local_mems
+      local_vars      = F.Local.Var.M.merge merge_v s1.local_vars       s2.local_vars;
+      local_mems      = F.Local.Mem.M.merge merge_m s1.local_mems       s2.local_mems
     }
 end
 
