@@ -47,6 +47,13 @@ module type Hashed_ordered_printable = sig
   include Printable with type t := t
 end
 
+module type With_containers = sig
+  include Hashed_ordered_printable
+  module H : FCHashtbl.S with type key := t
+  module M : FCMap.S with type key := t
+  module S : FCSet.S with type elt := t
+end
+
 module Console = Options
 
 let (%) f g x = f (g x)

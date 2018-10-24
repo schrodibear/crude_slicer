@@ -306,8 +306,8 @@ module Symbolic : sig
     | Ndt of stmt * lval
     | Una of Op.unary * ('v, 'm, v) t * typ
     | Bin of Op.binary * ('v, 'm, v) t * ('v, 'm, v) t * typ
-    | Sel of ('v, 'm, m) t * ('v, 'm, v) t
-    | Upd : ('v, 'm, m) t * ('v, 'm, v) t * ('v, 'm, v) t -> ('v, 'm, m) node
+    | Sel of ('v, 'm, m) t * ('v, 'm, v) t * typ
+    | Upd : ('v, 'm, m) t * ('v, 'm, v) t * ('v, 'm, v) t * typ -> ('v, 'm, m) node
     | Ite : exp * ('v, 'm, v) t * ('v, 'm, 'k) t * ('v, 'm, 'k) t * typ -> ('v, 'm, 'k) node
     | Let : stmt * < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee > binding * 'cee * ('cev, 'cem, 'k) t
       -> ('crv, 'crm, 'k) node (* Should be handled from the INSIDE! *)
@@ -317,6 +317,7 @@ module Symbolic : sig
       id   : Id.t
     }
   val mk : ('v, 'm, 'k) node -> ('v, 'm, 'k) t
+  val coerce : ('v, 'm, _) t -> ('v, 'm, m) t
   module Node : sig
     type ('crv, 'crm) he =
       { f : 'cev 'cem 'cee. < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee > binding -> 'cee -> int }
@@ -356,8 +357,8 @@ end = struct
     | Ndt of stmt * lval
     | Una of Op.unary * ('v, 'm, v) t * typ
     | Bin of Op.binary * ('v, 'm, v) t * ('v, 'm, v) t * typ
-    | Sel of ('v, 'm, m) t * ('v, 'm, v) t
-    | Upd : ('v, 'm, m) t * ('v, 'm, v) t * ('v, 'm, v) t -> ('v, 'm, m) node
+    | Sel of ('v, 'm, m) t * ('v, 'm, v) t * typ
+    | Upd : ('v, 'm, m) t * ('v, 'm, v) t * ('v, 'm, v) t * typ -> ('v, 'm, m) node
     | Ite : exp * ('v, 'm, v) t * ('v, 'm, 'k) t * ('v, 'm, 'k) t * typ -> ('v, 'm, 'k) node
     | Let : stmt * < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee > binding * 'cee * ('cev, 'cem, 'k) t
       -> ('crv, 'crm, 'k) node (* Should be handled from the INSIDE! *)
@@ -382,8 +383,8 @@ end = struct
         | Ndt (s, l)           -> 13 * (257 * Stmt.hash s + Lval.hash l) + 6
         | Una (u, a, t)        -> 13 * (1351 * Hashtbl.hash u + 257 * hi a + Typ.hash t) + 7
         | Bin (b, v1, v2, t)   -> 11 * (105871 * Hashtbl.hash b + 1351 * hi v1 + 257 * hi v2 + Typ.hash t) + 8
-        | Sel (m, a)           -> 13 * (257 * hi m + hi a) + 9
-        | Upd (m, a, v)        -> 13 * (1351 * hi m + 257 * hi a + hi v) + 10
+        | Sel (m, a, t)        -> 13 * (1351 * hi m + 257 * hi a + Typ.hash t) + 9
+        | Upd (m, a, v, t)     -> 13 * (105871 * hi m + 1351 * hi a + 257 * hi v + Typ.hash t) + 10
         | Ite (c, i, t, e, ty) -> 13 * (105871 * Exp.hash c + hi i + 1351 * hi t + 257 * hi e + Typ.hash ty) + 11
         | Let (s, b, e, v)     -> 13 * (1351 * Stmt.hash s + 257 * he.f b e + hi v) + 12
     type ('crv, 'crm) ee =
@@ -407,8 +408,8 @@ end = struct
         | Una (u1, a1, t1),          Una (u2, a2, t2)          -> u1 = u2 && ei a1 a2 && Typ.equal t1 t2
         | Bin (b1, v11, v12, t1),    Bin (b2, v21, v22, t2)    -> b1 = b2 && ei v11 v21 && ei v12 v22 &&
                                                                   Typ.equal t1 t2
-        | Sel (m1, a1),              Sel (m2, a2)              -> ei m1 m2 && ei a1 a2
-        | Upd (m1, a1, v1),          Upd (m2, a2, v2)          -> ei m1 m2 && ei a1 a2 && ei v1 v2
+        | Sel (m1, a1, t1),          Sel (m2, a2, t2)          -> ei m1 m2 && ei a1 a2 && Typ.equal t1 t2
+        | Upd (m1, a1, v1, t1),      Upd (m2, a2, v2, t2)      -> ei m1 m2 && ei a1 a2 && ei v1 v2 && Typ.equal t1 t2
         | Ite (c1, i1, t1, e1, ty1), Ite (c2, i2, t2, e2, ty2) -> Exp.equal c1 c2 &&
                                                                   ei i1 i2 &&
                                                                   ei t1 t2 &&
@@ -434,6 +435,21 @@ end = struct
   let id = ref ~-1
 
   let mk node = incr id; { node; id = Id.mk !id }
+
+  let rec coerce : type v m k. (v, m, k) t -> (v, m, _) t =
+    function
+    | { node = Top; _ }
+    | { node = Bot; _ }
+    | { node = Cst _; _ }
+    | { node = Var _; _ }
+    | { node = Ndt _; _ }
+    | { node = Una _; _ }
+    | { node = Bin _; _ }
+    | { node = Sel _; _ } as v            -> v
+    | { node = Mem _; _ } as v            -> v
+    | { node = Upd _; _ } as v            -> v
+    | { node = Ite (c, i, t, e, ty); id } -> { node = Ite (c, i, coerce t, coerce e, ty); id }
+    | { node = Let (s, b, e, v); id }     -> { node = Let (s, b, e, coerce v); id }
 
   let hash { id; _ } = Id.coerce id
 
@@ -489,8 +505,8 @@ end = struct
                                | `Or          -> "||"
                                end;
                                pr "@ %a])" pp a2)
-      | Sel (m, a)          -> pr "%a[@[%a@]]" pp m pp a
-      | Upd (m, a, v)       -> pr "%a[@[%a@]@ <-@ @[%a@]]" pp m pp a pp v
+      | Sel (m, a, _)       -> pr "%a[@[%a@]]" pp m pp a
+      | Upd (m, a, v, _)    -> pr "%a[@[%a@]@ <-@ @[%a@]]" pp m pp a pp v
       | Ite (c, i, t, e, _) -> pr "(@[%a (%d)@ ?@ %a@ :@ %a@])" pp i c.eid pp t pp e
       | Let (_, b, e, _)    -> ppe.f fmt b e
 end
@@ -542,7 +558,7 @@ module type Summary = sig
       val ndt : stmt -> lval -> t
       val una : Op.unary -> t -> typ -> t
       val bin : Op.binary -> t -> t -> typ -> t
-      val sel : tm -> t -> t
+      val sel : tm -> t -> typ -> t
       val ite : exp -> t -> t -> t -> typ -> t
       val prj : stmt -> ('v, 'm) readables -> ('v, 'm) env -> t -> ('v, 'm, v) Symbolic.t
 
@@ -563,8 +579,8 @@ module type Summary = sig
       val ndt : stmt -> lval -> t
       val una : Op.unary -> tv -> typ -> t
       val bin : Op.binary -> tv -> tv -> typ -> t
-      val sel : tm -> tv -> t
-      val upd : tm -> tv -> tv -> t
+      val sel : tm -> tv -> typ -> t
+      val upd : tm -> tv -> tv -> typ -> t
       val ite : exp -> tv -> t -> t -> typ -> t
       val prj : stmt -> ('v, 'm) readables -> ('v, 'm) env -> t -> ('v, 'm, m) Symbolic.t
 
@@ -1180,8 +1196,8 @@ module Summary
     let ndt k s l = mk' k @@ Ndt (s, l)
     let una k u a t = mk' k @@ Una (u, a, t)
     let bin k b a1 a2 t = mk' k @@ Bin (b, a1, a2, t)
-    let sel k m a = mk' k @@ Sel (m, a)
-    let upd m a v = mk' Bare.M @@ Upd (m, a, v)
+    let sel k m a t = mk' k @@ Sel (m, a, t)
+    let upd m a v t = mk' Bare.M @@ Upd (m, a, v, t)
     let ite k c i t e ty = mk' k @@ Ite (c, i, t, e, ty)
     let prj k s r e v = mk.f r k @@ Let (s, W readable, e, v)
 

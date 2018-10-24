@@ -109,9 +109,9 @@ module Havoc_function =
   String
     (struct
       let option_name = "-havoc_function"
-      let help = "May specify an alternative name for __VERIFIER_havoc_region"
+      let help = "May specify an alternative name for __VERIFIER_havoc"
       let arg_name = "name"
-      let default = "__VERIFIER_havoc_region"
+      let default = "__VERIFIER_havoc"
     end)
 
 module Choice_function =
@@ -123,22 +123,49 @@ module Choice_function =
       let default = "__VERIFIER_choose"
     end)
 
-module Uniformity_flag_function =
+module Memory_function =
   String
     (struct
-      let option_name = "-uniformity_flag_function"
-      let help = "May specify an alternative name for __VERIFIER_is_uniform_region"
+      let option_name = "-memory_function"
+      let help = "May specify an alternative name for __VERIFIER_memory"
       let arg_name = "name"
-      let default = "__VERIFIER_is_uniform_region"
+      let default = "__VERIFIER_memory"
     end)
 
-module Evaluation_function =
+module Select_function =
   String
     (struct
-      let option_name = "-evaluation_function"
-      let help = "May specify an alternative name for __VERIFIER_eval_region"
+      let option_name = "-select_function"
+      let help = "May specify an alternative name for __VERIFIER_select"
       let arg_name = "name"
-      let default = "__VERIFIER_eval_region"
+      let default = "__VERIFIER_select"
+    end)
+
+module Update_function =
+  String
+    (struct
+      let option_name = "-update_function"
+      let help = "May specify an alternative name for __VERIFIER_update"
+      let arg_name = "name"
+      let default = "__VERIFIER_update"
+    end)
+
+module Const_function =
+  String
+    (struct
+      let option_name = "-const_function"
+      let help = "May specify an alternative name for __VERIFIER_const"
+      let arg_name = "name"
+      let default = "__VERIFIER_const"
+    end)
+
+module Assign_function =
+  String
+    (struct
+      let option_name = "-assign_function"
+      let help = "May specify an alternative name for __VERIFIER_assign"
+      let arg_name = "name"
+      let default = "__VERIFIER_assign"
     end)
 
 module Stub_postfix =
