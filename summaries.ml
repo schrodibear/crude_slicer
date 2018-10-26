@@ -40,6 +40,8 @@ let ensure_const_function_present () =
   Kf.ensure_proto voidConstPtrType (Options.Const_function.get ()) [ulongLongType] false
 let ensure_assign_function_present () =
   Kf.ensure_proto voidType (Options.Assign_function.get ()) [voidConstPtrType; voidConstPtrType] false
+let ensure_assume_function_present () = Kf.ensure_proto voidType (Options.Assume_function.get ()) [intType] false
+let ensure_error_function_present () = Kf.ensure_proto voidType (Options.Error_function.get ()) [] false
 
 module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
   module I = R.I
@@ -50,7 +52,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
   module U = R.U
   open M
 
-  module Make_local (L : I.E.Local) = struct
+  module Make_local (L : I.E.Local) (E : sig val eff : (L.A.t, L.R.t, L.S.t) I.E.t end) = struct
     module F = L.F
     open F
 
@@ -172,6 +174,12 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
     let assign =
       let ass = get_vi @@ Options.Assign_function.get () in
       fun m1 m2 -> [call ass [m1; m2]]
+    let assume =
+      let ass = get_vi @@ Options.Assume_function.get () in
+      fun a -> [call ass [a]]
+    let error =
+      let err = get_vi @@ Options.Error_function.get () in
+      fun () -> [call err []]
 
     let push, stmts =
       let stmts = Queue.create () in
@@ -194,6 +202,12 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       let v = aux (`Val (`V, (TInt (ik, [])))) in
       push [set (var' v) @@ exp @@ Const (CInt64 (i, ik, None))];
       Val (k, conv k (`V, v))
+
+    let vrb k v =
+      let v = try M_v.find v params with Not_found -> v in
+      let v' = aux (`Val (`V, v.vtype)) in
+      push [set (var' v') @@ evar v];
+      Val (k, conv k (`V, v'))
 
     let mem m =
       match mk_mem m with
@@ -381,7 +395,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         k, conv k (`V, v')
       in
       let (g1, a1), (g2, a2) = map_pair split_g_a (e1, e2) in
-      let w =
+      let wg =
         if isIntegralType t then
           match b with
           | `Shift_right
@@ -393,12 +407,18 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
           | `Gt                          -> eq1 (min_val t) e1 ||? eq1 (max_val t) e2
           | `Ge                          -> eq1 (max_val t) e1 ||? eq1 (min_val t) e2
           | `Le                          -> eq1 (min_val t) e1 ||? eq1 (max_val t) e2
-          | `Or                          -> eq1 one e1 ||? eq1 one e2
+          | `Or                          -> neq1 z e1 ||? neq1 z e2
           | `Bw_or                       -> eq1 (all_ones t) e1 ||? eq1 (all_ones t) e2
           | #Symbolic.Op.binary          -> `False
         else                                `False
       in
-      elem ~g:(g1 &&? g2 ||? w) ~a:(a1 &&? a2) (fun () -> op (value `V t e1) @@ value `V t e2)
+      let wa =
+        match b with
+        | `Or                 -> neq1 z e1
+        | `And                -> eq1 z e1
+        | #Symbolic.Op.binary -> `False
+      in
+      elem ~g:(g1 &&? g2 ||? wg) ~a:(a1 &&? (a2 ||? wa)) (fun () -> op (value `V t e1) @@ value `V t e2)
 
     let is_const =
       function
@@ -449,12 +469,6 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
           ~g:(gi &&? gt &&? ge ||? neq1 z i &&? gt ||? eq1 z i &&? ge ||? eq2 t e)
           ~a:(ai &&? (neq1 z i &&? at ||? eq1 z i &&? ae))
           (fun () -> op k (value `V intType i) (value k ty t) (value k ty e) ty)
-
-    let var k v =
-      let v = try M_v.find v params with Not_found -> v in
-      let v' = aux (`Val (`V, v.vtype)) in
-      push [set (var' v') @@ evar v];
-      Val (k, conv k (`V, v'))
 
     module H_stack = FCHashtbl.Make (Datatype.List (Stmt))
 
@@ -550,9 +564,9 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
            | `V { node = Cst (i, t); _ }
            | `M { node = Cst (i, t); _ }           -> cst k i t
            | `V { node = Var (`Poly_var v); _ }
-           | `M { node = Var (`Poly_var v); _ }    -> var k (v :> varinfo)
+           | `M { node = Var (`Poly_var v); _ }    -> vrb k (v :> varinfo)
            | `V { node = Var (`Global_var v); _ }
-           | `M { node = Var (`Global_var v); _ }  -> var k (v :> varinfo)
+           | `M { node = Var (`Global_var v); _ }  -> vrb k (v :> varinfo)
            | `M { node = Mem (`Poly_mem m); _ }    -> mem (m :> R.t * fieldinfo option)
            | `M { node = Mem (`Global_mem m); _ }  -> mem (m :> R.t * fieldinfo option)
            | `V { node = Ndt (_, l); _ }
@@ -570,63 +584,150 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
            | `M { node = Let (s, w, e, m); _ }     -> let_ s w e (`M m)
            end)
 
-    (*let stmts_of_writes d d' =
-
+    let assign =
       let mk_w =
-
-        function
-        | `Global_mem m -> mk_mem m
-        | `Global_var v -> mk_var v
-        | `Local_mem  _ -> `Skip
-        | `Local_var  _ -> `Skip
-        | `Poly_mem   m -> mk_mem m
-        | `Poly_var   v -> mk_var v
-        | `Result       -> `Var (var retvar)
-
-
+        let mk_mem m = may_map (fun m -> `Mem m) ~dft:`Skip @@ mk_mem m in
+        fun w ->
+          if
+            match w with
+            | `Result            -> I.E.has_result_dep E.eff
+            | #L.W.readable as w -> L.R.(mem_some (of_write w) @@ I.E.depends E.eff)
+          then
+            match (w : L.W.t :> I.writable) with
+            | `Global_mem m -> mk_mem m
+            | `Global_var v -> `Var (mk_var v)
+            | `Local_mem  _ -> `Skip
+            | `Local_var  v -> `Var (mk_var v)
+            | `Poly_mem   m -> mk_mem m
+            | `Poly_var   v -> `Var (mk_var v)
+            | `Result       -> `Var (var retvar)
+          else
+            `Skip
       in
-      let I.E.Some { local = (module L); eff } = I.get info R.flag d in
-      flatten @@
-      rev @@
-      (if not (isVoidType retvar.vtype) then [[mkStmt @@ Return (Some (evar retvar), loc)]] else []) @
-      L.A.fold
-        (fun w froms ->
-           let froms () =
-             rev @@
-             L.R.fold
-               (fun r ->
-                  match mk_w (r : L.W.readable :> I.writable) with
-                  | `Var lv -> cons @@ new_exp ~loc (Lval lv)
-                  | `Exp e  -> cons e
-                  | `Skip   -> id)
-               froms
-               []
-           in
-           if
-             match w with
-             | `Result            -> I.E.has_result_dep eff
-             | #L.W.readable as w -> L.R.(mem_some (of_write w) @@ I.E.depends eff)
-           then
-             match mk_w (w :> I.writable) with
-             | `Var lv -> cons @@ havoc_lval   lv (froms ())
-             | `Exp e  -> cons @@ havoc_region e  (froms ())
-             | `Skip   -> id
-           else
-             id)
-        (I.E.assigns eff)
-        []
-      in*)
+      let insert k v m =
+        let open Local.Var.M in
+        match find k m with
+        | l                   -> add k (v :: l) m
+        | exception Not_found -> add k [] m
+      in
+      fun l ->
+        let (tops, grds, vals, bots) =
+          List.fold_left
+            (fun (tops, grds, vals, bots) (w, e) ->
+               match e with
+               | Top
+               | Top_or_bot _        -> w :: tops, grds,                     vals,               bots
+               | Bot                 -> tops,      grds,                     vals,               w :: bots
+               | Val_or_top { g; v }
+               | Mixed { g; v; _ }   -> tops,      insert g (w, snd v) grds, vals,               bots
+               | Val_or_bot { v; _ }
+               | Val v               -> tops,      grds,                     (w, snd v) :: vals, bots)
+            ([], Local.Var.M.empty, [], [])
+            l
+        in
+        if bots = [] then
+          let froms w =
+            List.rev @@
+            L.R.fold
+              (fun r ->
+                 match mk_w r with
+                 | `Var lv -> List.cons @@ new_exp ~loc (Lval lv)
+                 | `Mem e  -> List.cons e
+                 | `Skip   -> id)
+              (L.A.find w @@ I.E.assigns E.eff)
+              []
+          in
+          let nondet w =
+            match mk_w w with
+            | `Var lv -> havoc_lval lv (froms w)
+            | `Mem e  -> havoc_mem  e  (froms w)
+            | `Skip   -> []
+          in
+          let sym w v =
+            match mk_w w with
+            | `Var lv -> [set lv (evar' v)]
+            | `Mem e  -> assign e (evar' v)
+            | `Skip   -> []
+          in
+          List.iter (push % nondet) tops;
+          Local.Var.M.iter
+            (fun g wvs ->
+               let det = mkBlock @@ List.concat_map (uncurry sym) wvs in
+               let nondet = mkBlock @@ List.concat_map (uncurry @@ const' nondet) wvs in
+               push [stmt @@ If (evar' g, det, nondet, loc)])
+            grds;
+          List.iter (push % uncurry sym) vals
+
+    let assume l =
+      push @@
+      assume
+        (List.concat_map
+           (function
+           | Top
+           | Val _
+           | Val_or_top _        -> []
+           | Bot                 -> [z]
+           | Top_or_bot a
+           | Val_or_bot { a; _ }
+           | Mixed { a; _ }      -> [evar' a])
+           l |>
+         function
+         | a :: ass -> List.fold_left (fun acc a -> mkBinOp ~loc BAnd acc a) a ass
+         | []       -> one)
+
+    let body () =
+      let s = I.E.summary E.eff in
+      let Refl = L.S.eq in
+      let Refl = L.S.Symbolic.eq in
+      let open L.S in
+      let open L.S.Symbolic in
+      let rvo =
+        match[@warning "-4"] (Kernel_function.find_return @@ Globals.Functions.get F.f.svar).skind with
+        | Return (None, _)                                          -> None
+        | Return (Some ({ enode = Lval (Var vi, NoOffset); _ }), _) -> Some vi
+        | _                                                         -> Console.fatal "Summaries.Local.body: \
+                                                                                      unexpected return statement"
+      in
+      let cache = H_stack.create 4 in
+      let lcache = C (readable, V.H.memo, V.H.create 32, M.H.memo, M.H.create 32) in
+      let eval = Lazy.force % eval cache [] lcache (module L) in
+      let pre = eval @@ `V s.pre in
+      let ass =
+        [] |>
+        L.F.Poly.Mem.M.fold (fun m v -> List.cons (`Poly_mem m, eval @@ `M v)) s.post.poly_mems |>
+        I.G.Mem.M.fold (fun m v -> List.cons (`Global_mem m, eval @@ `M v)) s.post.global_mems |>
+        I.G.Var.M.fold (fun vr vl -> List.cons (`Global_var vr, eval @@ `V vl))  s.post.global_vars |>
+        L.F.Local.Var.M.fold
+          (fun vr vl ->
+             if may_map ~dft:false (Varinfo.equal (vr :> varinfo)) rvo
+             then List.cons (`Result, eval @@ `V vl)
+             else id)
+          s.local_vars
+      in
+      assume [pre];
+      let p = aux `Grd in
+      assign [`Local_var p, pre];
+      push @@ [stmt @@ If (evar' p, mkBlock @@ error (), mkBlock [], loc)];
+      assume @@ List.map snd ass;
+      assign ass;
+      if not (isVoidType retvar.vtype) then push [stmt @@ Return (Some (evar retvar), loc)]
   end
 
-  (*let generate =
+  let generate =
     let open List in
     let module H_d = Fundec.Hashtbl in
     let module S_d = Fundec.Set in
-
     let h_ins = H_d.create 256 in
     fun sccs ->
       ensure_havoc_function_present ();
       ensure_choice_function_present ();
+      ensure_memory_function_present ();
+      ensure_select_function_present ();
+      ensure_update_function_present ();
+      ensure_const_function_present ();
+      ensure_assign_function_present ();
+      ensure_assume_function_present ();
+      ensure_error_function_present ();
       let ds = sccs |> flatten |> Kernel_function.(filter_map is_definition get_definition) |> S_d.of_list in
       let file = Ast.get () in
       visitFramacFile
@@ -634,11 +735,8 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
           inherit frama_c_inplace
           method! vfunc d =
             let name = d.svar.vname in
-            let I.E.Some { eff; _ } = I.get info R.flag d in
             if S_d.mem d ds
-            && not
-                 (I.E.is_target eff
-                  || Options.(Alloc_functions.mem name || Assume_functions.mem name || Path_assume_functions.mem name))
+            && not (Options.(Alloc_functions.mem name || Assume_functions.mem name || Path_assume_functions.mem name))
             then
               H_d.add h_ins d d;
             SkipChildren
@@ -646,8 +744,10 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         file;
       H_d.filter_map_inplace
         (fun _ d ->
-           some @@
-        )
+           let I.E.Some { local = (module L); eff } = I.get info R.flag d in
+           let module L = Make_local (L) (struct let eff = eff end) in
+           L.body ();
+           some @@ L.f)
         h_ins;
       ignore @@
       visitFramacFile
@@ -656,9 +756,9 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
           method! vglob_aux =
             function
               [@warning "-4"]
-            | GFun (d, _) as g when H_d.mem h_ins d -> ChangeTo [g; GFun (H_d.find h_ins d, loc)]
+            | GFun (d, _) as g when H_d.mem h_ins d -> ChangeTo [g; GFun (H_d.find h_ins d, Location.unknown)]
             | _                                     -> SkipChildren
         end)
         file;
-      H_d.clear h_ins*)
+      H_d.clear h_ins
 end

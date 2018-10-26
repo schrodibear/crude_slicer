@@ -78,6 +78,15 @@ module Required_bodies =
                                      "ldv_assume"; "ldv_malloc"; "ldv_zalloc"; "ldv_init_zalloc"]
     end)
 
+module Error_function =
+  String
+    (struct
+      let option_name = "-error_function"
+      let help = "May specify an alternative name for __VERIFIER_error"
+      let arg_name = "name"
+      let default = "__VERIFIER_error"
+    end)
+
 module Assume_functions =
   Filled_string_set
     (struct
@@ -94,6 +103,15 @@ module Path_assume_functions =
       let help = "Specify names of functions allowing to specify assumed unreachability of statements"
       let arg_name = "names"
       let default = Datatype.String.Set.of_list ["ldv_stop"]
+    end)
+
+module Assume_function =
+  String
+    (struct
+      let option_name = "-assume_function"
+      let help = "May specify an alternative name for __VERIFIER_assume"
+      let arg_name = "name"
+      let default = "__VERIFIER_assume"
     end)
 
 module Nondet_int_function =

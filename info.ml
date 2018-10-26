@@ -166,12 +166,12 @@ module type Writes = sig
 
   type readable =
     [ frameable
-    | `Local_var  of F.Local.Var.t
-    | `Local_mem  of F.Local.Mem.t ]
+    | `Local_var of F.Local.Var.t
+    | `Local_mem of F.Local.Mem.t ]
 
-  type t = [ readable  | `Result ]
+  type t = [ readable | `Result ]
 
-  include Hashed_ordered_printable with type t := t
+  include With_containers with type t := t
   val equal' : [< t] -> [< t] -> bool
   val compare' : [< t] -> [< t] -> int
   val hash' : [< t] -> int
@@ -833,60 +833,66 @@ module Writes
     | `Local_var  of F.Local.Var.t
     | `Local_mem  of F.Local.Mem.t ]
 
-  type t = [ readable | `Result ]
+  module T = struct
+    type t = [ readable | `Result ]
 
-  let compare w1 w2 =
-    match w1, w2 with
-    | `Global_var v1, `Global_var v2  -> G.Var.compare v1 v2
-    | `Global_var _,  _               -> -1
-    | `Poly_var _,    `Global_var _   -> 1
-    | `Poly_var v1,   `Poly_var v2    -> F.Poly.Var.compare v1 v2
-    | `Poly_var _,    _               -> -1
-    | `Local_var _,  (`Global_var _
-                     | `Poly_var _)   -> 1
-    | `Local_var v1, ` Local_var v2   -> F.Local.Var.compare v1 v2
-    | `Local_var _,   _               -> -1
-    | `Global_mem _, (`Global_var _
-                     | `Poly_var _
-                     | `Local_var _)  -> 1
-    | `Global_mem m1, `Global_mem m2  -> G.Mem.compare m1 m2
-    | `Global_mem _,  _               -> -1
-    | `Poly_mem _,   (`Global_var _
-                     | `Poly_var _
-                     | `Local_var _
-                     | `Global_mem _) -> 1
-    | `Poly_mem m1,  `Poly_mem m2     -> F.Poly.Mem.compare m1 m2
-    | `Poly_mem _,    _               -> -1
-    | `Local_mem _,  (`Global_var _
-                     | `Poly_var _
-                     | `Local_var _
-                     | `Global_mem _
-                     | `Poly_mem _)   -> 1
-    | `Local_mem m1, `Local_mem m2    -> F.Local.Mem.compare m1 m2
-    | `Local_mem _,   _               -> -1
-    | `Result,        `Result         -> 0
-    | `Result,        #t              -> 1
+    let compare w1 w2 =
+      match w1, w2 with
+      | `Global_var v1, `Global_var v2  -> G.Var.compare v1 v2
+      | `Global_var _,  _               -> -1
+      | `Poly_var _,    `Global_var _   -> 1
+      | `Poly_var v1,   `Poly_var v2    -> F.Poly.Var.compare v1 v2
+      | `Poly_var _,    _               -> -1
+      | `Local_var _,  (`Global_var _
+                       | `Poly_var _)   -> 1
+      | `Local_var v1, ` Local_var v2   -> F.Local.Var.compare v1 v2
+      | `Local_var _,   _               -> -1
+      | `Global_mem _, (`Global_var _
+                       | `Poly_var _
+                       | `Local_var _)  -> 1
+      | `Global_mem m1, `Global_mem m2  -> G.Mem.compare m1 m2
+      | `Global_mem _,  _               -> -1
+      | `Poly_mem _,   (`Global_var _
+                       | `Poly_var _
+                       | `Local_var _
+                       | `Global_mem _) -> 1
+      | `Poly_mem m1,  `Poly_mem m2     -> F.Poly.Mem.compare m1 m2
+      | `Poly_mem _,    _               -> -1
+      | `Local_mem _,  (`Global_var _
+                       | `Poly_var _
+                       | `Local_var _
+                       | `Global_mem _
+                       | `Poly_mem _)   -> 1
+      | `Local_mem m1, `Local_mem m2    -> F.Local.Mem.compare m1 m2
+      | `Local_mem _,   _               -> -1
+      | `Result,        `Result         -> 0
+      | `Result,        #t              -> 1
 
-  let equal w1 w2 =
-    match[@warning "-4"] w1, w2 with
-    | `Global_var v1, `Global_var v2 -> G.Var.equal       v1 v2
-    | `Poly_var v1,   `Poly_var v2   -> F.Poly.Var.equal  v1 v2
-    | `Local_var v1,  `Local_var v2  -> F.Local.Var.equal v1 v2
-    | `Global_mem m1, `Global_mem m2 -> G.Mem.equal       m1 m2
-    | `Poly_mem m1,   `Poly_mem m2   -> F.Poly.Mem.equal  m1 m2
-    | `Local_mem m1,  `Local_mem m2  -> F.Local.Mem.equal m1 m2
-    | `Result,        `Result        -> true
-    | #t,             #t             -> false
+    let equal w1 w2 =
+      match[@warning "-4"] w1, w2 with
+      | `Global_var v1, `Global_var v2 -> G.Var.equal       v1 v2
+      | `Poly_var v1,   `Poly_var v2   -> F.Poly.Var.equal  v1 v2
+      | `Local_var v1,  `Local_var v2  -> F.Local.Var.equal v1 v2
+      | `Global_mem m1, `Global_mem m2 -> G.Mem.equal       m1 m2
+      | `Poly_mem m1,   `Poly_mem m2   -> F.Poly.Mem.equal  m1 m2
+      | `Local_mem m1,  `Local_mem m2  -> F.Local.Mem.equal m1 m2
+      | `Result,        `Result        -> true
+      | #t,             #t             -> false
 
-  let hash =
-    function
-    | `Global_var v -> 7 * G.Var.hash v
-    | `Poly_var v   -> 7 * F.Poly.Var.hash v  + 1
-    | `Local_var v  -> 7 * F.Local.Var.hash v + 2
-    | `Global_mem m -> 7 * G.Mem.hash m       + 3
-    | `Poly_mem m   -> 7 * F.Poly.Mem.hash m  + 4
-    | `Local_mem m  -> 7 * F.Local.Mem.hash m + 5
-    | `Result       -> 6
+    let hash =
+      function
+      | `Global_var v -> 7 * G.Var.hash v
+      | `Poly_var v   -> 7 * F.Poly.Var.hash v  + 1
+      | `Local_var v  -> 7 * F.Local.Var.hash v + 2
+      | `Global_mem m -> 7 * G.Mem.hash m       + 3
+      | `Poly_mem m   -> 7 * F.Poly.Mem.hash m  + 4
+      | `Local_mem m  -> 7 * F.Local.Mem.hash m + 5
+      | `Result       -> 6
+  end
+  include T
+  module H = FCHashtbl.Make (T)
+  module M = FCMap.Make (T)
+  module S = FCSet.Make (T)
 
   let pp fmttr =
     let pp fmt = fprintf fmttr fmt in
