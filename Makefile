@@ -36,7 +36,7 @@ PLUGIN_DIR      ?= .
 INCLUDES:=-I $(FRAMAC_LIBDIR)/plugins
 
 PLUGIN_NAME:=Crude_slicer
-PLUGIN_CMO:= version options common flag bv data info fixpoint analyze region transform function_pointers summaries slice register
+PLUGIN_CMO:= version options common flag bv data info fixpoint analyze region transform function_pointers summaries symbolic slice register
 PLUGIN_HAS_MLI:=yes
 PLUGIN_DEPENDENCIES:=
 PLUGIN_BFLAGS:=$(INCLUDES) -w +a -safe-string -short-paths -strict-formats -no-alias-deps

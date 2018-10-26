@@ -1262,15 +1262,19 @@ module Summary
         | _,                         Top                       -> top k
         | Bot,                       _                         -> v1
         | _,                         Bot                       -> v2
-        | Ite (c1, i1, t1, e1, ty1), Ite (c2, i2, t2, e2, ty2)
+        | Ite (c1, i1, t1, e1, ty1), Ite (c2, i2, t2, e2, _)
           when Exp.equal c1 c2
-            && equal i1 i2
-            && Typ.equal ty1 ty2                               -> ite k
+            && equal i1 i2                                     -> ite k
                                                                     c1
                                                                     i1
                                                                     (merge k t1 t2)
                                                                     (merge k e1 e2)
                                                                     ty1
+        | Ite (c1, _, _, _, _),      Ite (c2, _, _, _, _)
+          when Exp.equal c1 c2                                 -> top k (* Here Cartesian pred abs might kick in *)
+        | Ite (c1, i1, t1, e1, ty1), Ite (c2, _, _, _, _)
+          when Exp.compare c1 c2 < 0                           -> ite k c1 i1 (merge k t1 v2) (merge k e1 v2) ty1
+        | Ite _,                     Ite (c2, i2, t2, e2, ty2) -> ite k c2 i2 (merge k v1 t2) (merge k v1 e2) ty2
         | _,                         _
           when equal v1 v2                                     -> v1
         |(Cst _
