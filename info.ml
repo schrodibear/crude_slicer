@@ -245,6 +245,22 @@ module type Reads = sig
   val pp : formatter -> t -> unit
 end
 
+module Variable (C : Criterion with type t := varinfo) () : Variable = struct
+  type t = varinfo
+
+  include C
+
+  let of_varinfo vi =
+    if C.is_ok vi then vi
+    else               invalid_arg "Variable.of_varinfo"
+
+  include (Varinfo : Hashed_ordered with type t := t)
+  let pp = pp_varinfo
+
+  module H = Reporting_bithashset (struct type nonrec t = t let equal = equal let hash = hash let pp = pp end) ()
+  module M = Varinfo.Map
+end
+
 module type Op = sig
   type unary =
     [ `Cast of typ
@@ -291,6 +307,8 @@ let eq_readables (type v1 m1 v2 m2) ((module R1) : (v1, m1) readables) (((module
 
 type 'x binding = .. constraint 'x = < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee >
 
+module Global_var = Variable (struct let is_ok vi = vi.vglob end) ()
+
 module Symbolic : sig
   module Op : Op
   module Id : Private_index
@@ -300,7 +318,8 @@ module Symbolic : sig
   type ('v, 'm, 'k) node =
     | Top
     | Bot
-    | Cst of Integer.t * ikind
+    | Cst of constant
+    | Adr of Global_var.t
     | Var of 'v
     | Mem : 'm -> (_, 'm, m) node
     | Ndt of stmt * lval
@@ -351,7 +370,8 @@ end = struct
   type ('v, 'm, 'k) node =
     | Top
     | Bot
-    | Cst of Integer.t * ikind
+    | Cst of constant
+    | Adr of Global_var.t
     | Var of 'v
     | Mem : 'm -> (_, 'm, m) node
     | Ndt of stmt * lval
@@ -373,15 +393,23 @@ end = struct
     [@@unboxed]
     let hash =
       let hi v = Id.hash v.id in
+      let hu =
+        function
+        | `Cast ty -> 5 * Typ.hash ty
+        | `Minus   -> 1
+        | `Bw_neg  -> 2
+        | `Neg     -> 3
+      in
       fun (type k) hv hm he : ((_, _, k) node -> _) ->
         function
-        | Top                  -> 1
-        | Bot                  -> 2
-        | Cst (c, i)           -> 13 * (257 * Integer.hash c + Hashtbl.hash i) + 3
+        | Top                  -> 0
+        | Bot                  -> 1
+        | Cst c                -> 13 * Constant.hash c + 2
+        | Adr g                -> 13 * Global_var.hash g + 3
         | Var v                -> 13 * hv v + 4
         | Mem m                -> 13 * hm m + 5
         | Ndt (s, l)           -> 13 * (257 * Stmt.hash s + Lval.hash l) + 6
-        | Una (u, a, t)        -> 13 * (1351 * Hashtbl.hash u + 257 * hi a + Typ.hash t) + 7
+        | Una (u, a, t)        -> 13 * (1351 * hu u + 257 * hi a + Typ.hash t) + 7
         | Bin (b, v1, v2, t)   -> 11 * (105871 * Hashtbl.hash b + 1351 * hi v1 + 257 * hi v2 + Typ.hash t) + 8
         | Sel (m, a, t)        -> 13 * (1351 * hi m + 257 * hi a + Typ.hash t) + 9
         | Upd (m, a, v, t)     -> 13 * (105871 * hi m + 1351 * hi a + 257 * hi v + Typ.hash t) + 10
@@ -401,7 +429,8 @@ end = struct
         match n1, n2 with
         | Top,                       Top
         | Bot,                       Bot                       -> true
-        | Cst (c1, k1),              Cst (c2, k2)              -> Integer.equal c1 c2 && k1 = k2
+        | Cst c1,                    Cst c2                    -> Constant.equal c1 c2
+        | Adr g1,                    Adr g2                    -> Global_var.equal g1 g2
         | Var v1,                    Var v2                    -> ev v1 v2
         | Mem m1,                    Mem m2                    -> em m1 m2
         | Ndt (s1, l1),              Ndt (s2, l2)              -> Stmt.equal s1 s2 && Lval.equal l1 l2
@@ -421,6 +450,7 @@ end = struct
         |(Top
          | Bot
          | Cst _
+         | Adr _
          | Var _
          | Ndt _
          | Una _
@@ -441,6 +471,7 @@ end = struct
     | { node = Top; _ }
     | { node = Bot; _ }
     | { node = Cst _; _ }
+    | { node = Adr _; _ }
     | { node = Var _; _ }
     | { node = Ndt _; _ }
     | { node = Una _; _ }
@@ -463,14 +494,15 @@ end = struct
                              -> 'cee
                              -> unit }
   [@@unboxed]
-  let rec pp : type k. _ -> _ -> _ -> _ -> (_, _ , k) t -> _ =
+  let rec pp : type k. _ -> _ -> _ -> _ -> (_, _, k) t -> _ =
     fun ppv ppm ppe fmt u ->
       let pp f = pp ppv ppm ppe f in
       let pr f = Format.fprintf fmt f in
       match u.node with
       | Top                 -> pr "T"
       | Bot                 -> pr "_|_"
-      | Cst (i, _)          -> pr "%s" (Integer.to_string i)
+      | Cst c               -> pr "%a" Constant.pretty c
+      | Adr g               -> pr "&%a" Global_var.pp g
       | Var v               -> pr "%a" ppv v
       | Mem m               -> pr "%a" ppm m
       | Ndt (s, l)          -> pr "*_(%d,%a)" s.sid Lval.pretty l
@@ -553,7 +585,8 @@ module type Summary = sig
 
       val top : t
       val bot : t
-      val cst : Integer.t -> ikind -> t
+      val cst : constant -> t
+      val adr : Global_var.t -> t
       val var : W.frameable_var -> t
       val ndt : stmt -> lval -> t
       val una : Op.unary -> t -> typ -> t
@@ -573,7 +606,8 @@ module type Summary = sig
 
       val top : t
       val bot : t
-      val cst : Integer.t -> ikind -> t
+      val cst : constant -> t
+      val adr : Global_var.t -> t
       val var : W.frameable_var -> t
       val mem : W.frameable_mem -> t
       val ndt : stmt -> lval -> t
@@ -657,22 +691,6 @@ module Requires : Requires = struct
   let iter_stmts f r = H_stmt.iter f r.stmts
   let has_body f r = H_fundec.mem f r.bodies
   let has_stmt s r = H_stmt.mem s r.stmts
-end
-
-module Variable (C : Criterion with type t := varinfo) () : Variable = struct
-  type t = varinfo
-
-  include C
-
-  let of_varinfo vi =
-    if C.is_ok vi then vi
-    else               invalid_arg "Variable.of_varinfo"
-
-  include (Varinfo : Hashed_ordered with type t := t)
-  let pp = pp_varinfo
-
-  module H = Reporting_bithashset (struct type nonrec t = t let equal = equal let hash = hash let pp = pp end) ()
-  module M = Varinfo.Map
 end
 
 module Void_ptr_var = Variable (struct let is_ok vi = isVoidPtrType vi.vtype end) ()
@@ -1196,7 +1214,8 @@ module Summary
 
     let top k = mk' k Top
     let bot k = mk' k Bot
-    let cst k i t = mk' k @@ Cst (i, t)
+    let cst k c = mk' k @@ Cst c
+    let adr k g = mk' k @@ Adr g
     let var k v = mk' k @@ Var v
     let mem m = mk' Bare.M @@ Mem m
     let ndt k s l = mk' k @@ Ndt (s, l)
@@ -1228,6 +1247,7 @@ module Summary
       match v.node with
       | Bot
       | Cst _
+      | Adr _
       | Var _
       | Ndt _
       | Una _
@@ -1246,6 +1266,7 @@ module Summary
         when equal v1 v2 -> true
       | (Bot
         | Cst _
+        | Adr _
         | Var _
         | Ndt _
         | Una _
@@ -1278,6 +1299,7 @@ module Summary
         | _,                         _
           when equal v1 v2                                     -> v1
         |(Cst _
+         | Adr _
          | Var _
          | Ndt _
          | Una _
@@ -1304,6 +1326,7 @@ module Summary
       let top = top V
       let bot = bot V
       let cst = cst V
+      let adr = adr V
       let var = var V
       let ndt = ndt V
       let una = una V
@@ -1334,6 +1357,7 @@ module Summary
       let top = top M
       let bot = bot M
       let cst = cst M
+      let adr = adr M
       let var = var M
       let mem = mem
       let ndt = ndt M

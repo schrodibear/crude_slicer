@@ -189,7 +189,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       match k, k' with
       | `V, `V
       | `M, `M -> v
-      | `M, `V ->(let m = aux (`Val (`M, (v : Local.Var.t :> varinfo).vtype)) in
+      | `M, `V ->(let m = aux @@ `Val (`M, (v : Local.Var.t :> varinfo).vtype) in
                   push @@ const_mem (var' m) @@ evar' v;
                   m)
       | `V, `M -> Console.fatal "Summaries.Local.conv: malformed symbolic value of incompatible kind"
@@ -198,9 +198,14 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
 
     let bot = Bot
 
-    let cst k i ik =
-      let v = aux (`Val (`V, (TInt (ik, [])))) in
-      push [set (var' v) @@ exp @@ Const (CInt64 (i, ik, None))];
+    let cst k c =
+      let v = aux @@ `Val (`V, typeOf @@ exp @@ Const c) in
+      push [set (var' v) @@ exp @@ Const c];
+      Val (k, conv k (`V, v))
+
+    let adr k g =
+      let v = aux @@ `Val (`V, TPtr ((g : Global_var.t :> varinfo).vtype, [])) in
+      push [set (var' v) @@ mkAddrOrStartOf ~loc @@ var (g :> varinfo)];
       Val (k, conv k (`V, v))
 
     let vrb k v =
@@ -561,8 +566,10 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
            | `M { node = Top; _ }                  -> top
            | `V { node = Bot; _ }
            | `M { node = Bot; _ }                  -> bot
-           | `V { node = Cst (i, t); _ }
-           | `M { node = Cst (i, t); _ }           -> cst k i t
+           | `V { node = Cst c; _ }
+           | `M { node = Cst c; _ }                -> cst k c
+           | `V { node = Adr g; _ }
+           | `M { node = Adr g; _ }                -> adr k g
            | `V { node = Var (`Poly_var v); _ }
            | `M { node = Var (`Poly_var v); _ }    -> vrb k (v :> varinfo)
            | `V { node = Var (`Global_var v); _ }
@@ -690,6 +697,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       in
       let cache = H_stack.create 4 in
       let lcache = C (readable, V.H.memo, V.H.create 32, M.H.memo, M.H.create 32) in
+      H_stack.add cache [] lcache;
       let eval = Lazy.force % eval cache [] lcache (module L) in
       let pre = eval @@ `V s.pre in
       let ass =

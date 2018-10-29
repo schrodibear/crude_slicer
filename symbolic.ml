@@ -1,7 +1,13 @@
 
+[@@@warning "-42-44-45-48"]
+
 open Cil_types
 open Cil_datatype
 open Cil
+open Extlib
+
+open Common
+open Info
 
 module Make (Analysis : Region.Analysis) = struct
 
@@ -15,6 +21,7 @@ module Make (Analysis : Region.Analysis) = struct
        end)
   = struct
     open L
+    open F
     open S
     open Import
 
@@ -60,21 +67,131 @@ module Make (Analysis : Region.Analysis) = struct
       let inst_m = Symbolic.M.(inst top bot ite)
     end
 
-    (*let eval_lval lv s : [`V of Symbolic.tv | `M of Symbolic.tm ] option =
+    open Symbolic
+
+    let unop =
+      function
+      | Neg _ -> `Minus
+      | BNot  -> `Bw_neg
+      | LNot  -> `Neg
+
+    let binop =
+      function
+      | PlusA _
+      | PlusPI
+      | IndexPI   -> `Plus
+      | MinusA _
+      | MinusPI
+      | MinusPP   -> `Minus
+      | Mult _    -> `Mult
+      | Div _     -> `Div
+      | Mod _     -> `Mod
+      | Shiftlt _ -> `Shift_left
+      | Shiftrt   -> `Shift_right
+      | Lt        -> `Lt
+      | Gt        -> `Gt
+      | Le        -> `Le
+      | Ge        -> `Ge
+      | Eq        -> `Eq
+      | Ne        -> `Ne
+      | BAnd      -> `Bw_and
+      | BXor      -> `Bw_xor
+      | BOr       -> `Bw_or
+      | LAnd      -> `And
+      | LOr       -> `Or
+
+    let rec eval_addr =
+      let rec offset s ty acc =
+        function
+        | NoOffset        -> acc
+        | Field (fi, off) ->(let rty = TPtr (fi.ftype, []) in
+                             offset
+                               s
+                               fi.ftype
+                               (V.una
+                                  (`Cast rty)
+                                  (V.bin
+                                     `Plus
+                                     (V.una (`Cast charPtrType) acc charPtrType)
+                                     (V.cst @@
+                                      CInt64
+                                        (Integer.of_int @@ (fst @@ bitsOffset ty @@ Field (fi, NoOffset)) lsr 3,
+                                         theMachine.ptrdiffKind,
+                                         None))
+                                     charPtrType)
+                                  rty)
+                               off)
+        | Index (e, off)  ->(let ty = Ast_info.direct_element_type ty in
+                             offset
+                               s
+                               ty
+                               (V.bin `Plus acc (the (eval_expr s e)) @@ TPtr (ty, []))
+                               off)
+      in
+      let local =
+        let module H = Varinfo.Hashtbl in
+        let h = H.create 4096 in
+        let add s =
+          swap @@
+          List.fold_left
+            (fun acc vi ->
+               let ty =
+                 let ty = vi.vtype in
+                 if isArrayType ty
+                 then TPtr (Ast_info.direct_element_type ty, [])
+                 else TPtr (ty, [])
+               in
+               H.add
+                 h
+                 vi
+                 (V.una (`Cast ty) (V.bin `Plus s (V.cst @@ CInt64 (Integer.of_int acc, IInt, None)) charPtrType) ty);
+               acc + bytesSizeOf vi.vtype)
+        in
+        Globals.Functions.iter_on_fundecs
+          (fun d ->
+             let s = V.una (`Cast charPtrType) (V.ndt (List.hd d.sallstmts) @@ var d.svar) charPtrType in
+             ignore
+               (0 |>
+                add s d.sformals |>
+                add s d.slocals));
+        H.find h
+      in
+      fun s (lh, off) ->
+        match lh with
+        | Var v when v.vglob -> offset s v.vtype (V.adr (Global_var.of_varinfo v)) off
+        | Var v              -> offset s v.vtype (local v) off
+        | Mem e              -> offset s (typeOfLhost lh) (the (eval_expr s e)) off
+    and eval_lval s lv : Symbolic.tv option =
       let open Symbolic in
       let Refl = Symbolic.eq in
-      match w_lval lv with
-      | Some (`Global_var v) -> Some (`V (I.G.Var.M.find v s.post.global_vars))
-      | Some (`Local_var v) -> Some (`V (F.Local.Var.M.find v s.local_vars))
-      | Some (`Poly_var v) -> Some (`V (F.Poly.Var.M.find v s.post.poly_vars))
-      | `Global_mem _
-      | `Local_mem _
-      | `Poly_mem _        ->(let a =
-                                match lv with
-                                | Var _, _ ->
-                              in)
+      opt_map
+        (function
+        | `Global_var v -> I.G.Var.M.find   v s.post.global_vars
+        | `Local_var  v -> Local.Var.M.find v s.local_vars
+        | `Poly_var   v -> Poly.Var.M.find  v s.post.poly_vars
+        | `Global_mem m -> V.sel (I.G.Mem.M.find m s.post.global_mems) (eval_addr s lv) (typeOfLval lv)
+        | `Local_mem  m -> V.sel (Local.Mem.M.find m s.local_mems)     (eval_addr s lv) (typeOfLval lv)
+        | `Poly_mem   m -> V.sel (Poly.Mem.M.find m s.post.poly_mems)  (eval_addr s lv) (typeOfLval lv))
+        (w_lval lv)
+    and eval_expr =
+      let size s = some @@ V.cst @@ CInt64 (Integer.of_int s, theMachine.kindOfSizeOf, None) in
+      fun s e ->
+        let eval e = the (eval_expr s e) in
+        match e.enode with
+        | Const c              -> some @@ V.cst c
+        | Lval lv              -> eval_lval s lv
+        | SizeOf ty            -> size @@ bytesSizeOf ty
+        | SizeOfE e            -> size @@ bytesSizeOf @@ typeOf e
+        | SizeOfStr s          -> size @@ String.length s + 1
+        | AlignOf ty           -> size @@ bytesAlignOf ty
+        | AlignOfE e           -> size @@ bytesAlignOf @@ typeOf e
+        | UnOp (u, e, t)       -> some @@ V.una (unop u) (eval e) t
+        | BinOp (b, e1, e2, t) -> some @@ V.bin (binop b) (eval e1) (eval e2) t
+        | CastE (ty, _, e)     -> some @@ V.una (`Cast ty) (eval e) ty
+        | AddrOf lv
+        | StartOf lv           -> some @@ eval_addr s lv
+        | Info (e, _)          -> eval_expr s e
 
-
-      let assume*)
+    (*let assume*)
   end
 end
