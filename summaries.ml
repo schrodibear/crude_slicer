@@ -571,7 +571,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
            let eval = Lazy.force % eval' in
            let k = match s with `V _ -> `V | `M _ -> `M in
            let open Symbolic in
-           begin match s with
+           match s with
            | `V { node = Top; _ }
            | `M { node = Top; _ }                  -> top
            | `V { node = Bot; _ }
@@ -599,8 +599,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
            | `V { node = Ite (_, i, t, e, ty); _ } -> ite k (eval @@ `V i) (eval @@ `V t) (eval @@ `V e) ty
            | `M { node = Ite (_, i, t, e, ty); _ } -> ite k (eval @@ `V i) (eval @@ `M t) (eval @@ `M e) ty
            | `V { node = Let (s, w, e, v); _ }     -> let_ s w e (`V v)
-           | `M { node = Let (s, w, e, m); _ }     -> let_ s w e (`M m)
-           end)
+           | `M { node = Let (s, w, e, m); _ }     -> let_ s w e (`M m))
 
     let assign =
       let mk_w =

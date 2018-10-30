@@ -4,6 +4,7 @@
 open Cil_types
 open Cil_datatype
 open Cil
+open Cil_printer
 open Extlib
 
 open Common
@@ -25,7 +26,7 @@ module Make (Analysis : Region.Analysis) = struct
     open S
     open Import
 
-    module Path_trie : sig
+    module Path_dd : sig
       type t
       val cut : exp -> Symbolic.V.t -> bool -> t -> t
       val merge : t -> t -> t
@@ -204,11 +205,11 @@ module Make (Analysis : Region.Analysis) = struct
         | Some w ->(w |>
                     (function
                     | `Global_var v -> ensure ~init:init_v ~find:find_global_var ~set:set_global_var v
-                    | `Local_var  v -> ensure ~init:init_v ~find:find_local_var  ~set:set_local_var v
                     | `Poly_var   v -> ensure ~init:init_v ~find:find_poly_var   ~set:set_poly_var v
+                    | `Local_var  v -> ensure ~init:init_v ~find:find_local_var  ~set:set_local_var v
                     | `Global_mem m -> ensure ~init:init_m ~find:find_global_mem ~set:set_global_mem m >>= deref
-                    | `Local_mem  m -> ensure ~init:init_m ~find:find_local_mem  ~set:set_local_mem m  >>= deref
-                    | `Poly_mem   m -> ensure ~init:init_m ~find:find_poly_mem   ~set:set_poly_mem m   >>= deref) >>|
+                    | `Poly_mem   m -> ensure ~init:init_m ~find:find_poly_mem   ~set:set_poly_mem m   >>= deref
+                    | `Local_mem  m -> ensure ~init:init_m ~find:find_local_mem  ~set:set_local_mem m  >>= deref) >>|
                     some)
     and eval_expr =
       let size s = return @@ some @@ V.cst @@ CInt64 (Integer.of_int s, theMachine.kindOfSizeOf, None) in
@@ -229,6 +230,70 @@ module Make (Analysis : Region.Analysis) = struct
         | StartOf lv           -> eval_addr stmt lv >>| some
         | Info (e, _)          -> eval_expr stmt e
 
-    (*let assume*)
+    let run = (|>)
+
+    let assume stmt c flag (pdd, st) =
+      let s, st = run st (eval_expr stmt c >>= get) in
+      Path_dd.cut c s flag pdd, st
+
+    let rec assign stmt lv e (pdd, st as state) =
+      let Refl = S.eq in
+      let Refl = eq in
+      let set_v set v = pdd, snd @@ run st (eval_expr stmt e >>= get >>= set v : _ state) in
+      let set_m find set m =
+        pdd,
+        snd @@
+        run st
+          (eval_lval stmt lv () >>= get >>= fun _ ->
+           find m >>= get >>= fun mv ->
+           eval_addr stmt lv >>= fun a ->
+           eval_expr stmt e >>= get >>= fun v ->
+           set m (M.upd mv a v @@ typeOf e) : _ state)
+      in
+      match w_lval lv with
+      | Some (`Global_var v)                 -> set_v set_global_var v
+      | Some (`Poly_var v)                   -> set_v set_poly_var v
+      | Some (`Local_var v)                  -> set_v set_local_var v
+      | Some (`Global_mem m)                 -> set_m find_global_mem set_global_mem m
+      | Some (`Poly_mem m)                   -> set_m find_poly_mem set_poly_mem m
+      | Some (`Local_mem m)                  -> set_m find_local_mem set_local_mem m
+      | None                                 ->
+        match unrollType @@ typeOf e, e.enode with
+        | TComp (ci, _, _), Lval lv'
+          when ci.cstruct                    -> pdd,
+                                                List.fold_left
+                                                  (fun st fi ->
+                                                     snd @@
+                                                     assign
+                                                       stmt
+                                                       (addOffsetLval (Field (fi, NoOffset)) lv)
+                                                       { e with
+                                                         enode = Lval (addOffsetLval (Field (fi, NoOffset)) lv') }
+                                                       (pdd, st))
+                                                  st
+                                                  ci.cfields
+        | TComp (ci, _, _), Lval lv'         ->(let fi = List.hd ci.cfields in
+                                                assign
+                                                  stmt
+                                                  (addOffsetLval (Field (fi, NoOffset)) lv)
+                                                  { e with enode = Lval (addOffsetLval (Field (fi, NoOffset)) lv') }
+                                                  state)
+        | TArray (_, Some e, _, _), Lval lv' ->(let l = may_map ~dft:0 Integer.to_int @@ constFoldToInt e in
+                                                pdd,
+                                                Array.init l id |>
+                                                Array.fold_left
+                                                  ((fun st i ->
+                                                     let i = integer ~loc:Location.unknown i in
+                                                     snd @@
+                                                     assign
+                                                       stmt
+                                                       (addOffsetLval (Index (i, NoOffset)) lv)
+                                                       { e with
+                                                         enode = Lval (addOffsetLval (Index (i, NoOffset)) lv') }
+                                                       (pdd, st)))
+                                                  st)
+        | TArray _,                 Lval _   -> state
+        | _                                  -> Console.fatal "Symbolic.assign: unrecognized assignment: %a = %a"
+                                                  pp_lval lv pp_exp e
   end
 end

@@ -1268,10 +1268,9 @@ module Summary
       | Ndm _    -> v
       | Upd _    -> v
       | Top      ->
-        begin match (k : k Bare.k) with
+        match (k : k Bare.k) with
         | Bare.V -> ndv V s l
         | Bare.M -> ndm s l
-        end
     let covers (type k) (v1 : (_, _ , k) t) (v2 : (_, _, k) t) =
       match v1.node, v2.node with
       | Top,       _
