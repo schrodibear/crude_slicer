@@ -177,6 +177,15 @@ module Const_function =
       let default = "__VERIFIER_const"
     end)
 
+module Nondet_mem_function =
+  String
+    (struct
+      let option_name = "-nondet_mem_function"
+      let help = "May specify an alternative name for __VERIFIER_nondet_mem"
+      let arg_name = "name"
+      let default = "__VERIFIER_nondet_mem"
+    end)
+
 module Assign_function =
   String
     (struct

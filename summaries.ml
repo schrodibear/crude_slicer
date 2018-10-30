@@ -38,6 +38,8 @@ let ensure_update_function_present () =
     voidConstPtrType (Options.Update_function.get ()) [voidConstPtrType; voidConstPtrType; ulongLongType] false
 let ensure_const_function_present () =
   Kf.ensure_proto voidConstPtrType (Options.Const_function.get ()) [ulongLongType] false
+let ensure_nondet_mem_function_present () =
+  Kf.ensure_proto voidConstPtrType (Options.Nondet_mem_function.get ()) [] false
 let ensure_assign_function_present () =
   Kf.ensure_proto voidType (Options.Assign_function.get ()) [voidConstPtrType; voidConstPtrType] false
 let ensure_assume_function_present () = Kf.ensure_proto voidType (Options.Assume_function.get ()) [intType] false
@@ -171,6 +173,9 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
     let const_mem =
       let cst = get_vi @@ Options.Const_function.get () in
       fun lv v -> [call ~lv cst [v]]
+    let nondet_mem =
+      let ndm = get_vi @@ Options.Nondet_mem_function.get () in
+      fun lv -> [call ~lv ndm []]
     let assign =
       let ass = get_vi @@ Options.Assign_function.get () in
       fun m1 m2 -> [call ass [m1; m2]]
@@ -216,15 +221,20 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
 
     let mem m =
       match mk_mem m with
-      | Some e ->(let m = aux (`Val (`M, typeOf e)) in
+      | Some e ->(let m = aux @@ `Val (`M, TPtr (typeOf e, [])) in
                   push @@ get_mem (var' m) e;
                   Val (`M, m))
       | None   -> Console.fatal "Summaries.Local.mem: unexpected dangling region: should have been eliminated"
 
-    let ndt k ty =
+    let ndv k ty =
       let v = aux (`Val (`V, ty)) in
       push @@ havoc_lval (var' v) [];
       Val (k, conv k (`V, v))
+
+    let ndm ty =
+      let m = aux @@ `Val (`V, TPtr (ty, [])) in
+      push @@ nondet_mem @@ var' m;
+      Val (`M, m)
 
     let unop u e t =
       match u with
@@ -576,8 +586,9 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
            | `M { node = Var (`Global_var v); _ }  -> vrb k (v :> varinfo)
            | `M { node = Mem (`Poly_mem m); _ }    -> mem (m :> R.t * fieldinfo option)
            | `M { node = Mem (`Global_mem m); _ }  -> mem (m :> R.t * fieldinfo option)
-           | `V { node = Ndt (_, l); _ }
-           | `M { node = Ndt (_, l); _ }           -> ndt k (typeOfLval l)
+           | `V { node = Ndv (_, l); _ }
+           | `M { node = Ndv (_, l); _ }           -> ndv k (typeOfLval l)
+           | `M { node = Ndm (_, l); _ }           -> ndm (typeOfLval l)
            | `V { node = Una (u, a, t); _ }
            | `M { node = Una (u, a, t); _ }        -> una k u (eval @@ `V a) t
            | `V { node = Bin (b, a1, a2, t); _ }
@@ -733,6 +744,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       ensure_select_function_present ();
       ensure_update_function_present ();
       ensure_const_function_present ();
+      ensure_nondet_mem_function_present ();
       ensure_assign_function_present ();
       ensure_assume_function_present ();
       ensure_error_function_present ();

@@ -100,13 +100,43 @@ module Make (Analysis : Region.Analysis) = struct
       | LAnd      -> `And
       | LOr       -> `Or
 
+    type 'a state = t -> 'a * t
+    let (>>=) f1 f2 = f1 %> uncurry f2
+    let return x s = x, s
+    let (>>|) f1 f2 = f1 %> map_fst f2
+    let read s = s, s
+    let write s _ = (), s
+    let get =
+      function
+      | Some x -> return x
+      | None   -> Console.fatal "Symbolic.get: unexpected composite value"
+
+    let find_global_var v = read >>| fun s -> I.G.Var.M.find_opt   v s.post.global_vars
+    let find_global_mem m = read >>| fun s -> I.G.Mem.M.find_opt   m s.post.global_mems
+    let find_poly_var   v = read >>| fun s -> Poly.Var.M.find_opt  v s.post.poly_vars
+    let find_poly_mem   m = read >>| fun s -> Poly.Mem.M.find_opt  m s.post.poly_mems
+    let find_local_var  v = read >>| fun s -> Local.Var.M.find_opt v s.local_vars
+    let find_local_mem  m = read >>| fun s -> Local.Mem.M.find_opt m s.local_mems
+    let set_global_var vr vl =
+      read >>= fun s -> write { s with post = { s.post with global_vars = I.G.Var.M.add vr vl s.post.global_vars } }
+    let set_global_mem m v =
+      read >>= fun s -> write { s with post = { s.post with global_mems = I.G.Mem.M.add m v s.post.global_mems } }
+    let set_poly_var vr vl =
+      read >>= fun s -> write { s with post = { s.post with poly_vars = Poly.Var.M.add vr vl s.post.poly_vars } }
+    let set_poly_mem m v =
+      read >>= fun s -> write { s with post = { s.post with poly_mems = Poly.Mem.M.add m v s.post.poly_mems } }
+    let set_local_var vr vl =
+      read >>= fun s -> write { s with local_vars = Local.Var.M.add vr vl s.local_vars }
+    let set_local_mem m v =
+      read >>= fun s -> write { s with local_mems = Local.Mem.M.add m v s.local_mems }
+
     let rec eval_addr =
-      let rec offset s ty acc =
+      let rec offset stmt ty acc =
         function
-        | NoOffset        -> acc
+        | NoOffset        -> return acc
         | Field (fi, off) ->(let rty = TPtr (fi.ftype, []) in
                              offset
-                               s
+                               stmt
                                fi.ftype
                                (V.una
                                   (`Cast rty)
@@ -122,11 +152,8 @@ module Make (Analysis : Region.Analysis) = struct
                                   rty)
                                off)
         | Index (e, off)  ->(let ty = Ast_info.direct_element_type ty in
-                             offset
-                               s
-                               ty
-                               (V.bin `Plus acc (the (eval_expr s e)) @@ TPtr (ty, []))
-                               off)
+                             eval_expr stmt e >>= get >>= fun v ->
+                             offset stmt ty (V.bin `Plus acc v @@ TPtr (ty, [])) off)
       in
       let local =
         let module H = Varinfo.Hashtbl in
@@ -149,48 +176,58 @@ module Make (Analysis : Region.Analysis) = struct
         in
         Globals.Functions.iter_on_fundecs
           (fun d ->
-             let s = V.una (`Cast charPtrType) (V.ndt (List.hd d.sallstmts) @@ var d.svar) charPtrType in
+             let s = V.una (`Cast charPtrType) (V.ndv (List.hd d.sallstmts) @@ var d.svar) charPtrType in
              ignore
                (0 |>
                 add s d.sformals |>
                 add s d.slocals));
         H.find h
       in
-      fun s (lh, off) ->
+      fun stmt (lh, off) ->
         match lh with
-        | Var v when v.vglob -> offset s v.vtype (V.adr (Global_var.of_varinfo v)) off
-        | Var v              -> offset s v.vtype (local v) off
-        | Mem e              -> offset s (typeOfLhost lh) (the (eval_expr s e)) off
-    and eval_lval s lv : Symbolic.tv option =
-      let open Symbolic in
-      let Refl = Symbolic.eq in
-      opt_map
-        (function
-        | `Global_var v -> I.G.Var.M.find   v s.post.global_vars
-        | `Local_var  v -> Local.Var.M.find v s.local_vars
-        | `Poly_var   v -> Poly.Var.M.find  v s.post.poly_vars
-        | `Global_mem m -> V.sel (I.G.Mem.M.find m s.post.global_mems) (eval_addr s lv) (typeOfLval lv)
-        | `Local_mem  m -> V.sel (Local.Mem.M.find m s.local_mems)     (eval_addr s lv) (typeOfLval lv)
-        | `Poly_mem   m -> V.sel (Poly.Mem.M.find m s.post.poly_mems)  (eval_addr s lv) (typeOfLval lv))
-        (w_lval lv)
+        | Var v when v.vglob -> offset stmt v.vtype (V.adr (Global_var.of_varinfo v)) off
+        | Var v              -> offset stmt v.vtype (local v) off
+        | Mem e              -> eval_expr stmt e >>= get >>= fun v -> offset stmt (typeOfLhost lh) v off
+    and eval_lval =
+      let ensure ~init ~find ~set x =
+        find x >>=
+        function
+        | Some v -> return v
+        | None   -> set x init >>| const init
+      in
+      fun stmt lv ?(init_v=V.ndv stmt lv) ?(init_m=M.ndm stmt lv) () : V.t option state ->
+        let Refl = S.eq in
+        let Refl = eq in
+        let deref m : V.t state = eval_addr stmt lv >>| fun a -> V.sel m a @@ typeOfLval lv in
+        match w_lval lv with
+        | None   -> return None
+        | Some w ->(w |>
+                    (function
+                    | `Global_var v -> ensure ~init:init_v ~find:find_global_var ~set:set_global_var v
+                    | `Local_var  v -> ensure ~init:init_v ~find:find_local_var  ~set:set_local_var v
+                    | `Poly_var   v -> ensure ~init:init_v ~find:find_poly_var   ~set:set_poly_var v
+                    | `Global_mem m -> ensure ~init:init_m ~find:find_global_mem ~set:set_global_mem m >>= deref
+                    | `Local_mem  m -> ensure ~init:init_m ~find:find_local_mem  ~set:set_local_mem m  >>= deref
+                    | `Poly_mem   m -> ensure ~init:init_m ~find:find_poly_mem   ~set:set_poly_mem m   >>= deref) >>|
+                    some)
     and eval_expr =
-      let size s = some @@ V.cst @@ CInt64 (Integer.of_int s, theMachine.kindOfSizeOf, None) in
-      fun s e ->
-        let eval e = the (eval_expr s e) in
+      let size s = return @@ some @@ V.cst @@ CInt64 (Integer.of_int s, theMachine.kindOfSizeOf, None) in
+      fun stmt e ->
+        let eval e = eval_expr stmt e >>= get in
         match e.enode with
-        | Const c              -> some @@ V.cst c
-        | Lval lv              -> eval_lval s lv
+        | Const c              -> return @@ some @@ V.cst c
+        | Lval lv              -> eval_lval stmt lv ()
         | SizeOf ty            -> size @@ bytesSizeOf ty
         | SizeOfE e            -> size @@ bytesSizeOf @@ typeOf e
         | SizeOfStr s          -> size @@ String.length s + 1
         | AlignOf ty           -> size @@ bytesAlignOf ty
         | AlignOfE e           -> size @@ bytesAlignOf @@ typeOf e
-        | UnOp (u, e, t)       -> some @@ V.una (unop u) (eval e) t
-        | BinOp (b, e1, e2, t) -> some @@ V.bin (binop b) (eval e1) (eval e2) t
-        | CastE (ty, _, e)     -> some @@ V.una (`Cast ty) (eval e) ty
+        | UnOp (u, e, t)       -> eval e >>| fun e -> some @@ V.una (unop u) e t
+        | BinOp (b, e1, e2, t) -> eval e1 >>= fun e1 -> eval e2 >>| fun e2 -> some @@ V.bin (binop b) e1 e2 t
+        | CastE (ty, _, e)     -> eval e >>| fun e -> some @@ V.una (`Cast ty) e ty
         | AddrOf lv
-        | StartOf lv           -> some @@ eval_addr s lv
-        | Info (e, _)          -> eval_expr s e
+        | StartOf lv           -> eval_addr stmt lv >>| some
+        | Info (e, _)          -> eval_expr stmt e
 
     (*let assume*)
   end

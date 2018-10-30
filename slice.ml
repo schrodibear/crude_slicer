@@ -69,7 +69,8 @@ module Make (Analysis : Region.Analysis) = struct
     module R = struct
       include Analysis.R
       include Analysis
-      let of_var,    of_lval,    of_expr,    relevant_region,    arg_regions =
+      let
+        of_var,    of_lval,    of_expr,    relevant_region,    arg_regions =
         of_var ~f, of_lval ~f, of_expr ~f, relevant_region ~f, arg_regions ~f
     end
     module U = Analysis.U
