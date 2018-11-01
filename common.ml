@@ -393,5 +393,12 @@ module Kf = struct
       file.globals <- GFunDecl (fs, vi, loc) :: file.globals;
       Globals.Functions.add @@ Declaration (fs, vi, Some (List.map makeFormalsVarDecl params), loc)
 
+  let retvar kf =
+    match[@warning "-4"] (Kernel_function.find_return kf).skind with
+    | Return (None, _)                                          -> None
+    | Return (Some ({ enode = Lval (Var vi, NoOffset); _ }), _) -> Some vi
+    | _                                                         -> Console.fatal "Kf.retvar: \
+                                                                                  unexpected return statement"
+
   let stub_attr = "stub"
 end

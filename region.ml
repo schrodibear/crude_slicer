@@ -149,7 +149,16 @@ module Representant = struct
       opt2 arrow,  opt deref,     opt2 dot,     opt2 container,     opt dot_void,     opt2 container_of_void
   end
 
-  type t = Exp.t region
+  module T = struct
+    type t = Exp.t region
+    let equal r1 r2 = r1.id = r2.id
+    let hash r = r.id
+    let compare r1 r2 = compare r1.id r2.id
+  end
+  include T
+  module H = FCHashtbl.Make (T)
+  module M = FCMap.Make (T)
+  module S = FCSet.Make (T)
 
   let name r = !! (r.name)
   let typ r = r.typ
@@ -157,12 +166,7 @@ module Representant = struct
   let exp' r = opt_map (!!) r.exp
   let kind r = r.kind
 
-  let equal r1 r2 = r1.id = r2.id
-  let hash r = r.id
-  let compare r1 r2 = compare r1.id r2.id
   let choose r1 r2 = Kind.choose r1.kind r2.kind
-
-  module H = Hashtbl.Make (struct type nonrec t = t let equal, hash = equal, hash end)
 
   let id = ref ~-1
 
@@ -446,9 +450,7 @@ module type Representant_intf = sig
   val exp' : t -> Exp.t option
   val typ : t -> typ
   val kind : t -> Kind.t
-  val equal : t -> t -> bool
-  val hash : t -> int
-  val compare : t -> t -> int
+  include With_containers with type t := t
   val flag : Flag.t
   val all_void_xs : unit -> (int * t list) list
   val pp : Format.formatter -> t -> unit
@@ -456,7 +458,7 @@ end
 
 module type Representant_full = sig
   include Representant_intf with type 'a region = 'a Representant.region
-  include Representant with module Kind := Kind and module Exp := Exp and type t := t
+  include Representant with module Kind := Kind and module Exp := Exp and type t := t and module H := H
   val global : string -> exp option -> typ -> t
   val poly : string -> string -> exp -> typ -> t
   val local : string -> string -> typ -> t

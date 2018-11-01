@@ -604,7 +604,7 @@ module type Summary = sig
 
       val strengthen : stmt -> lval -> t -> t
       val covers : t -> t -> bool
-      val merge : t -> t -> t
+      val merge : ?join:(t -> t -> t) -> t -> t -> t
     end
     module M : sig
       type t = tm
@@ -628,7 +628,7 @@ module type Summary = sig
 
       val strengthen : stmt -> lval -> t -> t
       val covers : t -> t -> bool
-      val merge : t -> t -> t
+      val merge : ?join:(t -> t -> t) -> t -> t -> t
     end
   end
 
@@ -1252,7 +1252,7 @@ module Summary
             |_    -> Console.fatal "Symbolic.pp: unexpected witness" }
         fmt
 
-    let strengthen (type k) k s l (v : (_, _, k) t) : (_, _, k) t =
+    let strengthen (type k) k s l (v : k u) : k u =
       match v.node with
       | Bot
       | Cst _
@@ -1269,9 +1269,9 @@ module Summary
       | Upd _    -> v
       | Top      ->
         match (k : k Bare.k) with
-        | Bare.V -> ndv V s l
+        | Bare.V -> ndv Bare.V s l
         | Bare.M -> ndm s l
-    let covers (type k) (v1 : (_, _ , k) t) (v2 : (_, _, k) t) =
+    let covers (type k) (v1 : k u) (v2 : k u) =
       match v1.node, v2.node with
       | Top,       _
       | _,        Bot    -> true
@@ -1290,8 +1290,9 @@ module Summary
       | Mem _,    _      -> false
       | Ndm _,    _      -> false
       | Upd _,    _      -> false
-    let rec merge : type k. k Bare.k -> (_, _, k) t -> (_, _, k) t -> (_, _, k) t =
-      fun k v1 v2 ->
+    let rec merge : type k. k Bare.k -> ?join:(k u -> k u -> k u) -> k u -> k u -> k u =
+      fun k ?join v1 v2 ->
+        let join_ () = may_map ~dft:(top k) (fun j -> j v1 v2) join in
         match v1.node, v2.node with
         | Top,  _
         | _,                         Top                       -> top k
@@ -1306,7 +1307,7 @@ module Summary
                                                                     (merge k e1 e2)
                                                                     ty1
         | Ite (c1, _, _, _, _),      Ite (c2, _, _, _, _)
-          when Exp.equal c1 c2                                 -> top k (* Here Cartesian pred abs might kick in *)
+          when Exp.equal c1 c2 && not (has_some join)          -> top k (* Here Cartesian pred abs might kick in *)
         | Ite (c1, i1, t1, e1, ty1), Ite (c2, _, _, _, _)
           when Exp.compare c1 c2 < 0                           -> ite k c1 i1 (merge k t1 v2) (merge k e1 v2) ty1
         | Ite _,                     Ite (c2, i2, t2, e2, ty2) -> ite k c2 i2 (merge k v1 t2) (merge k v1 e2) ty2
@@ -1320,10 +1321,10 @@ module Summary
          | Bin  _
          | Sel _
          | Ite _
-         | Let _),                   _                         -> top k
-        | Mem _,                     _                         -> top k
-        | Ndm _,                     _                         -> top k
-        | Upd _,                     _                         -> top k
+         | Let _),                   _                         -> join_ ()
+        | Mem _,                     _                         -> join_ ()
+        | Ndm _,                     _                         -> join_ ()
+        | Upd _,                     _                         -> join_ ()
 
     module V = struct
       module T = struct

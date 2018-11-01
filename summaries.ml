@@ -698,13 +698,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       let Refl = L.S.Symbolic.eq in
       let open L.S in
       let open L.S.Symbolic in
-      let rvo =
-        match[@warning "-4"] (Kernel_function.find_return @@ Globals.Functions.get F.f.svar).skind with
-        | Return (None, _)                                          -> None
-        | Return (Some ({ enode = Lval (Var vi, NoOffset); _ }), _) -> Some vi
-        | _                                                         -> Console.fatal "Summaries.Local.body: \
-                                                                                      unexpected return statement"
-      in
+      let rvo = Kf.retvar @@ Globals.Functions.get F.f.svar in
       let cache = H_stack.create 4 in
       let lcache = C (readable, V.H.memo, V.H.create 32, M.H.memo, M.H.create 32) in
       H_stack.add cache [] lcache;

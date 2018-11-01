@@ -5,14 +5,21 @@ open Cil_types
 open Cil_datatype
 open Cil
 open Cil_printer
+open Visitor
 open Extlib
 
 open Common
 open Info
 
-module Make (Analysis : Region.Analysis) = struct
+module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
 
-  module I = Analysis.I
+  module I = R.I
+  module R = struct
+    include R.R
+    include R
+  end
+  module U = R.U
+  open M
 
   module Make_local
       (L : I.E.Local)
@@ -21,22 +28,25 @@ module Make (Analysis : Region.Analysis) = struct
          val w_lval : lval -> [> L.W.readable] option
        end)
   = struct
-    open L
+    module F = L.F
+    module S = L.S
+    module W = L.W
     open F
     open S
     open Import
+    open Symbolic
 
     module Path_dd : sig
       type t
-      val cut : exp -> Symbolic.V.t -> bool -> t -> t
+      val cut : exp -> V.t -> bool -> t -> t
       val merge : t -> t -> t
-      val inst_v : Symbolic.V.t -> typ -> t -> Symbolic.V.t
-      val inst_m : Symbolic.M.t -> typ -> t -> Symbolic.M.t
+      val inst_v : V.t -> typ -> t -> V.t
+      val inst_m : M.t -> typ -> t -> M.t
     end = struct
       type t =
         | Top
         | Bot
-        | Ite of exp * Symbolic.V.t * t * t
+        | Ite of exp * V.t * t * t
       let rec merge t1 t2 =
         match t1, t2 with
         | Top,                  _
@@ -45,7 +55,7 @@ module Make (Analysis : Region.Analysis) = struct
         | t,                    Bot                      -> t
         | Ite (c0, s0, t1, e1), Ite (c1, s1, t2, e2)
           when Exp.equal c0 c1
-            && Symbolic.V.equal s0 s1                    -> Ite (c0, s0, merge t1 t2, merge e1 e2)
+            && V.equal s0 s1                             -> Ite (c0, s0, merge t1 t2, merge e1 e2)
         | Ite (c0, s0, t1, e1), (Ite (c1, _, _, _) as t)
           when Exp.compare c0 c1 < 0                     -> Ite (c0, s0, merge t1 t, merge e1 t)
         | t1,                   Ite (c, s, t, e)         -> Ite (c, s, merge t1 t, merge t1 e)
@@ -55,20 +65,55 @@ module Make (Analysis : Region.Analysis) = struct
         | Bot                        -> Bot
         | Ite (c', s', t, e)
           when Exp.equal c c'
-            && Symbolic.V.equal s s' -> if f then t else e
+            && V.equal s s'          -> if f then t else e
         | Ite (c', _, _, _) as t
           when Exp.compare c c' < 0  -> Ite (c, s, t, Bot)
         | Ite (c', s', t, e)         -> Ite (c', s', cut c s f t, cut c s f e)
-      let rec inst top bot ite v ty =
+      module M_d =
+        Map.Make
+          (struct
+            type t = exp * V.t
+            let compare (e1, v1) (e2, v2) =
+              let c = Exp.compare e1 e2 in
+              if c <> 0 then c else V.compare v1 v2
+          end)
+      let rec opt : type k. (_ -> _ -> k u -> k u -> _ -> k u) -> _ -> k u -> k u =
+        fun ite path v ->
+          let Refl = eq in
+          match v.Info.Symbolic.node with
+          | Ite (c, s, t, e, _)
+            when M_d.mem (c, s) path -> if M_d.find (c, s) path then opt ite path t else opt ite path e
+          | Ite (c, s, t, e, ty)     -> ite
+                                          c
+                                          s
+                                          (opt ite (M_d.add (c, s) true path) t)
+                                          (opt ite (M_d.add (c, s) false path) e)
+                                          ty
+          | Top
+          | Bot
+          | Cst _
+          | Adr _
+          | Var _
+          | Ndv _
+          | Una _
+          | Bin _
+          | Sel _                    -> v
+          | Let _                    -> v
+          | Mem _                    -> v
+          | Ndm _                    -> v
+          | Upd _                    -> v
+      let rec inst bot (ite : _ -> V.t -> _) path v ty =
+        let Refl = eq in
+        let inst c f = inst bot ite (M_d.add c f path) v ty in
         function
-        | Top              -> v
+        | Top              -> opt ite path v
         | Bot              -> bot
-        | Ite (c, s, t, e) -> ite c s (inst top bot ite v ty t) (inst top bot ite v ty e) ty
-      let inst_v = Symbolic.V.(inst top bot ite)
-      let inst_m = Symbolic.M.(inst top bot ite)
+        | Ite (c, s, t, e) -> ite c s (inst (c, s) true t) (inst (c, s) false e) ty
+      let inst_v : V.t -> _ -> _ -> V.t = let Refl = eq in V.(inst bot ite) M_d.empty
+      let inst_m : M.t -> _ -> _ -> M.t = let Refl = eq in M.(inst bot ite) M_d.empty
     end
 
-    open Symbolic
+    let loc = Location.unknown
 
     let unop =
       function
@@ -239,7 +284,11 @@ module Make (Analysis : Region.Analysis) = struct
     let rec assign stmt lv e (pdd, st as state) =
       let Refl = S.eq in
       let Refl = eq in
-      let set_v set v = pdd, snd @@ run st (eval_expr stmt e >>= get >>= set v : _ state) in
+      let ty = typeOf e in
+      let set_v set vr =
+        pdd,
+        snd @@ run st (eval_expr stmt e >>= get >>= fun vl -> set vr @@ Path_dd.inst_v vl ty pdd : _ state)
+      in
       let set_m find set m =
         pdd,
         snd @@
@@ -248,7 +297,7 @@ module Make (Analysis : Region.Analysis) = struct
            find m >>= get >>= fun mv ->
            eval_addr stmt lv >>= fun a ->
            eval_expr stmt e >>= get >>= fun v ->
-           set m (M.upd mv a v @@ typeOf e) : _ state)
+           set m @@ Path_dd.inst_m (M.upd mv a v ty) ty pdd : _ state)
       in
       match w_lval lv with
       | Some (`Global_var v)                 -> set_v set_global_var v
@@ -258,7 +307,7 @@ module Make (Analysis : Region.Analysis) = struct
       | Some (`Poly_mem m)                   -> set_m find_poly_mem set_poly_mem m
       | Some (`Local_mem m)                  -> set_m find_local_mem set_local_mem m
       | None                                 ->
-        match unrollType @@ typeOf e, e.enode with
+        match[@warning "-4"] unrollType @@ typeOf e, e.enode with
         | TComp (ci, _, _), Lval lv'
           when ci.cstruct                    -> pdd,
                                                 List.fold_left
@@ -283,7 +332,7 @@ module Make (Analysis : Region.Analysis) = struct
                                                 Array.init l id |>
                                                 Array.fold_left
                                                   ((fun st i ->
-                                                     let i = integer ~loc:Location.unknown i in
+                                                     let i = integer ~loc i in
                                                      snd @@
                                                      assign
                                                        stmt
@@ -295,5 +344,289 @@ module Make (Analysis : Region.Analysis) = struct
         | TArray _,                 Lval _   -> state
         | _                                  -> Console.fatal "Symbolic.assign: unrecognized assignment: %a = %a"
                                                   pp_lval lv pp_exp e
+
+    let retvar = Kf.retvar @@ Globals.Functions.get F.f.svar
+    let retexp = opt_map (fun r -> if isStructOrUnionType r.vtype then mkAddrOf ~loc (var r) else evar r) retvar
+
+    let mk_mem (r, fo) =
+      let eo =
+        opt_map
+          (visitFramacExpr @@
+           object
+             inherit frama_c_inplace
+             method! vexpr e =
+               if R.Exp.is_ret e
+               then ChangeTo (the retexp)
+               else DoChildren
+           end)
+          (R.exp' r :> exp option)
+      in
+      opt_map
+        (fun addr ->
+           match fo with
+           | None    -> mkMem ~addr ~off:NoOffset
+           | Some fi -> mkMem ~addr ~off:(Field (fi, NoOffset)))
+        eo
+
+    let lval =
+      let mem m =
+        match mk_mem m with
+        | Some lv -> lv
+        | None    -> mkMem
+                       ~addr:(mkCast
+                                ~force:false
+                                ~overflow:Check
+                                ~e:(mkAddrOf ~loc @@ var F.f.svar)
+                                ~newt:(TPtr ((fst m).R.typ, [])))
+                       ~off:NoOffset
+      in
+      fun w ->
+        match (w :> W.readable) with
+        | `Global_var v -> var (v :> varinfo)
+        | `Poly_var   v -> var (v :> varinfo)
+        | `Local_var  v -> var (v :> varinfo)
+        | `Global_mem m -> mem (m :> I.mem)
+        | `Poly_mem   m -> mem (m :> I.mem)
+        | `Local_mem  m -> mem (m :> I.mem)
+
+    let type_of =
+      let mem (r, fi) =
+        match fi with
+        | Some fi -> fi.ftype
+        | None    -> r.R.typ
+      in
+      fun w ->
+        match (w :> W.readable) with
+        | `Global_var v -> (v :> varinfo).vtype
+        | `Poly_var   v -> (v :> varinfo).vtype
+        | `Local_var  v -> (v :> varinfo).vtype
+        | `Global_mem m -> mem (m :> I.mem)
+        | `Poly_mem   m -> mem (m :> I.mem)
+        | `Local_mem  m -> mem (m :> I.mem)
+
+    let one = CInt64 (Integer.one, IInt, None)
+
+    let join_pre (v1 : V.t) (v2 : V.t) =
+      let Refl = eq in
+      match Info.Symbolic.(v1.node, v2.node) with
+      | Cst (CInt64 (c, IInt, _)), v
+        when Integer.is_one c                                -> V.cst one
+      | v,                         Cst (CInt64 (c, IInt, _))
+        when Integer.is_one c                                -> V.cst one
+      | _,                         _                         -> V.bin `Or v1 v2 intType
+
+    let call stmt ?lv kf es (pdd, s) : _ * S.t =
+      let I.E.Some { local = (module L'); eff = eff' } = I.get info R.flag @@ Kernel_function.get_definition kf in
+      let h_map = R.map stmt kf in
+      let h_rev = R.H.create 512 in
+      R.H_map.iter
+        (fun u' u -> let r = U.repr u in R.H.replace h_rev r @@ R.S.add (U.repr u') @@ R.H.find_def h_rev r R.S.empty)
+        h_map;
+      let h_glob = R.H.create 16 in
+      L'.A.iter
+        (fun a f ->
+           let handle =
+             function
+             | `Global_mem m -> R.H.replace h_glob (fst (m :> I.mem)) ()
+             | #L'.W.t       -> ()
+           in
+           handle a;
+           L'.R.iter handle f)
+        (I.E.assigns eff');
+      let h_clash = R.H.create 16 in
+      R.H.iter
+        (fun r s ->
+           let s = if R.H.mem h_glob r then R.S.add r s else s in
+           if R.S.cardinal s > 1 then R.S.iter (fun r' -> R.H.replace h_clash r' s) s)
+        h_rev;
+      let clashes =
+        L'.A.fold
+          (let writes (r, fi) mk =
+             const @@
+             if R.H.mem h_clash r then R.S.fold (L'.W.S.add % mk ?fi % U.of_repr) (R.H.find h_clash r) else id
+           in
+           function
+           | `Global_var _
+           | `Poly_var _
+           | `Local_var _
+           | `Local_mem _
+           | `Result       -> const id
+           | `Global_mem m -> writes (m :> I.mem) (fun ?fi u -> `Global_mem (I.G.Mem.mk ?fi u))
+           | `Poly_mem m   -> writes (m :> I.mem) (fun ?fi u -> `Poly_mem (L'.F.Poly.Mem.mk ?fi u)))
+          (I.E.assigns eff')
+          L'.W.S.empty
+      in
+      let clashes =
+        L'.A.fold
+          (fun a f ->
+             if
+               L'.W.S.exists
+                 (function
+                 | #L'.W.readable as w -> L'.R.mem_some (L'.R.of_write w) f
+                 | `Result             -> false)
+                 clashes
+             then L'.W.S.add a
+             else id)
+          (I.E.assigns eff')
+          clashes
+      in
+      let check =
+        let h = W.H.create 64 in
+        fun w flag -> if W.H.memo h w (const flag) <> flag then Console.fatal "Symbolic.call: unexpected write clash"
+      in
+      let s' = I.E.summary eff' in
+      let Refl = S.eq in
+      let Refl = eq in
+      let Refl = L'.S.eq in
+      let Refl = L'.S.Symbolic.eq in
+      let open L'.S in
+      let open L'.S.Symbolic in
+      let module V' = V in
+      let module M' = M in
+      let module V = S.Symbolic.V in
+      let module M = S.Symbolic.M in
+      let formals = Kernel_function.get_formals kf in
+      let (es, s : V.t option list * S.t) =
+        List.fold_right (fun e (es, s) -> map_fst (List.cons' es) @@ run s @@ eval_expr stmt e) es ([], s)
+      in
+      let prj_poly_var =
+        let open List in
+        let ass = combine (map (fun vi -> vi.vid) formals) @@ take (length formals) es in
+        fun vi -> assoc vi.vid ass
+      in
+      let prj_poly_mem =
+        let w_mem =
+          let f = F.f.svar.vname in
+          fun (r, fi) ->
+            let u = R.H_map.find (U.of_repr r) h_map in
+            match (U.repr u).R.kind with
+            | `Global                          -> `Global_mem (I.G.Mem.mk ?fi u)
+            | `Local f' when String.equal f f' -> `Local_mem  (Local.Mem.mk ?fi u)
+            | `Poly f'  when String.equal f f' -> `Poly_mem   (Poly.Mem.mk ?fi u)
+            | `Local f'
+            | `Poly f'                         -> Console.fatal "Symbolic.call: broken invariant: writing to local \
+                                                                 region %a of function %s from function %s"
+                                                    R.pp (U.repr u) f' f
+            | `Dummy                           -> Console.fatal "Symbolic.call: broken invariant: dummy region \
+                                                                 encountered"
+        in
+        fun m -> w_mem (m : L'.F.Poly.Mem.t :> I.mem)
+      in
+      let inj_global_mem, inj_poly_mem, inj_local_mem =
+        let w_mem =
+          let f = L'.F.f.svar.vname in
+          fun (r, fi) m ->
+            R.S.fold
+              (fun r ->
+                 match r.R.kind with
+                 | `Poly f' when String.equal f f' -> L'.F.Poly.Mem.(M.add (mk ?fi @@ U.of_repr r) m)
+                 | #R.Kind.t                       -> id)
+              (R.H.find_def h_rev r R.S.empty)
+        in
+        (fun m -> w_mem (m : I.G.Mem.t :> I.mem)),
+        (fun m -> w_mem (m : Poly.Mem.t :> I.mem)),
+        fun m -> w_mem (m : Local.Mem.t :> I.mem)
+      in
+      let env : _ env =
+        let poly_vars : V.t L'.F.Poly.Var.M.t =
+          L'.F.Poly.Var.(
+            List.fold_right (fun v -> may_map (M.add @@ of_varinfo v) ~dft:id @@ prj_poly_var v) formals M.empty)
+        in
+        let poly_mems =
+          L'.F.Poly.Mem.M.empty |>
+          I.G.Mem.M.fold inj_global_mem s.post.global_mems |>
+          Poly.Mem.M.fold inj_poly_mem s.post.poly_mems |>
+          Local.Mem.M.fold inj_local_mem s.local_mems
+        in
+        {
+          poly_vars;
+          poly_mems;
+          global_vars = s.post.global_vars;
+          global_mems = s.post.global_mems
+        }
+      in
+      let retvar' = Kf.retvar kf in
+      let handle_v w' v s =
+        let clashes = L'.W.S.mem (w' :> L'.W.t) clashes in
+        match w' with
+        | `Global_var g as w ->(check w clashes;
+                                let v =
+                                  if clashes
+                                  then V.ndv stmt (lval w)
+                                  else V'.prj stmt S.Symbolic.readable env v
+                                in
+                                snd @@ set_global_var g (Path_dd.inst_v v (type_of w) pdd) s)
+        | `Result            ->(check `Result clashes;
+                                let lv = the lv in
+                                let ty = typeOfLval lv in
+                                let v =
+                                  if clashes
+                                  then V.ndv stmt lv
+                                  else V'.prj stmt S.Symbolic.readable env v
+                                in
+                                let set_v set vr = snd @@ set vr (Path_dd.inst_v v ty pdd) s in
+                                let set_m find set m =
+                                  snd @@
+                                  run s
+                                    (eval_lval stmt lv () >>= get >>= fun _ ->
+                                     find m >>= get >>= fun mv ->
+                                     eval_addr stmt lv >>= fun a ->
+                                     set m @@ Path_dd.inst_m (M.upd mv a v ty) ty pdd)
+                                in
+                                match the (w_lval lv) with
+                                | `Global_var v -> set_v set_global_var v
+                                | `Poly_var v   -> set_v set_poly_var v
+                                | `Local_var v  -> set_v set_local_var v
+                                | `Global_mem m -> set_m find_global_mem set_global_mem m
+                                | `Poly_mem m   -> set_m find_poly_mem set_poly_mem m
+                                | `Local_mem m  -> set_m find_local_mem set_local_mem m)
+      in
+      let handle_m w' m s =
+        let clashes = L'.W.S.mem (w' :> L'.W.t) clashes in
+        let set set mem w =
+          check (w :> W.t) clashes;
+          let m =
+            if clashes
+            then M.ndm stmt (lval w)
+            else M'.prj stmt S.Symbolic.readable env m
+          in
+          snd @@ set mem (Path_dd.inst_m m (type_of w) pdd) s
+        in
+        match w' with
+        | `Global_mem g as w   -> set set_global_mem g w
+        | `Poly_mem p'         ->
+          match prj_poly_mem p' with
+          | `Global_mem g as w -> set set_global_mem g w
+          | `Poly_mem p as w   -> set set_poly_mem p w
+          | `Local_mem l as w  -> set set_local_mem l w
+      in
+      let pre =
+        let clashes =
+          let deps' = I.E.depends eff' in
+          L'.W.S.exists
+            L'.R.(
+              function
+              | `Result             -> false
+              | #L'.W.readable as w -> mem_some (of_write w) deps')
+            clashes
+        in
+        let v =
+          Path_dd.inst_v
+            (if clashes
+             then V.cst one
+             else V'.prj stmt S.Symbolic.readable env s'.pre)
+            intType
+            pdd
+        in
+        S.Symbolic.V.merge ~join:join_pre s.pre v
+      in
+      pdd,
+      { s with pre } |>
+      I.G.Var.M.fold (fun v -> handle_v @@ `Global_var v) s'.post.global_vars |>
+      I.G.Mem.M.fold (fun m -> handle_m @@ `Global_mem m) s'.post.global_mems |>
+      L'.F.Poly.Mem.M.fold (fun m -> handle_m @@ `Poly_mem m) s'.post.poly_mems |>
+      if has_some lv && not @@ isStructOrUnionType @@ Kernel_function.get_return_type kf
+      then handle_v `Result L'.F.Local.Var.(M.find (of_varinfo @@ the retvar') s'.local_vars)
+      else id
   end
 end

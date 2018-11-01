@@ -251,8 +251,8 @@ module Make (Analysis : Region.Analysis) = struct
       in
       let open List in
       let args = take (length params) args in
-      let add_from_arg = combine params @@ map add_from_rval args in
-      fun acc fv -> assoc fv add_from_arg acc
+      let add_from_arg = combine (map (fun vi -> vi.vid) params) @@ map add_from_rval args in
+      fun acc fv -> assoc fv.vid add_from_arg acc
 
     let prj_poly_mem ~prj s kf =
       let map = R.map s kf in
