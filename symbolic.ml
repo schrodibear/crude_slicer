@@ -38,6 +38,8 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
 
     module Path_dd : sig
       type t
+      val top : t
+      val bot : t
       val cut : exp -> V.t -> bool -> t -> t
       val merge : t -> t -> t
       val inst_v : V.t -> typ -> t -> V.t
@@ -47,6 +49,8 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         | Top
         | Bot
         | Ite of exp * V.t * t * t
+      let top = Top
+      let bot = Bot
       let rec merge t1 t2 =
         match t1, t2 with
         | Top,                  _
@@ -146,43 +150,31 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       | LAnd      -> `And
       | LOr       -> `Or
 
-    type 'a state = t -> 'a * t
-    let (>>=) f1 f2 = f1 %> uncurry f2
-    let return x s = x, s
-    let (>>|) f1 f2 = f1 %> map_fst f2
-    let read s = s, s
-    let write s _ = (), s
     let get =
       function
-      | Some x -> return x
+      | Some x -> x
       | None   -> Console.fatal "Symbolic.get: unexpected composite value"
 
-    let find_global_var v = read >>| fun s -> I.G.Var.M.find_opt   v s.post.global_vars
-    let find_global_mem m = read >>| fun s -> I.G.Mem.M.find_opt   m s.post.global_mems
-    let find_poly_var   v = read >>| fun s -> Poly.Var.M.find_opt  v s.post.poly_vars
-    let find_poly_mem   m = read >>| fun s -> Poly.Mem.M.find_opt  m s.post.poly_mems
-    let find_local_var  v = read >>| fun s -> Local.Var.M.find_opt v s.local_vars
-    let find_local_mem  m = read >>| fun s -> Local.Mem.M.find_opt m s.local_mems
-    let set_global_var vr vl =
-      read >>= fun s -> write { s with post = { s.post with global_vars = I.G.Var.M.add vr vl s.post.global_vars } }
-    let set_global_mem m v =
-      read >>= fun s -> write { s with post = { s.post with global_mems = I.G.Mem.M.add m v s.post.global_mems } }
-    let set_poly_var vr vl =
-      read >>= fun s -> write { s with post = { s.post with poly_vars = Poly.Var.M.add vr vl s.post.poly_vars } }
-    let set_poly_mem m v =
-      read >>= fun s -> write { s with post = { s.post with poly_mems = Poly.Mem.M.add m v s.post.poly_mems } }
-    let set_local_var vr vl =
-      read >>= fun s -> write { s with local_vars = Local.Var.M.add vr vl s.local_vars }
-    let set_local_mem m v =
-      read >>= fun s -> write { s with local_mems = Local.Mem.M.add m v s.local_mems }
+    let find_global_var v s = I.G.Var.M.find   v s.post.global_vars
+    let find_global_mem m s = I.G.Mem.M.find   m s.post.global_mems
+    let find_poly_var   v s = Poly.Var.M.find  v s.post.poly_vars
+    let find_poly_mem   m s = Poly.Mem.M.find  m s.post.poly_mems
+    let find_local_var  v s = Local.Var.M.find v s.local_vars
+    let find_local_mem  m s = Local.Mem.M.find m s.local_mems
+    let set_global_var vr vl s = { s with post = { s.post with global_vars = I.G.Var.M.add vr vl s.post.global_vars } }
+    let set_global_mem m v s = { s with post = { s.post with global_mems = I.G.Mem.M.add m v s.post.global_mems } }
+    let set_poly_var vr vl s = { s with post = { s.post with poly_vars = Poly.Var.M.add vr vl s.post.poly_vars } }
+    let set_poly_mem m v s = { s with post = { s.post with poly_mems = Poly.Mem.M.add m v s.post.poly_mems } }
+    let set_local_var vr vl s = { s with local_vars = Local.Var.M.add vr vl s.local_vars }
+    let set_local_mem m v s = { s with local_mems = Local.Mem.M.add m v s.local_mems }
 
     let rec eval_addr =
-      let rec offset stmt ty acc =
+      let rec offset s ty acc =
         function
-        | NoOffset        -> return acc
+        | NoOffset        -> acc
         | Field (fi, off) ->(let rty = TPtr (fi.ftype, []) in
                              offset
-                               stmt
+                               s
                                fi.ftype
                                (V.una
                                   (`Cast rty)
@@ -198,8 +190,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
                                   rty)
                                off)
         | Index (e, off)  ->(let ty = Ast_info.direct_element_type ty in
-                             eval_expr stmt e >>= get >>= fun v ->
-                             offset stmt ty (V.bin `Plus acc v @@ TPtr (ty, [])) off)
+                             offset s ty (V.bin `Plus acc (get @@ eval_expr s e) @@ TPtr (ty, [])) off)
       in
       let local =
         let module H = Varinfo.Hashtbl in
@@ -229,72 +220,51 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
                 add s d.slocals));
         H.find h
       in
-      fun stmt (lh, off) ->
+      fun s (lh, off) ->
         match lh with
-        | Var v when v.vglob -> offset stmt v.vtype (V.adr (Global_var.of_varinfo v)) off
-        | Var v              -> offset stmt v.vtype (local v) off
-        | Mem e              -> eval_expr stmt e >>= get >>= fun v -> offset stmt (typeOfLhost lh) v off
-    and eval_lval =
-      let ensure ~init ~find ~set x =
-        find x >>=
-        function
-        | Some v -> return v
-        | None   -> set x init >>| const init
-      in
-      fun stmt lv ?(init_v=V.ndv stmt lv) ?(init_m=M.ndm stmt lv) () : V.t option state ->
-        let Refl = S.eq in
-        let Refl = eq in
-        let deref m : V.t state = eval_addr stmt lv >>| fun a -> V.sel m a @@ typeOfLval lv in
-        match w_lval lv with
-        | None   -> return None
-        | Some w ->(w |>
-                    (function
-                    | `Global_var v -> ensure ~init:init_v ~find:find_global_var ~set:set_global_var v
-                    | `Poly_var   v -> ensure ~init:init_v ~find:find_poly_var   ~set:set_poly_var v
-                    | `Local_var  v -> ensure ~init:init_v ~find:find_local_var  ~set:set_local_var v
-                    | `Global_mem m -> ensure ~init:init_m ~find:find_global_mem ~set:set_global_mem m >>= deref
-                    | `Poly_mem   m -> ensure ~init:init_m ~find:find_poly_mem   ~set:set_poly_mem m   >>= deref
-                    | `Local_mem  m -> ensure ~init:init_m ~find:find_local_mem  ~set:set_local_mem m  >>= deref) >>|
-                    some)
+        | Var v when v.vglob -> offset s v.vtype (V.adr (Global_var.of_varinfo v)) off
+        | Var v              -> offset s v.vtype (local v) off
+        | Mem e              -> offset s (typeOfLhost lh) (get @@ eval_expr s e) off
+    and eval_lval s lv : V.t option =
+      let Refl = S.eq in
+      let Refl = eq in
+      let deref m = V.sel m (eval_addr s lv) @@ typeOfLval lv in
+      opt_map
+        (function
+        | `Global_var v -> find_global_var v s
+        | `Poly_var   v -> find_poly_var v s
+        | `Local_var  v -> find_local_var v s
+        | `Global_mem m -> deref @@ find_global_mem m s
+        | `Poly_mem   m -> deref @@ find_poly_mem m s
+        | `Local_mem  m -> deref @@ find_local_mem m s)
+        (w_lval lv)
     and eval_expr =
-      let size s = return @@ some @@ V.cst @@ CInt64 (Integer.of_int s, theMachine.kindOfSizeOf, None) in
-      fun stmt e ->
-        let eval e = eval_expr stmt e >>= get in
+      let size s = some @@ V.cst @@ CInt64 (Integer.of_int s, theMachine.kindOfSizeOf, None) in
+      fun s e ->
+        let eval = get % eval_expr s in
         match e.enode with
-        | Const c              -> return @@ some @@ V.cst c
-        | Lval lv              -> eval_lval stmt lv ()
+        | Const c              -> some @@ V.cst c
+        | Lval lv              -> eval_lval s lv
         | SizeOf ty            -> size @@ bytesSizeOf ty
         | SizeOfE e            -> size @@ bytesSizeOf @@ typeOf e
         | SizeOfStr s          -> size @@ String.length s + 1
         | AlignOf ty           -> size @@ bytesAlignOf ty
         | AlignOfE e           -> size @@ bytesAlignOf @@ typeOf e
-        | UnOp (u, e, t)       -> eval e >>| fun e -> some @@ V.una (unop u) e t
-        | BinOp (b, e1, e2, t) -> eval e1 >>= fun e1 -> eval e2 >>| fun e2 -> some @@ V.bin (binop b) e1 e2 t
-        | CastE (ty, _, e)     -> eval e >>| fun e -> some @@ V.una (`Cast ty) e ty
+        | UnOp (u, e, t)       -> some @@ V.una (unop u) (eval e) t
+        | BinOp (b, e1, e2, t) -> some @@ V.bin (binop b) (eval e1) (eval e2) t
+        | CastE (ty, _, e)     -> some @@ V.una (`Cast ty) (eval e) ty
         | AddrOf lv
-        | StartOf lv           -> eval_addr stmt lv >>| some
-        | Info (e, _)          -> eval_expr stmt e
+        | StartOf lv           -> some @@ eval_addr s lv
+        | Info (e, _)          -> eval_expr s e
 
-    let run = (|>)
+    let assume c flag (pdd, s) = Path_dd.cut c (get @@ eval_expr s c) flag pdd, s
 
-    let assume stmt c flag (pdd, st) =
-      let s, st = run st (eval_expr stmt c >>= get) in
-      Path_dd.cut c s flag pdd, st
-
-    let rec set stmt lv off (v : _ -> V.t state) pdd (s : S.t) : S.t =
+    let rec set lv off (v : _ -> V.t) pdd (s : S.t) : S.t =
       let Refl = S.eq in
       let Refl = eq in
       let ty = typeOfLval lv in
-      let set_v set vr = snd @@ run s (v off >>= fun v -> set vr @@ Path_dd.inst_v v ty pdd) in
-      let set_m find set m =
-        snd @@
-        run s
-          (eval_lval stmt lv () >>= get >>= fun _ ->
-           find m >>= get >>= fun mv ->
-           eval_addr stmt lv >>= fun a ->
-           v off >>= fun v ->
-           set m @@ Path_dd.inst_m (M.upd mv a v ty) ty pdd)
-      in
+      let set_v set vr = set vr (Path_dd.inst_v (v off) ty pdd) s in
+      let set_m find set m = set m (Path_dd.inst_m (M.upd (find m s) (eval_addr s lv) (v off) ty) ty pdd) s in
       match w_lval lv with
       | Some (`Global_var v)       -> set_v set_global_var v
       | Some (`Poly_var v)         -> set_v set_poly_var v
@@ -308,33 +278,33 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
           when ci.cstruct          -> List.fold_left
                                         (fun s fi ->
                                            let fi = Field (fi, NoOffset) in
-                                           set stmt (addOffsetLval fi lv) (addOffset fi off) v pdd s)
+                                           set (addOffsetLval fi lv) (addOffset fi off) v pdd s)
                                         s
                                         ci.cfields
         | TComp (ci, _, _)         ->(let fi = Field (List.hd ci.cfields, NoOffset) in
-                                      set stmt (addOffsetLval fi lv) (addOffset fi off) v pdd s)
+                                      set (addOffsetLval fi lv) (addOffset fi off) v pdd s)
         | TArray (_, Some e, _, _) ->(let l = may_map ~dft:0 Integer.to_int @@ constFoldToInt e in
                                       Array.init l id |>
                                       Array.fold_left
                                         (fun s i ->
                                            let i = Index (integer ~loc i, NoOffset) in
-                                           set stmt (addOffsetLval i lv) (addOffset i off) v pdd s)
+                                           set (addOffsetLval i lv) (addOffset i off) v pdd s)
                                         s)
         | TArray _                 -> s
         | ty                       -> Console.fatal "Symbolic.set: unexpected type: %a : %a" pp_lval lv pp_typ ty
 
-    let rec assign stmt lv e (pdd, s) =
+    let rec assign lv e (pdd, (s : S.t)) =
+      let Refl = S.eq in
       pdd,
       set
-        stmt
         lv
         NoOffset
         (function
-        | NoOffset       -> eval_expr stmt e >>= get
+        | NoOffset       -> get @@ eval_expr s e
         | Field _
         | Index _ as off ->
           match[@warning "-4"] e.enode with
-          | Lval lv      -> eval_lval stmt (addOffsetLval off lv) () >>= get
+          | Lval lv      -> get @@ eval_lval s (addOffsetLval off lv)
           | _            -> Console.fatal "Symbolic.assign: unrecognized assignment: %a = %a" pp_lval lv pp_exp e)
         pdd
         s
@@ -412,28 +382,34 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
     let call stmt ?lv kf es (pdd, s) : _ * S.t =
       let I.E.Some { local = (module L'); eff = eff' } = I.get info R.flag @@ Kernel_function.get_definition kf in
       let h_map = R.map stmt kf in
-      let h_rev = R.H.create 512 in
-      R.H_map.iter
-        (fun u' u -> let r = U.repr u in R.H.replace h_rev r @@ R.S.add (U.repr u') @@ R.H.find_def h_rev r R.S.empty)
-        h_map;
-      let h_glob = R.H.create 16 in
-      L'.A.iter
-        (fun a f ->
-           let handle =
-             function
-             | `Global_mem m -> R.H.replace h_glob (fst (m :> I.mem)) ()
-             | #L'.W.t       -> ()
-           in
-           handle a;
-           L'.R.iter handle f)
-        (I.E.assigns eff');
-      let h_clash = R.H.create 16 in
-      R.H.iter
-        (fun r s ->
-           let s = if R.H.mem h_glob r then R.S.add r s else s in
-           if R.S.cardinal s > 1 then R.S.iter (fun r' -> R.H.replace h_clash r' s) s)
-        h_rev;
+      let h_rev =
+        let h = R.H.create 512 in
+        R.H_map.iter
+          (fun u' u -> let r = U.repr u in R.H.replace h r @@ R.S.add (U.repr u') @@ R.H.find_def h r R.S.empty)
+          h_map;
+        h
+      in
       let clashes =
+        let h_clash =
+          let h_glob =
+            let h = R.H.create 16 in
+            let handle =
+              function
+              | `Global_mem m -> R.H.replace h (fst (m :> I.mem)) ()
+              | #L'.W.t       -> ()
+            in
+            L'.A.iter (const' handle) (I.E.assigns eff');
+            L'.R.iter handle (I.E.depends eff');
+            h
+          in
+          let h = R.H.create 16 in
+          R.H.iter
+            (fun r s ->
+               let s = if R.H.mem h_glob r then R.S.add r s else s in
+               if R.S.cardinal s > 1 then R.S.iter (fun r' -> R.H.replace h r' s) s)
+            h_rev;
+          h
+        in
         L'.A.fold
           (let writes (r, fi) mk =
              const @@
@@ -448,9 +424,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
            | `Global_mem m -> writes (m :> I.mem) (fun ?fi u -> `Global_mem (I.G.Mem.mk ?fi u))
            | `Poly_mem m   -> writes (m :> I.mem) (fun ?fi u -> `Poly_mem (L'.F.Poly.Mem.mk ?fi u)))
           (I.E.assigns eff')
-          L'.W.S.empty
-      in
-      let clashes =
+          L'.W.S.empty |> fun clashes ->
         L'.A.fold
           (fun a f ->
              if
@@ -480,9 +454,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       let module V = S.Symbolic.V in
       let module M = S.Symbolic.M in
       let formals = Kernel_function.get_formals kf in
-      let (es, s : V.t option list * S.t) =
-        List.fold_right (fun e (es, s) -> map_fst (List.cons' es) @@ run s @@ eval_expr stmt e) es ([], s)
-      in
+      let es = List.map (eval_expr s) es in
       let prj_poly_var =
         let open List in
         let ass = combine (map (fun vi -> vi.vid) formals) @@ take (length formals) es in
@@ -549,7 +521,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
                                   then V.ndv stmt (lval w)
                                   else V'.prj stmt S.Symbolic.readable env v
                                 in
-                                snd @@ set_global_var g (Path_dd.inst_v v (type_of w) pdd) s)
+                                set_global_var g (Path_dd.inst_v v (type_of w) pdd) s)
         | `Result            ->(check `Result clashes;
                                 let lv = the lv in
                                 let v =
@@ -557,7 +529,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
                                   then V.ndv stmt lv
                                   else V'.prj stmt S.Symbolic.readable env v
                                 in
-                                set stmt lv NoOffset (const @@ return v) pdd s)
+                                set lv NoOffset (const v) pdd s)
       in
       let handle_m w' m s =
         let clashes = L'.W.S.mem (w' :> L'.W.t) clashes in
@@ -568,7 +540,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
             then M.ndm stmt (lval w)
             else M'.prj stmt S.Symbolic.readable env m
           in
-          snd @@ set mem (Path_dd.inst_m m (type_of w) pdd) s
+          set mem (Path_dd.inst_m m (type_of w) pdd) s
         in
         match w' with
         | `Global_mem g as w   -> set set_global_mem g w
@@ -619,8 +591,49 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
                                         ~initl
                                         ~acc)
 
-    let init = fold_init % assign
+    let init = fold_init assign
     let reach (pdd, s) = pdd, { s with pre = V.merge ~join s.pre @@ Path_dd.inst_v (V.cst one) intType pdd }
-    let stub stmt lv (pdd, s) = pdd, set stmt lv NoOffset (return % V.ndv stmt % (swap addOffsetLval) lv) pdd s
+
+    let stub stmt lv (pdd, s) = pdd, set lv NoOffset (V.ndv stmt % (swap addOffsetLval) lv) pdd s
+
+    let start = List.hd F.f.sbody.bstmts
+
+    let initial : _ * S.t =
+      let Refl = S.eq in
+      let Refl = eq in
+      Path_dd.top,
+      S.empty |>
+      L.R.fold
+        (function
+        | `Global_var g as w -> set_global_var g @@ V.var w
+        | `Poly_var p as w   -> set_poly_var p @@ V.var w
+        | `Local_var l as w  -> set_local_var l @@ V.ndv start @@ lval w
+        | `Global_mem m as w -> set_global_mem m @@ M.mem w
+        | `Poly_mem m as w   -> set_poly_mem m @@ M.mem w
+        | `Local_mem m as w  -> set_local_mem m @@ M.ndm start @@ lval w)
+        (I.E.depends E.eff)
+
+    let state, set_state =
+      let h = H_stmt.create 64 in
+      (fun s -> H_stmt.find_def h s (Path_dd.bot, S.empty)),
+      H_stmt.replace h
+    let add_stop, stops =
+      let stops = ref [] in
+      (fun s -> stops := s :: !stops),
+      !stops
+
+    let strengthen stmt (pdd, s) = pdd, strengthen stmt lval s
+
+    let merge (pdd1, s1) (pdd2, s2) = Path_dd.merge pdd1 pdd2, merge s1 s2
+
+    let handle stmt =
+      stmt.preds |>
+      List.map (fun s -> strengthen s @@ state s) |>
+      (function
+      | []      ->(assert (Stmt.equal stmt start);
+                   initial, [])
+      | s :: ss -> s, ss) |>
+      uncurry (List.fold_left merge) |>
+
   end
 end

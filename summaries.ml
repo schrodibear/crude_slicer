@@ -29,6 +29,8 @@ open Info
 
 let ensure_havoc_function_present () = Kf.ensure_proto voidType (Options.Havoc_function.get ()) [voidPtrType] true
 let ensure_choice_function_present () = Kf.ensure_proto ulongLongType (Options.Choice_function.get ()) [intType] true
+let ensure_alloc_function_present () =
+  Kf.ensure_proto voidPtrType (Options.Alloc_function.get ()) [theMachine.upointType] false
 let ensure_memory_function_present () =
   Kf.ensure_proto voidConstPtrType (Options.Memory_function.get ()) [voidConstPtrType] false
 let ensure_select_function_present () =
@@ -120,7 +122,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         (match kind with
         | `Grd | `Ass           -> intType
         | `Val (`V, t) | `Tmp t -> t
-        | `Val (`M, t)          -> TPtr (t, []))
+        | `Val (`M, t)          -> TPtr (typeAddAttributes [Attr ("const", [])] t, []))
     let var' v = var (v : Local.Var.t :> varinfo)
     let evar' v = evar (v : Local.Var.t :> varinfo)
 
@@ -155,6 +157,9 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         let tmp = aux (`Tmp ulongLongType) in
         [call ~lv:(var' tmp) havoc @@ limit es;
          set lv @@ mkCast ~force:false ~overflow:Check ~e:(evar' tmp) ~newt:(typeOfLval lv)]
+    let alloc =
+      let alloc = get_vi @@ Options.Alloc_function.get () in
+      fun lv sz -> [call ~lv alloc [sz]]
     let havoc_mem =
       let havoc = get_vi @@ Options.Havoc_function.get () in
       fun e es -> [call havoc @@ e :: limit es]
@@ -221,18 +226,13 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
 
     let mem m =
       match mk_mem m with
-      | Some e ->(let m = aux @@ `Val (`M, TPtr (typeOf e, [])) in
+      | Some e ->(let m = aux @@ `Val (`M, typeOf e) in
                   push @@ get_mem (var' m) e;
                   Val (`M, m))
       | None   -> Console.fatal "Summaries.Local.mem: unexpected dangling region: should have been eliminated"
 
-    let ndv k ty =
-      let v = aux (`Val (`V, ty)) in
-      push @@ havoc_lval (var' v) [];
-      Val (k, conv k (`V, v))
-
     let ndm ty =
-      let m = aux @@ `Val (`V, TPtr (ty, [])) in
+      let m = aux @@ `Val (`M, ty) in
       push @@ nondet_mem @@ var' m;
       Val (`M, m)
 
@@ -384,9 +384,12 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       function
       | Top
       | Bot
-      | Top_or_bot _        ->(let v = aux (`Val (`V, t)) in
-                               push @@ havoc_lval (var' v) [];
-                               k, conv k (`V, v))
+      | Top_or_bot _        ->(let v = aux (`Val (k, t)) in
+                               push
+                                 (match k with
+                                 | `V -> havoc_lval (var' v) []
+                                 | `M -> nondet_mem (var' v));
+                               k, v)
       | Val_or_top { v; _ }
       | Val_or_bot { v; _ }
       | Mixed { v; _ }
@@ -401,6 +404,14 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       | `True,  `Var a -> Val_or_bot { a; v = v () }
       | `Var g, `Var a -> Mixed { a; g; v = v () }
       | `True,  `True  -> Val (v ())
+
+    let ndv k ty size =
+      let v = aux (`Val (`V, ty)) in
+      push
+        (match size with
+        | None   -> havoc_lval (var' v) []
+        | Some s -> alloc (var' v) @@ evar' @@ conv `V @@ value `V theMachine.upointType s);
+      Val (k, conv k (`V, v))
 
     let bin k b e1 e2 t =
       let op v1 v2 =
@@ -586,8 +597,8 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
            | `M { node = Var (`Global_var v); _ }  -> vrb k (v :> varinfo)
            | `M { node = Mem (`Poly_mem m); _ }    -> mem (m :> R.t * fieldinfo option)
            | `M { node = Mem (`Global_mem m); _ }  -> mem (m :> R.t * fieldinfo option)
-           | `V { node = Ndv (_, l); _ }
-           | `M { node = Ndv (_, l); _ }           -> ndv k (typeOfLval l)
+           | `V { node = Ndv (_, l, s); _ }
+           | `M { node = Ndv (_, l, s); _ }        -> ndv k (typeOfLval l) (opt_map (fun v -> eval @@ `V v) s)
            | `M { node = Ndm (_, l); _ }           -> ndm (typeOfLval l)
            | `V { node = Una (u, a, t); _ }
            | `M { node = Una (u, a, t); _ }        -> una k u (eval @@ `V a) t
@@ -733,6 +744,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
     fun sccs ->
       ensure_havoc_function_present ();
       ensure_choice_function_present ();
+      ensure_alloc_function_present ();
       ensure_memory_function_present ();
       ensure_select_function_present ();
       ensure_update_function_present ();

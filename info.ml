@@ -322,7 +322,7 @@ module Symbolic : sig
     | Adr of Global_var.t
     | Var of 'v
     | Mem : 'm -> (_, 'm, m) node
-    | Ndv of stmt * lval
+    | Ndv of stmt * lval * ('v, 'm, v) t option
     | Ndm : stmt * lval -> (_, _, m) node
     | Una of Op.unary * ('v, 'm, v) t * typ
     | Bin of Op.binary * ('v, 'm, v) t * ('v, 'm, v) t * typ
@@ -375,7 +375,7 @@ end = struct
     | Adr of Global_var.t
     | Var of 'v
     | Mem : 'm -> (_, 'm, m) node
-    | Ndv of stmt * lval
+    | Ndv of stmt * lval * ('v, 'm, v) t option
     | Ndm : stmt * lval -> (_, _, m) node
     | Una of Op.unary * ('v, 'm, v) t * typ
     | Bin of Op.binary * ('v, 'm, v) t * ('v, 'm, v) t * typ
@@ -410,7 +410,7 @@ end = struct
         | Adr g                -> 17 * Global_var.hash g + 3
         | Var v                -> 17 * hv v + 4
         | Mem m                -> 17 * hm m + 5
-        | Ndv (s, l)           -> 17 * (257 * Stmt.hash s + Lval.hash l) + 6
+        | Ndv (s, l, a)        -> 17 * (1351 * Stmt.hash s + 257 * Lval.hash l + opt_hash hi a) + 6
         | Ndm (s, l)           -> 17 * (257 * Stmt.hash s + Lval.hash l) + 7
         | Una (u, a, t)        -> 17 * (1351 * hu u + 257 * hi a + Typ.hash t) + 8
         | Bin (b, v1, v2, t)   -> 17 * (105871 * Hashtbl.hash b + 1351 * hi v1 + 257 * hi v2 + Typ.hash t) + 9
@@ -436,7 +436,9 @@ end = struct
         | Adr g1,                    Adr g2                    -> Global_var.equal g1 g2
         | Var v1,                    Var v2                    -> ev v1 v2
         | Mem m1,                    Mem m2                    -> em m1 m2
-        | Ndv (s1, l1),              Ndv (s2, l2)              -> Stmt.equal s1 s2 && Lval.equal l1 l2
+        | Ndv (s1, l1, a1),          Ndv (s2, l2, a2)          -> Stmt.equal s1 s2 &&
+                                                                  Lval.equal l1 l2 &&
+                                                                  opt_equal ei a1 a2
         | Ndm (s1, l1),              Ndm (s2, l2)              -> Stmt.equal s1 s2 && Lval.equal l1 l2
         | Una (u1, a1, t1),          Una (u2, a2, t2)          -> u1 = u2 && ei a1 a2 && Typ.equal t1 t2
         | Bin (b1, v11, v12, t1),    Bin (b2, v21, v22, t2)    -> b1 = b2 && ei v11 v21 && ei v12 v22 &&
@@ -511,7 +513,7 @@ end = struct
       | Adr g               -> pr "&%a" Global_var.pp g
       | Var v               -> pr "%a" ppv v
       | Mem m               -> pr "%a" ppm m
-      | Ndv (s, l)          -> pr "*_(%d,%a)" s.sid Lval.pretty l
+      | Ndv (s, l, a)       -> pr "*_(%d,%a,%a)" s.sid Lval.pretty l (may % pp) a
       | Ndm (s, l)          -> pr "*_(%d,%a)" s.sid Lval.pretty l
       | Una (u, a, _)       ->(pr "(@[";
                                begin match u with
@@ -595,7 +597,7 @@ module type Summary = sig
       val cst : constant -> t
       val adr : Global_var.t -> t
       val var : W.frameable_var -> t
-      val ndv : stmt -> lval -> t
+      val ndv : stmt -> ?size:t -> lval -> t
       val una : Op.unary -> t -> typ -> t
       val bin : Op.binary -> t -> t -> typ -> t
       val sel : tm -> t -> typ -> t
@@ -617,7 +619,7 @@ module type Summary = sig
       val adr : Global_var.t -> t
       val var : W.frameable_var -> t
       val mem : W.frameable_mem -> t
-      val ndv : stmt -> lval -> t
+      val ndv : stmt -> ?size:tv -> lval -> t
       val ndm : stmt -> lval -> t
       val una : Op.unary -> tv -> typ -> t
       val bin : Op.binary -> tv -> tv -> typ -> t
@@ -1226,7 +1228,7 @@ module Summary
     let adr k g = mk' k @@ Adr g
     let var k v = mk' k @@ Var v
     let mem m = mk' Bare.M @@ Mem m
-    let ndv k s l = mk' k @@ Ndv (s, l)
+    let ndv k s ?size l = mk' k @@ Ndv (s, l, size)
     let ndm s l = mk' Bare.M @@ Ndm (s, l)
     let una k u a t = mk' k @@ Una (u, a, t)
     let bin k b a1 a2 t = mk' k @@ Bin (b, a1, a2, t)
@@ -1410,7 +1412,7 @@ module Summary
   open Symbolic
   let empty =
     {
-      pre = V.top;
+      pre = V.bot;
       post =
         {
           poly_vars   = F.Poly.Var.M.empty;

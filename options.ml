@@ -67,6 +67,15 @@ module Alloca_function =
       let default = "alloca"
     end)
 
+module Alloc_function =
+  String
+    (struct
+      let option_name = "-alloc_function"
+      let help = "May specify an alternative name for malloc"
+      let arg_name = "name"
+      let default = "malloc"
+    end)
+
 module Required_bodies =
   Filled_string_set
     (struct
