@@ -281,69 +281,63 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       let s, st = run st (eval_expr stmt c >>= get) in
       Path_dd.cut c s flag pdd, st
 
-    let rec assign stmt lv e (pdd, st as state) =
+    let rec set stmt lv off (v : _ -> V.t state) pdd (s : S.t) : S.t =
       let Refl = S.eq in
       let Refl = eq in
-      let ty = typeOf e in
-      let set_v set vr =
-        pdd,
-        snd @@ run st (eval_expr stmt e >>= get >>= fun vl -> set vr @@ Path_dd.inst_v vl ty pdd : _ state)
-      in
+      let ty = typeOfLval lv in
+      let set_v set vr = snd @@ run s (v off >>= fun v -> set vr @@ Path_dd.inst_v v ty pdd) in
       let set_m find set m =
-        pdd,
         snd @@
-        run st
+        run s
           (eval_lval stmt lv () >>= get >>= fun _ ->
            find m >>= get >>= fun mv ->
            eval_addr stmt lv >>= fun a ->
-           eval_expr stmt e >>= get >>= fun v ->
-           set m @@ Path_dd.inst_m (M.upd mv a v ty) ty pdd : _ state)
+           v off >>= fun v ->
+           set m @@ Path_dd.inst_m (M.upd mv a v ty) ty pdd)
       in
       match w_lval lv with
-      | Some (`Global_var v)                 -> set_v set_global_var v
-      | Some (`Poly_var v)                   -> set_v set_poly_var v
-      | Some (`Local_var v)                  -> set_v set_local_var v
-      | Some (`Global_mem m)                 -> set_m find_global_mem set_global_mem m
-      | Some (`Poly_mem m)                   -> set_m find_poly_mem set_poly_mem m
-      | Some (`Local_mem m)                  -> set_m find_local_mem set_local_mem m
-      | None                                 ->
-        match[@warning "-4"] unrollType @@ typeOf e, e.enode with
-        | TComp (ci, _, _), Lval lv'
-          when ci.cstruct                    -> pdd,
-                                                List.fold_left
-                                                  (fun st fi ->
-                                                     snd @@
-                                                     assign
-                                                       stmt
-                                                       (addOffsetLval (Field (fi, NoOffset)) lv)
-                                                       { e with
-                                                         enode = Lval (addOffsetLval (Field (fi, NoOffset)) lv') }
-                                                       (pdd, st))
-                                                  st
-                                                  ci.cfields
-        | TComp (ci, _, _), Lval lv'         ->(let fi = List.hd ci.cfields in
-                                                assign
-                                                  stmt
-                                                  (addOffsetLval (Field (fi, NoOffset)) lv)
-                                                  { e with enode = Lval (addOffsetLval (Field (fi, NoOffset)) lv') }
-                                                  state)
-        | TArray (_, Some e, _, _), Lval lv' ->(let l = may_map ~dft:0 Integer.to_int @@ constFoldToInt e in
-                                                pdd,
-                                                Array.init l id |>
-                                                Array.fold_left
-                                                  ((fun st i ->
-                                                     let i = integer ~loc i in
-                                                     snd @@
-                                                     assign
-                                                       stmt
-                                                       (addOffsetLval (Index (i, NoOffset)) lv)
-                                                       { e with
-                                                         enode = Lval (addOffsetLval (Index (i, NoOffset)) lv') }
-                                                       (pdd, st)))
-                                                  st)
-        | TArray _,                 Lval _   -> state
-        | _                                  -> Console.fatal "Symbolic.assign: unrecognized assignment: %a = %a"
-                                                  pp_lval lv pp_exp e
+      | Some (`Global_var v)       -> set_v set_global_var v
+      | Some (`Poly_var v)         -> set_v set_poly_var v
+      | Some (`Local_var v)        -> set_v set_local_var v
+      | Some (`Global_mem m)       -> set_m find_global_mem set_global_mem m
+      | Some (`Poly_mem m)         -> set_m find_poly_mem set_poly_mem m
+      | Some (`Local_mem m)        -> set_m find_local_mem set_local_mem m
+      | None                       ->
+        match[@warning "-4"] ty with
+        | TComp (ci, _, _)
+          when ci.cstruct          -> List.fold_left
+                                        (fun s fi ->
+                                           let fi = Field (fi, NoOffset) in
+                                           set stmt (addOffsetLval fi lv) (addOffset fi off) v pdd s)
+                                        s
+                                        ci.cfields
+        | TComp (ci, _, _)         ->(let fi = Field (List.hd ci.cfields, NoOffset) in
+                                      set stmt (addOffsetLval fi lv) (addOffset fi off) v pdd s)
+        | TArray (_, Some e, _, _) ->(let l = may_map ~dft:0 Integer.to_int @@ constFoldToInt e in
+                                      Array.init l id |>
+                                      Array.fold_left
+                                        (fun s i ->
+                                           let i = Index (integer ~loc i, NoOffset) in
+                                           set stmt (addOffsetLval i lv) (addOffset i off) v pdd s)
+                                        s)
+        | TArray _                 -> s
+        | ty                       -> Console.fatal "Symbolic.set: unexpected type: %a : %a" pp_lval lv pp_typ ty
+
+    let rec assign stmt lv e (pdd, s) =
+      pdd,
+      set
+        stmt
+        lv
+        NoOffset
+        (function
+        | NoOffset       -> eval_expr stmt e >>= get
+        | Field _
+        | Index _ as off ->
+          match[@warning "-4"] e.enode with
+          | Lval lv      -> eval_lval stmt (addOffsetLval off lv) () >>= get
+          | _            -> Console.fatal "Symbolic.assign: unrecognized assignment: %a = %a" pp_lval lv pp_exp e)
+        pdd
+        s
 
     let retvar = Kf.retvar @@ Globals.Functions.get F.f.svar
     let retexp = opt_map (fun r -> if isStructOrUnionType r.vtype then mkAddrOf ~loc (var r) else evar r) retvar
@@ -406,7 +400,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
 
     let one = CInt64 (Integer.one, IInt, None)
 
-    let join_pre (v1 : V.t) (v2 : V.t) =
+    let join (v1 : V.t) (v2 : V.t) =
       let Refl = eq in
       match Info.Symbolic.(v1.node, v2.node) with
       | Cst (CInt64 (c, IInt, _)), v
@@ -558,28 +552,12 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
                                 snd @@ set_global_var g (Path_dd.inst_v v (type_of w) pdd) s)
         | `Result            ->(check `Result clashes;
                                 let lv = the lv in
-                                let ty = typeOfLval lv in
                                 let v =
                                   if clashes
                                   then V.ndv stmt lv
                                   else V'.prj stmt S.Symbolic.readable env v
                                 in
-                                let set_v set vr = snd @@ set vr (Path_dd.inst_v v ty pdd) s in
-                                let set_m find set m =
-                                  snd @@
-                                  run s
-                                    (eval_lval stmt lv () >>= get >>= fun _ ->
-                                     find m >>= get >>= fun mv ->
-                                     eval_addr stmt lv >>= fun a ->
-                                     set m @@ Path_dd.inst_m (M.upd mv a v ty) ty pdd)
-                                in
-                                match the (w_lval lv) with
-                                | `Global_var v -> set_v set_global_var v
-                                | `Poly_var v   -> set_v set_poly_var v
-                                | `Local_var v  -> set_v set_local_var v
-                                | `Global_mem m -> set_m find_global_mem set_global_mem m
-                                | `Poly_mem m   -> set_m find_poly_mem set_poly_mem m
-                                | `Local_mem m  -> set_m find_local_mem set_local_mem m)
+                                set stmt lv NoOffset (const @@ return v) pdd s)
       in
       let handle_m w' m s =
         let clashes = L'.W.S.mem (w' :> L'.W.t) clashes in
@@ -618,7 +596,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
             intType
             pdd
         in
-        S.Symbolic.V.merge ~join:join_pre s.pre v
+        S.Symbolic.V.merge ~join s.pre v
       in
       pdd,
       { s with pre } |>
@@ -628,5 +606,21 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       if has_some lv && not @@ isStructOrUnionType @@ Kernel_function.get_return_type kf
       then handle_v `Result L'.F.Local.Var.(M.find (of_varinfo @@ the retvar') s'.local_vars)
       else id
+
+    let rec fold_init f lv =
+      function
+      | SingleInit e             -> f lv e
+      | CompoundInit (ct, initl) ->(let doinit off = const' @@ fold_init f (addOffsetLval off lv) in
+                                    fun acc ->
+                                      foldLeftCompound
+                                        ~implicit:true
+                                        ~doinit
+                                        ~ct
+                                        ~initl
+                                        ~acc)
+
+    let init = fold_init % assign
+    let reach (pdd, s) = pdd, { s with pre = V.merge ~join s.pre @@ Path_dd.inst_v (V.cst one) intType pdd }
+    let stub stmt lv (pdd, s) = pdd, set stmt lv NoOffset (return % V.ndv stmt % (swap addOffsetLval) lv) pdd s
   end
 end
