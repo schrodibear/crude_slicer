@@ -606,7 +606,8 @@ module type Summary = sig
 
       val strengthen : stmt -> lval -> t -> t
       val covers : t -> t -> bool
-      val merge : ?join:(t -> t -> t) -> t -> t -> t
+      val weaken : ?join:(t -> t -> t) -> stmt -> lval -> t -> t
+      val merge : ?join:(t -> t -> t) -> stmt -> lval -> t -> t -> t
     end
     module M : sig
       type t = tm
@@ -630,16 +631,19 @@ module type Summary = sig
 
       val strengthen : stmt -> lval -> t -> t
       val covers : t -> t -> bool
-      val merge : ?join:(t -> t -> t) -> t -> t -> t
+      val weaken : ?join:(t -> t -> t) -> stmt -> lval -> t -> t
+      val merge : ?join:(t -> t -> t) -> stmt -> lval -> t -> t -> t
     end
   end
 
+  open Symbolic
+
   type u =
     {
-      pre        : Symbolic.V.t;
-      post       : (W.frameable_var, W.frameable_mem) Symbolic.env;
-      local_vars : Symbolic.V.t F.Local.Var.M.t;
-      local_mems : Symbolic.M.t F.Local.Mem.M.t
+      pre        : V.t;
+      post       : (W.frameable_var, W.frameable_mem) env;
+      local_vars : V.t F.Local.Var.M.t;
+      local_mems : M.t F.Local.Mem.M.t
     }
 
   type t
@@ -647,7 +651,7 @@ module type Summary = sig
   val empty : t
   val strengthen : stmt -> (W.readable -> lval) -> t -> t
   val covers : t -> t -> bool
-  val merge : t -> t -> t
+  val merge : join:(V.t -> V.t -> V.t) -> stmt -> (W.readable -> lval) -> t -> t -> t
 end
 
 module type Local = sig
@@ -1215,10 +1219,10 @@ module Summary
               r
           in
           match R1.W, (k1, k0) with
-          | R0.W, Bare.(V, V)      -> v
-          | R0.W, Bare.(M, M)      -> v
-          | _,    Bare.(V, _)      -> Console.fatal "Symbolic.mk: unexpected witness"
-          | _,    Bare.(M, _)      -> Console.fatal "Symbolic.mk: unexpected witness" }
+          | R0.W, Bare.(V, V) -> v
+          | R0.W, Bare.(M, M) -> v
+          | _,    Bare.(V, _) -> Console.fatal "Symbolic.mk: unexpected witness"
+          | _,    Bare.(M, _) -> Console.fatal "Symbolic.mk: unexpected witness" }
 
     let mk' k = mk.f readable k
 
@@ -1251,8 +1255,15 @@ module Summary
                          (pp_iter2 ~sep:",@ " ~between:" -> " F.Poly.Mem.M.iter F.Poly.Mem.pp pp_id) e.poly_mems
                          (pp_iter2 ~sep:",@ " ~between:" -> " G.Var.M.iter G.Var.pp pp_id) e.global_vars
                          (pp_iter2 ~sep:",@ " ~between:" -> " G.Mem.M.iter G.Mem.pp pp_id) e.global_mems)
-            |_    -> Console.fatal "Symbolic.pp: unexpected witness" }
+            | _   -> Console.fatal "Symbolic.pp: unexpected witness" }
         fmt
+
+    let nondet (type k) : k Bare.k -> _ -> ?size:_ -> _ -> k u =
+      let open Bare in
+      fun k s ?size l ->
+        match k with
+        | V -> ndv V s ?size l
+        | M -> ndm s l
 
     let strengthen (type k) k s l (v : k u) : k u =
       match v.node with
@@ -1265,19 +1276,17 @@ module Summary
       | Bin _
       | Sel _
       | Ite _
-      | Let _    -> v
-      | Mem _    -> v
-      | Ndm _    -> v
-      | Upd _    -> v
-      | Top      ->
-        match (k : k Bare.k) with
-        | Bare.V -> ndv Bare.V s l
-        | Bare.M -> ndm s l
+      | Let _ -> v
+      | Mem _ -> v
+      | Ndm _ -> v
+      | Upd _ -> v
+      | Top   -> nondet k s l
+
     let covers (type k) (v1 : k u) (v2 : k u) =
       match v1.node, v2.node with
       | Top,       _
       | _,        Bot    -> true
-      | _,         _
+      | _,        _
         when equal v1 v2 -> true
       | (Bot
         | Cst _
@@ -1292,29 +1301,34 @@ module Summary
       | Mem _,    _      -> false
       | Ndm _,    _      -> false
       | Upd _,    _      -> false
-    let rec merge : type k. k Bare.k -> ?join:(k u -> k u -> k u) -> k u -> k u -> k u =
-      fun k ?join v1 v2 ->
-        let join_ () = may_map ~dft:(top k) (fun j -> j v1 v2) join in
+    let sid = Sid.next ()
+    let rec merge : type k. k Bare.k -> ?join:(k u -> k u -> k u) -> _ -> _ -> k u -> k u -> k u =
+      fun k ?join s l v1 v2 ->
+        let merge_v v1 v2 =
+          let s = { s with sid } in
+          merge V s l (weaken V s l v1) (weaken V s l v2)
+        and merge = merge k ?join s l
+        in
+        let join_ () = may_map ~dft:(nondet k s l) (fun j -> j v1 v2) join in
         match v1.node, v2.node with
-        | Top,  _
+        | Top,                       _
         | _,                         Top                       -> top k
-        | Bot,                       _                         -> v1
-        | _,                         Bot                       -> v2
+        | Bot,                       _                         -> v2
+        | _,                         Bot                       -> v1
         | Ite (c1, i1, t1, e1, ty1), Ite (c2, i2, t2, e2, _)
           when Exp.equal c1 c2
-            && equal i1 i2                                     -> ite k
-                                                                    c1
-                                                                    i1
-                                                                    (merge k t1 t2)
-                                                                    (merge k e1 e2)
-                                                                    ty1
-        | Ite (c1, _, _, _, _),      Ite (c2, _, _, _, _)
-          when Exp.equal c1 c2 && not (has_some join)          -> top k (* Here Cartesian pred abs might kick in *)
+            && equal i1 i2                                     -> ite k c1 i1 (merge t1 t2) (merge e1 e2) ty1
+        | Ite (c1, i1, t1, e1, ty),  Ite (c2, i2, t2, e2, _)
+          when Exp.equal c1 c2 && not (has_some join)          -> ite
+                                                                    k c1 (merge_v i1 i2) (merge t1 t2) (merge e1 e2) ty
         | Ite (c1, i1, t1, e1, ty1), Ite (c2, _, _, _, _)
-          when Exp.compare c1 c2 < 0                           -> ite k c1 i1 (merge k t1 v2) (merge k e1 v2) ty1
-        | Ite _,                     Ite (c2, i2, t2, e2, ty2) -> ite k c2 i2 (merge k v1 t2) (merge k v1 e2) ty2
+          when Exp.compare c1 c2 < 0                           -> ite k c1 i1 (merge t1 v2) (merge e1 v2) ty1
+        | _,                         Ite (c, i, t, e, ty)      -> ite k c i (merge v1 t) (merge v1 e) ty
+        | Ite (c, i, t, e, ty),      _                         -> ite k c i (merge t v2) (merge e v2) ty
         | _,                         _
           when equal v1 v2                                     -> v1
+        | Ndv (s1, l1, Some a1),     Ndv (s2, l2, Some a2)
+          when Stmt.equal s1 s2 && Lval.equal l1 l2            -> nondet k s1 ~size:(merge_v a1 a2) l1
         |(Cst _
          | Adr _
          | Var _
@@ -1322,11 +1336,46 @@ module Summary
          | Una _
          | Bin  _
          | Sel _
-         | Ite _
          | Let _),                   _                         -> join_ ()
         | Mem _,                     _                         -> join_ ()
         | Ndm _,                     _                         -> join_ ()
         | Upd _,                     _                         -> join_ ()
+    and weaken : type k. k Bare.k -> ?join:(k u -> k u -> k u) ->_ -> _ -> k u -> k u =
+      fun k ?join s l v ->
+        let weaken = weaken k s l in
+        let merge = merge k ?join s l in
+        match v.node with
+        | Ite (c, i,
+               { node = Ite (ct, _, tt, et, _); _ },
+               { node = Ite (ce, _, te, ee, _); _ },
+               ty)
+          when Exp.(equal c ct && equal ct ce)       -> ite k c i
+                                                          (merge (weaken tt) (weaken et))
+                                                          (merge (weaken te) (weaken ee)) ty
+        | Ite (c, i,
+               { node = Ite (ct, _, tt, et, _); _ },
+               e, ty)
+          when Exp.equal c ct                        -> ite k c i (merge (weaken tt) (weaken et)) (weaken e) ty
+        | Ite (c, i, t,
+               { node = Ite (ce, _, te, ee, _); _ },
+               ty)
+          when Exp.equal c ce                        -> ite k c i (weaken t) (merge (weaken te) (weaken ee)) ty
+        | Ite (c, i, t, e, ty)                       -> ite k c i (weaken t) (weaken e) ty
+        | (Top
+          | Bot
+          | Cst _
+          | Adr _
+          | Var _
+          | Ndv _
+          | Una _
+          | Bin _
+          | Sel _
+          | Let _)                                   -> v
+        | Mem _                                      -> v
+        | Ndm _                                      -> v
+        | Upd _                                      -> v
+
+    let merge k ?join s l v1 v2 = merge k ?join s l (weaken k ?join s l v1) (weaken k ?join s l v2)
 
     module V = struct
       module T = struct
@@ -1354,6 +1403,7 @@ module Summary
       let prj r = prj V r
 
       let strengthen = strengthen V
+      let weaken = weaken V
       let covers = covers
       let merge = merge V
       let pp = pp
@@ -1388,6 +1438,7 @@ module Summary
       let prj r = prj M r
 
       let strengthen = strengthen M
+      let weaken = weaken M
       let covers = covers
       let merge = merge M
       let pp = pp
@@ -1447,21 +1498,27 @@ module Summary
     G.Mem.M.(for_all       (covers_ find s1.post.global_mems) s2.post.global_mems) &&
     F.Local.Var.M.(for_all (covers_ find s1.local_vars)       s2.local_vars) &&
     F.Local.Mem.M.(for_all (covers_ find s1.local_mems)       s2.local_mems)
-  let merge s1 s2 =
-    let merge mrg _ = opt_fold @@ some %% swap (opt_fold mrg) in
-    let merge_v x = merge V.merge x and merge_m x = merge M.merge x in
-    {
-      pre = V.merge s1.pre s2.pre;
-      post =
-        {
-          poly_vars   = F.Poly.Var.M.merge  merge_v s1.post.poly_vars   s2.post.poly_vars;
-          poly_mems   = F.Poly.Mem.M.merge  merge_m s1.post.poly_mems   s2.post.poly_mems;
-          global_vars = G.Var.M.merge       merge_v s1.post.global_vars s2.post.global_vars;
-          global_mems = G.Mem.M.merge       merge_m s1.post.global_mems s2.post.global_mems;
-        };
-      local_vars      = F.Local.Var.M.merge merge_v s1.local_vars       s2.local_vars;
-      local_mems      = F.Local.Mem.M.merge merge_m s1.local_mems       s2.local_mems
-    }
+  let merge =
+    let v = makeVarinfo true false "pre" intType in
+    fun ~join stmt f s1 s2 ->
+      let merge mrg wr k v1 v2 = opt_fold (fun v2 _ -> some @@ opt_fold (mrg stmt @@ f @@ wr k) v1 v2) v2 v1 in
+      let merge_v wr = merge V.merge wr and merge_m wr = merge M.merge wr in
+      {
+        pre = V.merge ~join stmt (Cil.var v) s1.pre s2.pre;
+        post =
+          {
+            poly_vars   =
+              F.Poly.Var.M.merge (merge_v @@ fun v -> `Poly_var v)   s1.post.poly_vars   s2.post.poly_vars;
+            poly_mems   =
+              F.Poly.Mem.M.merge (merge_m @@ fun m -> `Poly_mem m)   s1.post.poly_mems   s2.post.poly_mems;
+            global_vars =
+              G.Var.M.merge      (merge_v @@ fun v -> `Global_var v) s1.post.global_vars s2.post.global_vars;
+            global_mems =
+              G.Mem.M.merge      (merge_m @@ fun m -> `Global_mem m) s1.post.global_mems s2.post.global_mems;
+          };
+        local_vars      = F.Local.Var.M.merge (merge_v @@ fun v -> `Local_var v) s1.local_vars       s2.local_vars;
+        local_mems      = F.Local.Mem.M.merge (merge_m @@ fun m -> `Local_mem m) s1.local_mems       s2.local_mems
+      }
 end
 
 module H_void_ptr_var = Reporting_bithashset (Void_ptr_var) ()
