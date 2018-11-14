@@ -83,8 +83,9 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
           end)
       let rec opt : type k. (_ -> _ -> k u -> k u -> _ -> k u) -> _ -> k u -> k u =
         fun ite path v ->
+          let open Info.Symbolic in
           let Refl = eq in
-          match v.Info.Symbolic.node with
+          match v.node with
           | Ite (c, s, t, e, _)
             when M_d.mem (c, s) path -> if M_d.find (c, s) path then opt ite path t else opt ite path e
           | Ite (c, s, t, e, ty)     -> ite
@@ -257,7 +258,11 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         | StartOf lv           -> some @@ eval_addr s lv
         | Info (e, _)          -> eval_expr s e
 
-    let assume c flag (pdd, s) = Path_dd.cut c (get @@ eval_expr s c) flag pdd, s
+    type state = Path_dd.t * S.t
+
+    let assume c flag (pdd, s : state) : state =
+      let Refl = S.eq in
+      Path_dd.cut c (get @@ eval_expr s c) flag pdd, s
 
     let rec set lv off (v : _ -> V.t) pdd (s : S.t) : S.t =
       let Refl = S.eq in
@@ -293,7 +298,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         | TArray _                 -> s
         | ty                       -> Console.fatal "Symbolic.set: unexpected type: %a : %a" pp_lval lv pp_typ ty
 
-    let rec assign lv e (pdd, (s : S.t)) =
+    let assign lv e (pdd, s : state) =
       let Refl = S.eq in
       pdd,
       set
@@ -332,17 +337,21 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
            | Some fi -> mkMem ~addr ~off:(Field (fi, NoOffset)))
         eo
 
+    let dummy v newt =
+      mkMem
+        ~addr:(
+          mkCast
+            ~force:false
+            ~overflow:Check
+            ~e:(mkAddrOf ~loc @@ var v)
+            ~newt)
+        ~off:NoOffset
+
     let lval =
       let mem m =
         match mk_mem m with
         | Some lv -> lv
-        | None    -> mkMem
-                       ~addr:(mkCast
-                                ~force:false
-                                ~overflow:Check
-                                ~e:(mkAddrOf ~loc @@ var F.f.svar)
-                                ~newt:(TPtr ((fst m).R.typ, [])))
-                       ~off:NoOffset
+        | None    -> dummy F.f.svar @@ TPtr ((fst m).R.typ, [])
       in
       fun w ->
         match (w :> W.readable) with
@@ -371,15 +380,27 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
     let one = CInt64 (Integer.one, IInt, None)
 
     let join (v1 : V.t) (v2 : V.t) =
+      let open Info.Symbolic in
       let Refl = eq in
-      match Info.Symbolic.(v1.node, v2.node) with
+      match v1.node, v2.node with
       | Cst (CInt64 (c, IInt, _)), v
         when Integer.is_one c                                -> V.cst one
       | v,                         Cst (CInt64 (c, IInt, _))
         when Integer.is_one c                                -> V.cst one
-      | _,                         _                         -> V.bin `Or v1 v2 intType
+      | Ite _,                     _
+      | _,                         Ite _                     -> Console.fatal "Symbolic.join: ite is being lost"
+      | (Top
+        | Bot
+        | Cst _
+        | Adr _
+        | Var _
+        | Ndv _
+        | Una _
+        | Bin _
+        | Sel _
+        | Let _),                  _                         -> V.bin `Or v1 v2 intType
 
-    let call stmt ?lv kf es (pdd, s) : _ * S.t =
+    let call stmt ?lv kf es (pdd, s : state) : state =
       let I.E.Some { local = (module L'); eff = eff' } = I.get info R.flag @@ Kernel_function.get_definition kf in
       let h_map = R.map stmt kf in
       let h_rev =
@@ -568,7 +589,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
             intType
             pdd
         in
-        S.Symbolic.V.merge ~join s.pre v
+        S.Symbolic.V.merge ~join stmt (dummy (Kernel_function.get_vi kf) intType) s.pre v
       in
       pdd,
       { s with pre } |>
@@ -592,13 +613,17 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
                                         ~acc)
 
     let init = fold_init assign
-    let reach (pdd, s) = pdd, { s with pre = V.merge ~join s.pre @@ Path_dd.inst_v (V.cst one) intType pdd }
-
+    let reach stmt f (pdd, s : state) : state =
+      let Refl = S.eq in
+      pdd, { s with pre = V.merge ~join stmt (dummy f intType) s.pre @@ Path_dd.inst_v (V.cst one) intType pdd }
     let stub stmt lv (pdd, s) = pdd, set lv NoOffset (V.ndv stmt % (swap addOffsetLval) lv) pdd s
+    let alloc stmt lv sz (pdd, s : state) =
+      let Refl = S.eq in
+      pdd, set lv NoOffset (const @@ V.ndv stmt ~size:(get @@ eval_expr s sz) lv) pdd s
 
     let start = List.hd F.f.sbody.bstmts
 
-    let initial : _ * S.t =
+    let initial : state =
       let Refl = S.eq in
       let Refl = eq in
       Path_dd.top,
@@ -620,20 +645,151 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
     let add_stop, stops =
       let stops = ref [] in
       (fun s -> stops := s :: !stops),
-      !stops
+      fun () -> !stops
 
-    let strengthen stmt (pdd, s) = pdd, strengthen stmt lval s
+    let merge stmt (pdd1, s1) (pdd2, s2) = Path_dd.merge pdd1 pdd2, merge ~join stmt lval s1 s2
 
-    let merge (pdd1, s1) (pdd2, s2) = Path_dd.merge pdd1 pdd2, merge s1 s2
-
-    let handle stmt =
+    let handle ?(cond=true) stmt =
+      let finish ?(stop=false) (pdd, s as st : state) =
+        let Refl = S.eq in
+        let covers = covers (snd @@ state stmt) s in
+        if not covers then set_state stmt st;
+        let stop = stop || covers in
+        if stop then add_stop s.pre;
+        stop
+      in
       stmt.preds |>
-      List.map (fun s -> strengthen s @@ state s) |>
+      List.map state |>
       (function
       | []      ->(assert (Stmt.equal stmt start);
                    initial, [])
       | s :: ss -> s, ss) |>
-      uncurry (List.fold_left merge) |>
+      uncurry @@ List.fold_left (merge stmt) |>
+      match stmt.skind with
+      | Instr (Set (lv, e, _))                                     -> finish % assign lv e
+      | Instr (Local_init (vi, AssignInit i, _))                   -> finish % init (var vi) i
+      | Instr (Call
+                 (_,
+                  { enode = Lval (Var f, NoOffset); _ },
+                  _, _))
+        when Options.Target_functions.mem f.vname                  -> finish % reach stmt f
+      | Instr (Call
+                 (Some lv,
+                  { enode = Lval (Var f, NoOffset) },
+                  (e :: _), _))
+        when Options.Alloc_functions.mem f.vname                   -> finish % alloc stmt lv e
+      | Instr (Local_init
+                 (vi, ConsInit (f, e :: _, Plain_func), _))
+        when Options.Alloc_functions.mem f.vname                   -> finish % alloc stmt (var vi) e
 
+      | Instr (Call (_,
+                     { enode = Lval (Var f, NoOffset) }, [e], _))
+        when Options.Assume_functions.mem f.vname                  -> finish % assume e true
+      | Instr (Call (_,
+                     { enode = Lval (Var f, NoOffset) }, [], _))
+        when Options.Path_assume_functions.mem f.vname             -> finish ~stop:true
+      | Instr (Call (lv,
+                     { enode = Lval (Var f, NoOffset) },
+                     args, _))                                     -> finish %
+                                                                      call
+                                                                        stmt
+                                                                        ?lv
+                                                                        (Globals.Functions.get f)
+                                                                        args
+      | Instr (Local_init (vi, ConsInit (f, args, Plain_func), _)) -> finish %
+                                                                      call
+                                                                        stmt
+                                                                        ~lv:(var vi)
+                                                                        (Globals.Functions.get f)
+                                                                        args
+      | Instr (Call (Some lv, _, _, _))                            -> finish % stub stmt lv
+      | Instr (Call (None, _, _, _))                               -> finish % id
+      | Instr (Local_init (_, ConsInit (_, _, Constructor), _))    -> Console.fatal
+                                                                        "Symbolic.handle: C++ constructors \
+                                                                         are unsupported"
+      | Instr (Asm _ | Skip _ | Code_annot _)
+      | Return _ | Goto _ | AsmGoto _ | Break _ | Continue _       -> finish % id
+      | If (e, _, _, _)                                            -> finish % assume e cond
+      | Switch (e, b, _, _)                                        -> assert false
+      | Loop (_, b, _, _, _) | Block b                             -> finish % id
+      | UnspecifiedSequence ss                                     -> finish % id
+      | Throw _ | TryCatch _ | TryFinally _ | TryExcept _          -> Console.fatal
+                                                                        "Unsupported features: exceptions \
+                                                                         and their handling"
+    let expand =
+      let h = H_stmt.create 64 in
+      let set = H_stmt.replace h in
+      List.iter
+        (fun st ->
+           match[@warning "-4"] st.skind with
+           | Switch (e, _, ss, _) ->(let next =
+                                       List.fold_right
+                                         (fun s next ->
+                                            let case =
+                                              function
+                                              | Case (e', _) -> mkBinOp ~loc Eq e e'
+                                              | Default _    -> Cil.one ~loc
+                                              | Label _      -> assert false
+                                            in
+                                            let stmt = mkStmt ~valid_sid:true in
+                                            let goto = stmt @@ Goto (ref s, loc) in
+                                            let skip = stmt @@ Instr (Skip loc) in
+                                            let fork =
+                                              stmt @@
+                                              If (
+                                                List.fold_right
+                                                  (mkBinOp ~loc BOr % case)
+                                                  (List.tl s.labels)
+                                                  (case @@ List.hd s.labels),
+                                                mkBlock [goto],
+                                                mkBlock [skip],
+                                                loc)
+                                            in
+                                            goto.preds <- [fork];
+                                            goto.succs <- [s];
+                                            s.preds <-
+                                              List.map (fun s -> if Stmt.equal s st then goto else s) s.preds;
+                                            skip.preds <- [fork];
+                                            skip.succs <- [next];
+                                            next.preds <- [skip];
+                                            fork.succs <- [goto; skip];
+                                            fork)
+                                         ss
+                                         List.(hd @@ filter (fun s -> not @@ exists (Stmt.equal s) ss) st.succs)
+                                     in
+                                     next.preds <- st.preds;
+                                     set st next)
+           | _                    -> set st st)
+        F.f.sbody.bstmts;
+      H_stmt.find h
+
+    let fix =
+      let push, succs, clear, empty, pop =
+        let q = Queue.create () in
+        (fun s ->
+           let s = expand s in
+           match[@warning "-4"] s.skind with
+           | If _ ->(Queue.push (s, Some true) q;
+                     Queue.push (s, Some false) q)
+           | _    -> Queue.push (s, None) q),
+        (fun ?cond s ->
+           match[@warning "-4"] s.skind with
+           | If (_, t, e, _) -> [List.hd (if the cond then t else e).bstmts]
+           | _               -> s.succs),
+        (fun () -> Queue.clear q),
+        (fun () -> Queue.is_empty q),
+        (fun () -> Queue.pop q)
+      in
+      fun () ->
+        clear ();
+        push start;
+        while not @@ empty () do
+          let s, cond = pop () in
+          if not (handle ?cond s) then List.iter push (succs ?cond s)
+        done;
+        let rs = Kernel_function.find_return @@ Globals.Functions.get F.f.svar in
+        let r = snd @@ state rs in
+        let Refl = S.eq in
+        ({ r with pre = List.fold_left (V.merge ~join rs @@ dummy F.f.svar intType) r.pre @@ stops () } : S.t)
   end
 end

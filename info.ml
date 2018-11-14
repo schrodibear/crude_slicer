@@ -15,7 +15,7 @@
 (* limitations under the License.                                             *)
 (******************************************************************************)
 
-[@@@warning "-42-44-45"]
+[@@@warning "-42-44-45-48"]
 
 open Cil
 open Cil_types
@@ -1302,11 +1302,13 @@ module Summary
       | Ndm _,    _      -> false
       | Upd _,    _      -> false
     let sid = Sid.next ()
+    let dummy_int = Cil.var @@ makeVarinfo true false "pre" intType
     let rec merge : type k. k Bare.k -> ?join:(k u -> k u -> k u) -> _ -> _ -> k u -> k u -> k u =
       fun k ?join s l v1 v2 ->
         let merge_v v1 v2 =
           let s = { s with sid } in
-          merge V s l (weaken V s l v1) (weaken V s l v2)
+          let l = dummy_int in
+          Bare.(merge V s l (weaken V s l v1) (weaken V s l v2))
         and merge = merge k ?join s l
         in
         let join_ () = may_map ~dft:(nondet k s l) (fun j -> j v1 v2) join in
@@ -1498,27 +1500,25 @@ module Summary
     G.Mem.M.(for_all       (covers_ find s1.post.global_mems) s2.post.global_mems) &&
     F.Local.Var.M.(for_all (covers_ find s1.local_vars)       s2.local_vars) &&
     F.Local.Mem.M.(for_all (covers_ find s1.local_mems)       s2.local_mems)
-  let merge =
-    let v = makeVarinfo true false "pre" intType in
-    fun ~join stmt f s1 s2 ->
-      let merge mrg wr k v1 v2 = opt_fold (fun v2 _ -> some @@ opt_fold (mrg stmt @@ f @@ wr k) v1 v2) v2 v1 in
-      let merge_v wr = merge V.merge wr and merge_m wr = merge M.merge wr in
-      {
-        pre = V.merge ~join stmt (Cil.var v) s1.pre s2.pre;
-        post =
-          {
-            poly_vars   =
-              F.Poly.Var.M.merge (merge_v @@ fun v -> `Poly_var v)   s1.post.poly_vars   s2.post.poly_vars;
-            poly_mems   =
-              F.Poly.Mem.M.merge (merge_m @@ fun m -> `Poly_mem m)   s1.post.poly_mems   s2.post.poly_mems;
-            global_vars =
-              G.Var.M.merge      (merge_v @@ fun v -> `Global_var v) s1.post.global_vars s2.post.global_vars;
-            global_mems =
-              G.Mem.M.merge      (merge_m @@ fun m -> `Global_mem m) s1.post.global_mems s2.post.global_mems;
-          };
-        local_vars      = F.Local.Var.M.merge (merge_v @@ fun v -> `Local_var v) s1.local_vars       s2.local_vars;
-        local_mems      = F.Local.Mem.M.merge (merge_m @@ fun m -> `Local_mem m) s1.local_mems       s2.local_mems
-      }
+  let merge ~join stmt f s1 s2 =
+    let merge mrg wr k v1 v2 = opt_fold (fun v2 _ -> some @@ opt_fold (mrg stmt @@ f @@ wr k) v1 v2) v2 v1 in
+    let merge_v wr = merge V.merge wr and merge_m wr = merge M.merge wr in
+    {
+      pre = V.merge ~join stmt dummy_int s1.pre s2.pre;
+      post =
+        {
+          poly_vars   =
+            F.Poly.Var.M.merge (merge_v @@ fun v -> `Poly_var v)   s1.post.poly_vars   s2.post.poly_vars;
+          poly_mems   =
+            F.Poly.Mem.M.merge (merge_m @@ fun m -> `Poly_mem m)   s1.post.poly_mems   s2.post.poly_mems;
+          global_vars =
+            G.Var.M.merge      (merge_v @@ fun v -> `Global_var v) s1.post.global_vars s2.post.global_vars;
+          global_mems =
+            G.Mem.M.merge      (merge_m @@ fun m -> `Global_mem m) s1.post.global_mems s2.post.global_mems;
+        };
+      local_vars      = F.Local.Var.M.merge (merge_v @@ fun v -> `Local_var v) s1.local_vars       s2.local_vars;
+      local_mems      = F.Local.Mem.M.merge (merge_m @@ fun m -> `Local_mem m) s1.local_mems       s2.local_mems
+    }
 end
 
 module H_void_ptr_var = Reporting_bithashset (Void_ptr_var) ()
