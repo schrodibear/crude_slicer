@@ -903,7 +903,8 @@ module Make (Analysis : Region.Analysis) = struct
         method! vstmt_aux s =
           let skip () = { s with skind = Instr (Skip (Stmt.loc s)); labels = collect_labels s } in
           if not (I.E.has_stmt_req' s eff)
-          && not (opt_equal Fundec.equal main_def self#current_func && match s.skind with Return _ -> true | _ -> false)
+          && not (opt_equal Fundec.equal main_def self#current_func ||
+                  match s.skind with Return _ -> true | _ -> false)
           then begin
             del_stmt s;
             if Options.Use_ghosts.is_set ()
