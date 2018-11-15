@@ -747,12 +747,15 @@ module Make
                                             in
                                             goto.preds <- [fork];
                                             goto.succs <- [s];
+                                            set goto goto;
                                             s.preds <-
                                               List.map (fun s -> if Stmt.equal s st then goto else s) s.preds;
                                             skip.preds <- [fork];
                                             skip.succs <- [next];
+                                            set skip skip;
                                             next.preds <- [skip];
                                             fork.succs <- [goto; skip];
+                                            set fork fork;
                                             fork)
                                          ss
                                          List.(hd @@ filter (fun s -> not @@ exists (Stmt.equal s) ss) st.succs)
@@ -760,7 +763,7 @@ module Make
                                      next.preds <- st.preds;
                                      set st next)
            | _                    -> set st st)
-        F.f.sbody.bstmts;
+        F.f.sallstmts;
       H_stmt.find h
 
     let fix =
