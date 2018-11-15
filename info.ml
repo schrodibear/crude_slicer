@@ -338,6 +338,7 @@ module Symbolic : sig
     }
   val mk : ('v, 'm, 'k) node -> ('v, 'm, 'k) t
   val coerce : ('v, 'm, _) t -> ('v, 'm, m) t
+  val coerce' : ('v, 'm, _) t -> ('v, 'm, _) t option
   module Node : sig
     type ('crv, 'crm) he =
       { f : 'cev 'cem 'cee. < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee > binding -> 'cee -> int }
@@ -489,6 +490,25 @@ end = struct
     | { node = Upd _; _ } as v            -> v
     | { node = Ite (c, i, t, e, ty); id } -> { node = Ite (c, i, coerce t, coerce e, ty); id }
     | { node = Let (s, b, e, v); id }     -> { node = Let (s, b, e, coerce v); id }
+
+  let rec coerce' : type v m k. (v, m, k) t -> (v, m, _) t option =
+    let (>>=) o f = opt_bind f o in
+    function
+    | { node = Top; _ }
+    | { node = Bot; _ }
+    | { node = Cst _; _ }
+    | { node = Adr _; _ }
+    | { node = Var _; _ }
+    | { node = Ndv _; _ }
+    | { node = Una _; _ }
+    | { node = Bin _; _ }
+    | { node = Sel _; _ } as v            -> Some v
+    | { node = Mem _; _ }                 -> None
+    | { node = Ndm _; _ }                 -> None
+    | { node = Upd _; _ }                 -> None
+    | { node = Ite (c, i, t, e, ty); id } -> (coerce' t >>= fun t -> coerce' e >>= fun e ->
+                                              some { node = Ite (c, i, t, e, ty); id })
+    | { node = Let (s, b, e, v); id }     -> coerce' v >>= fun v -> some { node = Let (s, b, e, v); id }
 
   let hash { id; _ } = Id.coerce id
 
@@ -1167,6 +1187,13 @@ module Summary
         | V : v k
         | M : m k
       type t = E : ('v, 'm) readables * 'k k * ('v, 'm, 'k) node -> t
+      let hk (type a) = function (V : a k) -> 0 | M -> 1
+      let ek (type a b) (k1 : a k) (k2 : b k) =
+        match k1, k2 with
+        | V, V -> true
+        | M, M -> true
+        | V, _ -> false
+        | M, _ -> false
       let hash (type v m) (r : (v, m) readables) (n : (v, m, _) node) =
         hash
           (fun f -> let Refl = eq_readables r readable in W.hash' f : v -> _)
@@ -1180,7 +1207,7 @@ module Summary
                        G.Mem.M.fold (fold G.Mem.hash) e.global_mems 0)
               | _   -> Console.fatal "Symbolic.Bare.hash: unexpected witness" }
           n
-      let hash ( E (r, _, n)) = hash r n
+      let hash (E (r, k, n)) = 179425403 * hk k + hash r n
       let equal
             (type v m) (r : (v, m) readables) (n1 : (v, m, _) node) (n2 : (v, m, _) node) =
         equal
@@ -1197,9 +1224,9 @@ module Summary
                             G.Mem.M.equal by_id e1.global_mems e2.global_mems)
               | _        -> Console.fatal "Symbolic.Bare.equal: unexpected witness" }
           n1 n2
-      let equal (E ((module R1) as r1 , _, n1)) (E ((module R2), _, n2)) =
+      let equal (E ((module R1) as r1, k1, n1)) (E ((module R2), k2, n2)) =
         match R1.W with
-        | R2.W -> equal r1 n1 n2
+        | R2.W -> ek k1 k2 && equal r1 n1 n2
         | _    -> false
     end
 
@@ -1214,9 +1241,14 @@ module Summary
             try
               H.find h k
             with Not_found ->
-              let r = Ex.E (r, k0, mk n) in
-              H.add h k r;
-              r
+              let s = mk n in
+              let v = Ex.E (r, k0, s) in
+              begin match k0 with
+              | Bare.V -> let s' = coerce s in H.add h Bare.(E (r, M, s'.node)) @@ Ex.E (r, Bare.M, s')
+              | Bare.M -> may (fun s' -> H.add h Bare.(E (r, V, s'.node)) @@ Ex.E (r, Bare.V, s')) @@ coerce' s
+              end;
+              H.add h k v;
+              v
           in
           match R1.W, (k1, k0) with
           | R0.W, Bare.(V, V) -> v
