@@ -661,6 +661,9 @@ module Make
         if stop then add_stop s.pre;
         stop
       in
+      let dcall ?lv kf args =
+        if Kernel_function.is_definition kf then call stmt ?lv kf args else may_map ~dft:id (stub stmt) lv
+      in
       stmt.preds |>
       List.map state |>
       (function
@@ -693,18 +696,12 @@ module Make
         when Options.Path_assume_functions.mem f.vname               -> finish ~stop:true
       | Instr (Call (lv,
                      { enode = Lval (Var f, NoOffset); _ },
-                     args, _))                                       -> finish %
-                                                                        call
-                                                                          stmt
-                                                                          ?lv
-                                                                          (Globals.Functions.get f)
-                                                                          args
-      | Instr (Local_init (vi, ConsInit (f, args, Plain_func), _))   -> finish %
-                                                                        call
-                                                                          stmt
-                                                                          ~lv:(var vi)
-                                                                          (Globals.Functions.get f)
-                                                                          args
+                     args, _))                                       -> finish % dcall
+                                                                                   ?lv (Globals.Functions.get f) args
+      | Instr (Local_init (vi, ConsInit (f, args, Plain_func), _))   -> finish % dcall
+                                                                                   ~lv:(var vi)
+                                                                                   (Globals.Functions.get f)
+                                                                                   args
       | Instr (Call (Some lv, _, _, _))                              -> finish % stub stmt lv
       | Instr (Call (None, _, _, _))                                 -> finish % id
       | Instr (Local_init (_, ConsInit (_, _, Constructor), _))      -> Console.fatal
