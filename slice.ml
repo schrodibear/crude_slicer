@@ -25,12 +25,15 @@ open Cil
 open Cil_printer
 open Visitor
 
+module Symbolic_ = Symbolic
 open Info
 open! Common
 
 module Make (Analysis : Region.Analysis) = struct
 
   module I = Analysis.I
+  module R = Analysis.R
+  module U = Analysis.U
 
   let unless_comp ty f =
     let ty = Ty.normalize ty in
@@ -60,26 +63,25 @@ module Make (Analysis : Region.Analysis) = struct
 
   let new_callee_approx = Exp.List_hashtbl.(may_map copy ~dft:(create 16) callee_approx)
 
-  module Make_local
-      (C : sig val f : kernel_function end)
-      (L : I.E.Local) = struct
-
-    let f = Kernel_function.get_name C.f
+  module Make_local (L : I.E.Local) (E : sig val eff : (L.A.t, L.R.t, L.S.t) I.E.t end) = struct
 
     module R = struct
-      include Analysis.R
+      include R
       include Analysis
       let
         of_var,    of_lval,    of_expr,    relevant_region,    arg_regions =
+        let f = L.F.f.svar.vname in
         of_var ~f, of_lval ~f, of_expr ~f, relevant_region ~f, arg_regions ~f
     end
-    module U = Analysis.U
 
     module F = L.R
     module A = L.A
     module G = I.G
+    module S = L.S
     module W = L.W
     open L.F
+
+    let f = f.svar.vname
 
     let w_var vi =
       match isArithmeticOrPointerType vi.vtype, vi.vglob, vi.vformal with
@@ -128,19 +130,12 @@ module Make (Analysis : Region.Analysis) = struct
         | Index _                    -> assert false
         | NoOffset                   -> no_offset ()
 
-    let unwrap (I.E.Some { local = (module L'); eff }) : (A.t, F.t) I.E.t =
-      match L'.R.W, L'.A.W with
-      | F.W, A.W -> eff
-      | _        -> Console.fatal "Slice.unpack: broken invariant: got effect of a different function"
-
     let r_mem ?fi u = F.of_write @@ w_mem ?fi u
 
     let r_var vi = F.of_write @@ w_var vi
 
-    let extract info = unwrap @@ I.get info R.flag (Kernel_function.get_definition C.f)
-
-    let init_deps info () =
-      let assigns = I.E.assigns @@ extract info in
+    let init_deps () =
+      let assigns = I.E.assigns E.eff in
       let open List in
       iter
         (fun vi ->
@@ -151,13 +146,13 @@ module Make (Analysis : Region.Analysis) = struct
                                                           (w_mem u) F.Poly_var (Poly.Var.of_varinfo vi)
                                                           assigns
            | `Location _ | `Value _ | `None          -> ())
-        (Kernel_function.get_formals C.f);
+        L.F.f.sformals;
       iter
         (fun (offs, au, pu) ->
            iter
              (fun (path, fi) -> A.add_some (w_mem ?fi @@ R.take path au) (r_mem ?fi @@ R.take path pu) assigns)
              offs)
-        (R.initial_deps C.f)
+        (R.initial_deps @@ Globals.Functions.get L.F.f.svar)
 
     let complement assigns depends =
       let open List in
@@ -258,7 +253,7 @@ module Make (Analysis : Region.Analysis) = struct
       let map = R.map s kf in
       fun acc m -> F.add_some (prj ~find:(fun u -> R.H_map.find u map) ~mk:r_mem m) acc
 
-    let prj_reads (type a r) (module L' : I.E.Local with type A.t = a and type R.t = r) s kf =
+    let prj_reads (type a r s) (module L' : I.E.Local with type A.t = a and type R.t = r and type S.t = s) s kf =
       let prj_poly_var = prj_poly_var s (Kernel_function.get_formals kf) in
       let prj_poly_mem = prj_poly_mem s kf in
       fun ~from acc ->
@@ -470,8 +465,8 @@ module Make (Analysis : Region.Analysis) = struct
     end
 
     module Eff (M : Info ) = struct
-      let eff = extract M.info
       open I.E
+      open E
       let assigns = assigns eff
       let depends = depends eff
       let has_result_dep () = has_result_dep eff
@@ -530,7 +525,7 @@ module Make (Analysis : Region.Analysis) = struct
           (fun e ->
              add_from_rval e from;
              match unrollType @@ typeOf e with
-             | TComp _ -> comp_assign (var @@ R.retvar @@ Kernel_function.get_vi C.f) e from
+             | TComp _ -> comp_assign (var @@ R.retvar L.F.f.svar) e from
              | _       -> A.import_values `Result from assigns)
           eo
 
@@ -757,9 +752,8 @@ module Make (Analysis : Region.Analysis) = struct
 
     let marker info = visitor (module Mark (Decide (struct let info = info end)))
 
-    let filter_init info =
-      let eff = extract info in
-      let depends = I.E.depends eff in
+    let filter_init =
+      let depends = I.E.depends E.eff in
       fun v init ->
         let rec filter lv =
           function
@@ -781,17 +775,27 @@ module Make (Analysis : Region.Analysis) = struct
 
     module H = H_fundec
 
-    let collectors, markers, initializers, filters = H.create 512, H.create 512, H.create 512, H.create 512
+    module type Export = sig
+      module F : Function with module R := R and module U := U
+      module W : Writes with module R := R and module U := U and module G := I.G and module F := F
+      module R : Reads with module R := R and module U := U and module G := I.G and module F := F and module W := W
+      val w_lval : lval -> [> W.readable] option
+    end
+
+    let collectors, markers,      initializers, filters,      exports =
+      H.create 512, H.create 512, H.create 512, H.create 512, H.create 512
 
     let () =
       Globals.Functions.iter_on_fundecs
         (fun d ->
-           let I.E.Some { local = (module L); _ } = I.get info Analysis.R.flag d in
-           let module L = Make_local (struct let f = Globals.Functions.get d.svar end) (L) in
+           let I.E.Some { local = (module Local); eff } = I.get info Analysis.R.flag d in
+           let module L = Make_local (Local) (struct let eff = eff end) in
            H.replace collectors d @@ L.collector info;
            H.replace markers d @@ L.marker info;
-           H.replace initializers d @@ L.init_deps info;
-           H.replace filters d @@ L.filter_init info)
+           H.replace initializers d L.init_deps;
+           H.replace filters d L.filter_init;
+           H.replace exports d Local.(module struct module F = F module W = W module R = R let w_lval = L.w_lval end
+                                     : Export))
 
     let collect = Fixpoint.visit_until_convergence ~order:`topological (const @@ H.find collectors) info
     let mark =    Fixpoint.visit_until_convergence ~order:`reversed    (const @@ H.find markers) info
@@ -805,6 +809,8 @@ module Make (Analysis : Region.Analysis) = struct
              | d                       -> H.find initializers d ()
              | exception No_Definition -> ())
           (List.flatten sccs))
+
+    let export = H.find exports
 
     let is_named = function Label _ -> true | _ -> false
 
@@ -1052,7 +1058,31 @@ let slice () =
   Slice.mark sccs;
   Console.debug "Will now sweep and generate summaries...";
   let module Summaries = Summaries.Make (Region_analysis2) (Info) in
-  Slice.sweep ~after_sweeping_funcs:(fun () -> if Options.Summaries.get () then Summaries.generate sccs) ();
+  let module Export (L : Region_analysis2.I.E.Local) = struct
+    open Region_analysis2.I
+    type ('pv, 'pm, 'lv, 'lm) readable =
+      [ `Global_mem of G.Mem.t
+      | `Global_var of G.Var.t
+      | `Local_mem of 'lm
+      | `Local_var of 'lv
+      | `Poly_mem of 'pm
+      | `Poly_var of 'pv]
+    let w_lval =
+      let (module M) = Slice.export L.F.f in
+      (fun
+        (type pv pm lv lm)
+        (w : ([(pv, pm, lv, lm) readable | `Result], M.R.t) reads) : ((_ -> (pv, pm, lv, lm) readable option) -> _) ->
+        match w with
+        | L.R.W -> (id : _ -> _ -> L.W.readable option :> _ -> _ -> [> L.W.readable] option)
+        | _     -> Console.fatal "Slice.slice: unexpected witness")
+        M.R.W
+        M.w_lval
+  end in
+  let module Symbolic = Symbolic_.Make (Region_analysis2) (Info) (Export) in
+  Slice.sweep
+    ~after_sweeping_funcs:(
+      fun () -> if Options.Summaries.get () then begin Symbolic.compute sccs; Summaries.generate sccs end)
+    ();
   let stat = Gc.stat () in
   Console.debug  "Current # of live words: %d" stat.Gc.live_words;
   Console.debug "Will now clean...";

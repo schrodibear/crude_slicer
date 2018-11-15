@@ -1284,7 +1284,7 @@ module Summary
 
     let covers (type k) (v1 : k u) (v2 : k u) =
       match v1.node, v2.node with
-      | Top,       _
+      | Top,      _
       | _,        Bot    -> true
       | _,        _
         when equal v1 v2 -> true

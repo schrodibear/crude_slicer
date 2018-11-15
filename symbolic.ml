@@ -11,7 +11,10 @@ open Extlib
 open Common
 open Info
 
-module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
+module Make
+    (R : Region.Analysis)
+    (M : sig val info : R.I.t end)
+    (Import : functor (L : R.I.E.Local) -> sig val w_lval : lval -> [> L.W.readable] option end) = struct
 
   module I = R.I
   module R = struct
@@ -383,9 +386,9 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       let open Info.Symbolic in
       let Refl = eq in
       match v1.node, v2.node with
-      | Cst (CInt64 (c, IInt, _)), v
+      | Cst (CInt64 (c, IInt, _)), _
         when Integer.is_one c                                -> V.cst one
-      | v,                         Cst (CInt64 (c, IInt, _))
+      | _,                         Cst (CInt64 (c, IInt, _))
         when Integer.is_one c                                -> V.cst one
       | Ite _,                     _
       | _,                         Ite _                     -> Console.fatal "Symbolic.join: ite is being lost"
@@ -650,7 +653,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
     let merge stmt (pdd1, s1) (pdd2, s2) = Path_dd.merge pdd1 pdd2, merge ~join stmt lval s1 s2
 
     let handle ?(cond=true) stmt =
-      let finish ?(stop=false) (pdd, s as st : state) =
+      let finish ?(stop=false) (_, s as st : state) =
         let Refl = S.eq in
         let covers = covers (snd @@ state stmt) s in
         if not covers then set_state stmt st;
@@ -665,57 +668,57 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
                    initial, [])
       | s :: ss -> s, ss) |>
       uncurry @@ List.fold_left (merge stmt) |>
-      match stmt.skind with
-      | Instr (Set (lv, e, _))                                     -> finish % assign lv e
-      | Instr (Local_init (vi, AssignInit i, _))                   -> finish % init (var vi) i
+      match[@warning "-4"] stmt.skind with
+      | Instr (Set (lv, e, _))                                       -> finish % assign lv e
+      | Instr (Local_init (vi, AssignInit i, _))                     -> finish % init (var vi) i
       | Instr (Call
                  (_,
                   { enode = Lval (Var f, NoOffset); _ },
                   _, _))
-        when Options.Target_functions.mem f.vname                  -> finish % reach stmt f
+        when Options.Target_functions.mem f.vname                    -> finish % reach stmt f
       | Instr (Call
                  (Some lv,
-                  { enode = Lval (Var f, NoOffset) },
+                  { enode = Lval (Var f, NoOffset); _ },
                   (e :: _), _))
-        when Options.Alloc_functions.mem f.vname                   -> finish % alloc stmt lv e
+        when Options.Alloc_functions.mem f.vname                     -> finish % alloc stmt lv e
       | Instr (Local_init
                  (vi, ConsInit (f, e :: _, Plain_func), _))
-        when Options.Alloc_functions.mem f.vname                   -> finish % alloc stmt (var vi) e
+        when Options.Alloc_functions.mem f.vname                     -> finish % alloc stmt (var vi) e
 
       | Instr (Call (_,
-                     { enode = Lval (Var f, NoOffset) }, [e], _))
-        when Options.Assume_functions.mem f.vname                  -> finish % assume e true
+                     { enode = Lval (Var f, NoOffset); _ }, [e], _))
+        when Options.Assume_functions.mem f.vname                    -> finish % assume e true
       | Instr (Call (_,
-                     { enode = Lval (Var f, NoOffset) }, [], _))
-        when Options.Path_assume_functions.mem f.vname             -> finish ~stop:true
+                     { enode = Lval (Var f, NoOffset); _ }, [], _))
+        when Options.Path_assume_functions.mem f.vname               -> finish ~stop:true
       | Instr (Call (lv,
-                     { enode = Lval (Var f, NoOffset) },
-                     args, _))                                     -> finish %
-                                                                      call
-                                                                        stmt
-                                                                        ?lv
-                                                                        (Globals.Functions.get f)
-                                                                        args
-      | Instr (Local_init (vi, ConsInit (f, args, Plain_func), _)) -> finish %
-                                                                      call
-                                                                        stmt
-                                                                        ~lv:(var vi)
-                                                                        (Globals.Functions.get f)
-                                                                        args
-      | Instr (Call (Some lv, _, _, _))                            -> finish % stub stmt lv
-      | Instr (Call (None, _, _, _))                               -> finish % id
-      | Instr (Local_init (_, ConsInit (_, _, Constructor), _))    -> Console.fatal
-                                                                        "Symbolic.handle: C++ constructors \
-                                                                         are unsupported"
+                     { enode = Lval (Var f, NoOffset); _ },
+                     args, _))                                       -> finish %
+                                                                        call
+                                                                          stmt
+                                                                          ?lv
+                                                                          (Globals.Functions.get f)
+                                                                          args
+      | Instr (Local_init (vi, ConsInit (f, args, Plain_func), _))   -> finish %
+                                                                        call
+                                                                          stmt
+                                                                          ~lv:(var vi)
+                                                                          (Globals.Functions.get f)
+                                                                          args
+      | Instr (Call (Some lv, _, _, _))                              -> finish % stub stmt lv
+      | Instr (Call (None, _, _, _))                                 -> finish % id
+      | Instr (Local_init (_, ConsInit (_, _, Constructor), _))      -> Console.fatal
+                                                                          "Symbolic.handle: C++ constructors \
+                                                                           are unsupported"
       | Instr (Asm _ | Skip _ | Code_annot _)
-      | Return _ | Goto _ | AsmGoto _ | Break _ | Continue _       -> finish % id
-      | If (e, _, _, _)                                            -> finish % assume e cond
-      | Switch (e, b, _, _)                                        -> assert false
-      | Loop (_, b, _, _, _) | Block b                             -> finish % id
-      | UnspecifiedSequence ss                                     -> finish % id
-      | Throw _ | TryCatch _ | TryFinally _ | TryExcept _          -> Console.fatal
-                                                                        "Unsupported features: exceptions \
-                                                                         and their handling"
+      | Return _ | Goto _ | AsmGoto _ | Break _ | Continue _         -> finish % id
+      | If (e, _, _, _)                                              -> finish % assume e cond
+      | Switch _                                                     -> assert false
+      | Loop _ | Block _                                             -> finish % id
+      | UnspecifiedSequence _                                        -> finish % id
+      | Throw _ | TryCatch _ | TryFinally _ | TryExcept _            -> Console.fatal
+                                                                          "Unsupported features: exceptions \
+                                                                           and their handling"
     let expand =
       let h = H_stmt.create 64 in
       let set = H_stmt.replace h in
@@ -791,5 +794,32 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         let r = snd @@ state rs in
         let Refl = S.eq in
         ({ r with pre = List.fold_left (V.merge ~join rs @@ dummy F.f.svar intType) r.pre @@ stops () } : S.t)
+
+    let visitor =
+      object
+        inherit frama_c_inplace
+        method start = ()
+        method! vfunc _ = SkipChildren
+        method finish =
+          let s = fix () in
+          if not @@ covers (I.E.summary E.eff) s then begin
+            I.E.set_summary s E.eff;
+            Flag.report I.flag
+          end
+      end
   end
+
+  let fixpoints =
+    let h = H_fundec.create 256 in
+    Globals.Functions.iter_on_fundecs
+      (fun d ->
+         let I.E.Some { local = (module L); eff } = I.get info R.flag d in
+         let module Import = Import (L) in
+         let module L = Make_local (L) (struct let eff = eff end) (Import) in
+         H_fundec.replace h d L.visitor);
+    h
+
+  module Fixpoint = Fixpoint.Make (I)
+
+  let compute = Fixpoint.visit_until_convergence ~order:`topological (const @@ H_fundec.find fixpoints) info
 end
