@@ -758,7 +758,7 @@ module Make
                                             set fork fork;
                                             fork)
                                          ss
-                                         List.(hd @@ filter (fun s -> not @@ exists (Stmt.equal s) ss) st.succs)
+                                         List.(find (fun s -> not @@ exists (Stmt.equal s) ss) st.succs)
                                      in
                                      next.preds <- st.preds;
                                      set st next)
@@ -777,7 +777,10 @@ module Make
            | _    -> Queue.push (s, None) q),
         (fun ?cond s ->
            match[@warning "-4"] s.skind with
-           | If (_, t, e, _) -> [List.hd (if the cond then t else e).bstmts]
+           | If (_, t, e, _) ->(let t, e = map_pair (fun b -> opt_of_list @@ List.take 1 b.bstmts) (t, e) in
+                                [List.find
+                                   (may_map ~dft:(const true) (not %% Stmt.equal) @@ if the cond then e else t)
+                                   s.succs])
            | _               -> s.succs),
         (fun () -> Queue.clear q),
         (fun () -> Queue.is_empty q),
