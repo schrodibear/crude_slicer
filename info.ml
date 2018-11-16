@@ -429,6 +429,15 @@ end = struct
     [@@unboxed]
     let equal =
       let ei v1 v2 = Id.equal v1.id v2.id in
+      let eu u1 u2 =
+        match u1, u2 with
+        | `Cast ty1, `Cast ty2
+          when Typ.equal ty1 ty2 -> true
+        | `Minus,    `Minus
+        | `Bw_neg,   `Bw_neg
+        | `Neg,      `Neg        -> true
+        | #Op.unary, #Op.unary   -> false
+      in
       fun (type k1 k2) ev em (ee : (_, _) ee) (n1 : (_, _ , k1) node) (n2 : (_, _, k2) node) ->
         match n1, n2 with
         | Top,                       Top
@@ -441,7 +450,7 @@ end = struct
                                                                   Lval.equal l1 l2 &&
                                                                   opt_equal ei a1 a2
         | Ndm (s1, l1),              Ndm (s2, l2)              -> Stmt.equal s1 s2 && Lval.equal l1 l2
-        | Una (u1, a1, t1),          Una (u2, a2, t2)          -> u1 = u2 && ei a1 a2 && Typ.equal t1 t2
+        | Una (u1, a1, t1),          Una (u2, a2, t2)          -> eu u1 u2 && ei a1 a2 && Typ.equal t1 t2
         | Bin (b1, v11, v12, t1),    Bin (b2, v21, v22, t2)    -> b1 = b2 && ei v11 v21 && ei v12 v22 &&
                                                                   Typ.equal t1 t2
         | Sel (m1, a1, t1),          Sel (m2, a2, t2)          -> ei m1 m2 && ei a1 a2 && Typ.equal t1 t2
