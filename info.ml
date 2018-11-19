@@ -358,11 +358,14 @@ module Symbolic : sig
   val compare : _ t -> _ t -> int
   val equal : _ t -> _ t -> bool
   val hash : _ t -> int
-  type ('crv, 'crm) pe =
-    { f : 'cev 'cem 'cee.
-            formatter -> < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee > binding -> 'cee -> unit }
+  type ('v, 'm) pp = { f : 'k. formatter -> ('v, 'm, 'k) t -> unit } [@@unboxed]
+  type pe =
+    { f : 'crv 'crm 'cev 'cem 'cee.
+            ('crv, 'crm) pp
+        -> formatter -> < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee > binding -> 'cee -> unit }
   [@@unboxed]
-  val pp : (formatter -> 'v -> unit) -> (formatter -> 'm -> unit) -> ('v ,'m) pe -> formatter -> ('v, 'm, 'k) t -> unit
+  val add_pp_env : stmt -> pe -> unit
+  val pp : (formatter -> 'v -> unit) -> (formatter -> 'm -> unit) -> formatter -> ('v, 'm, 'k) t -> unit
 end = struct
   module Id = Make_index ()
   module rec Op : Op = Op
@@ -525,15 +528,21 @@ end = struct
 
   let compare v1 v2 = Id.compare v1.id v2.id
 
-  type ('crv, 'crm) pe = { f : 'cev 'cem 'cee.
-                                 formatter
-                             -> < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee > binding
-                             -> 'cee
-                             -> unit }
+  type ('v, 'm) pp = { f : 'k. formatter -> ('v, 'm, 'k) t -> unit } [@@unboxed]
+  type pe =
+    { f : 'crv 'crm 'cev 'cem 'cee.
+            ('crv, 'crm) pp
+        -> formatter -> < crv : 'crv; crm : 'crm; cev : 'cev; cem : 'cem; cee : 'cee > binding -> 'cee -> unit }
   [@@unboxed]
-  let rec pp : type k. _ -> _ -> _ -> _ -> (_, _, k) t -> _ =
-    fun ppv ppm ppe fmt u ->
-      let pp f = pp ppv ppm ppe f in
+
+  let add_pp_env, pp_env =
+    let module H = Stmt.Hashtbl in
+    let h = H.create 10 in
+    H.replace h, fun k -> H.find_def h k ({ f = fun _ fmt _ _ -> Format.fprintf fmt "?" } : pe)
+
+  let rec pp_node : type k. _ -> _ -> _ -> (_, _, k) t -> _ =
+    fun ppv ppm fmt u ->
+      let pp f = pp_node ppv ppm f in
       let pr f = Format.fprintf fmt f in
       match u.node with
       | Top                 -> pr "T"
@@ -552,7 +561,7 @@ end = struct
                                | `Neg    -> pr "!"
                                end;
                                pr " %a@])" pp a)
-      | Bin (b, a1, a2, _)  ->(pr "([@%a@ " pp a1;
+      | Bin (b, a1, a2, _)  ->(pr "(@[%a@ " pp a1;
                                pr @@
                                begin match b with
                                | `Plus        -> "+"
@@ -574,11 +583,12 @@ end = struct
                                | `And         -> "&&"
                                | `Or          -> "||"
                                end;
-                               pr "@ %a])" pp a2)
+                               pr "@ %a@])" pp a2)
       | Sel (m, a, _)       -> pr "%a[@[%a@]]" pp m pp a
       | Upd (m, a, v, _)    -> pr "%a[@[%a@]@ <-@ @[%a@]]" pp m pp a pp v
       | Ite (c, i, t, e, _) -> pr "(@[%a (%d)@ ?@ %a@ :@ %a@])" pp i c.eid pp t pp e
-      | Let (_, b, e, _)    -> ppe.f fmt b e
+      | Let (st, b, e, s)   -> pr "[@[%t@]] #%a" (fun fmt -> (pp_env st).f { f = pp } fmt b e) Id.pp s.id
+  let pp ppv ppm fmt s = Format.fprintf fmt "%a @@ %a" (pp_node ppv ppm) s Id.pp s.id
 end
 
 module type Summary = sig
@@ -681,6 +691,7 @@ module type Summary = sig
   val strengthen : stmt -> (W.readable -> lval) -> t -> t
   val covers : t -> t -> bool
   val merge : join:(V.t -> V.t -> V.t) -> stmt -> (W.readable -> lval) -> t -> t -> t
+  val pp : formatter -> t -> unit
 end
 
 module type Local = sig
@@ -1280,24 +1291,26 @@ module Summary
     let sel k m a t = mk' k @@ Sel (m, a, t)
     let upd m a v t = mk' Bare.M @@ Upd (m, a, v, t)
     let ite k c i t e ty = mk' k @@ Ite (c, i, t, e, ty)
-    let prj k s r e v = mk.f r k @@ Let (s, W readable, e, v)
+    let pp_env (pp : _ pp) fmt e =
+      let open Pretty_utils in
+      let pp_ass pk k s fmt = pp_pair ~sep:" =>@ " pk pp.f fmt (k, s) in
+      fprintf fmt "%a"
+        (pp_list ~sep:",@ " (|>))
+        ([] |>
+         F.Poly.Var.M.fold (List.cons %% pp_ass F.Poly.Var.pp) e.poly_vars |>
+         F.Poly.Mem.M.fold (List.cons %% pp_ass F.Poly.Mem.pp) e.poly_mems |>
+         G.Var.M.fold (List.cons %% pp_ass G.Var.pp) e.global_vars |>
+         G.Mem.M.fold (List.cons %% pp_ass G.Mem.pp) e.global_mems)
+    let pp_envf : pe =
+      { f = fun (type crv crm cev cem e)
+          (pp : (crv, crm) pp) fmt (w : < crv : crv; crm : crm; cev : cev; cem : cem; cee : e > binding) (e : e) ->
+          match w with
+          | W _ -> pp_env pp fmt e
+          | _   -> Console.fatal "Symbolic.pp: unexpected witness" }
+    let prj k s r e v = add_pp_env s pp_envf; mk.f r k @@ Let (s, W readable, e, v)
 
-    let pp fmt =
-      let pp_id fmt v = fprintf fmt "%a" Id.pp v.id in
-      pp
-        W.pp'
-        W.pp'
-        { f = fun (type v m e)
-            fmt (w : < crv : W.frameable_var; crm : W.frameable_mem; cev : v; cem : m; cee : e > binding) (e : e) ->
-            match w with
-            | W _ -> Pretty_utils
-                     .(fprintf fmt "(@[[{%a}@ {%a}@ {%a}@ {%a}]@ @] ...)"
-                         (pp_iter2 ~sep:",@ " ~between:" -> " F.Poly.Var.M.iter F.Poly.Var.pp pp_id) e.poly_vars
-                         (pp_iter2 ~sep:",@ " ~between:" -> " F.Poly.Mem.M.iter F.Poly.Mem.pp pp_id) e.poly_mems
-                         (pp_iter2 ~sep:",@ " ~between:" -> " G.Var.M.iter G.Var.pp pp_id) e.global_vars
-                         (pp_iter2 ~sep:",@ " ~between:" -> " G.Mem.M.iter G.Mem.pp pp_id) e.global_mems)
-            | _   -> Console.fatal "Symbolic.pp: unexpected witness" }
-        fmt
+    let pp f = Symbolic.pp W.pp' W.pp' f
+    let pp_env = pp_env { f = pp }
 
     let nondet (type k) : k Bare.k -> _ -> ?size:_ -> _ -> k u =
       let open Bare in
@@ -1560,6 +1573,14 @@ module Summary
       local_vars      = F.Local.Var.M.merge (merge_v @@ fun v -> `Local_var v) s1.local_vars       s2.local_vars;
       local_mems      = F.Local.Mem.M.merge (merge_m @@ fun m -> `Local_mem m) s1.local_mems       s2.local_mems
     }
+
+  let pp fmt s =
+    Pretty_utils
+    .(fprintf fmt "@[<2>pre: %a;@]@\n@[<2>post:@\n%a;@ %a;@ %a@]"
+        pp s.pre
+        pp_env s.post
+        (pp_iter2 ~sep:",@ " ~between:" => " F.Local.Var.M.iter F.Local.Var.pp pp) s.local_vars
+        (pp_iter2 ~sep:",@ " ~between:" => " F.Local.Mem.M.iter F.Local.Mem.pp pp) s.local_mems)
 end
 
 module H_void_ptr_var = Reporting_bithashset (Void_ptr_var) ()
@@ -1645,8 +1666,9 @@ module Effect
   let set_summary s e = e.summary <- s
 
   let pp fmt (Some { local = (module L); eff = e } : some) =
-    fprintf fmt "@[{@[<2>ass:@\n%a;@]@\n@[<2>track:@\n%a;@]@\n@[<2>tar:@\n%B;@]@\n@[<2>deps:@\n%a@]@\n@[<2>RD:%B@]}@]"
-      L.A.pp e.assigns H_void_ptr_var.pp e.tracking e.is_target L.R.pp e.depends e.result_dep
+    fprintf fmt "@[{@[<2>ass:@\n%a;@]@\n@[<2>track:@\n%a;@]@\n@[<2>tar:@\n%B;@]@\n@[<2>deps:@\n%a@]@\n@[<2>RD:%B@]}@]\
+                 @\n@[<2>sym:@\n%a;@]"
+      L.A.pp e.assigns H_void_ptr_var.pp e.tracking e.is_target L.R.pp e.depends e.result_dep L.S.pp e.summary
 end
 
 module Field_key =
