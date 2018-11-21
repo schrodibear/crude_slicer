@@ -334,6 +334,18 @@ end
 
 module Exp = struct
   include Exp
+  let compare e1 e2 =
+    let open Lexing in
+    let loc1, loc2 = fst e1.eloc, fst e2.eloc in
+    let d1 = String.compare loc1.pos_fname loc2.pos_fname in
+    if d1 <> 0
+    then d1
+    else
+      let d2 = Pervasives.compare loc1.pos_cnum loc2.pos_cnum in
+      if d2 <> 0
+      then d2
+      else compare e1 e2
+
   let underef_mem e =
     match[@warning "-4"] e.enode with
     | Lval (Mem e, NoOffset) -> e
