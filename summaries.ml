@@ -272,24 +272,30 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
     let (&&?) a1 a2 =
       match a1, a2 with
       | `False,  _
-      | _,       `False  -> `False
-      | `True,   `True   -> `True
-      | `True,   `Var v
-      | `Var v,  `True   -> `Var v
-      | `Var v1, `Var v2 ->(let g = aux `Grd in
-                            push [set (var' g) @@ mkBinOp ~loc BAnd (evar' v1) @@ evar' v2];
-                            `Var g)
+      | _,             `False        -> `False
+      | `True,         `True         -> `True
+      | `True,         (`Var _ as v)
+      | (`Var _ as v), `True         -> v
+      | `Var v1,       `Var v2       -> `Var
+                                          (fun () ->
+                                             let g = aux `Grd in
+                                             push
+                                               [set (var' g) @@ mkBinOp ~loc BAnd (evar' @@ v1 ()) @@ evar' @@ v2 ()];
+                                             g)
 
     let (||?) a1 a2 =
       match a1, a2 with
       | `True,   _
-      | _,       `True   -> `True
-      | `False,  `False  -> `False
-      | `False,  `Var v
-      | `Var v,  `False  -> `Var v
-      | `Var v1, `Var v2 ->(let g = aux `Grd in
-                            push [set (var' g) @@ mkBinOp ~loc BOr (evar' v1) @@ evar' v2];
-                            `Var g)
+      | _,             `True         -> `True
+      | `False,        `False        -> `False
+      | `False,        (`Var _ as v)
+      | (`Var _ as v), `False        -> v
+      | `Var v1,       `Var v2       -> `Var
+                                          (fun () ->
+                                             let g = aux `Grd in
+                                             push
+                                               [set (var' g) @@ mkBinOp ~loc BOr (evar' @@ v1 ()) @@ evar' @@ v2 ()];
+                                             g)
 
     let ikind t =
       match[@warning "-4"] unrollType t with
@@ -304,10 +310,12 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
     let one = one ~loc
 
     let eq ?(n=false) ?g v e =
-      let g' = aux `Grd in
-      let eq = mkBinOp ~loc (if n then Ne else Eq) (evar' v) e in
-      push [set (var' g') @@ may_map (mkBinOp ~loc LAnd eq % evar') ~dft:eq g];
-      `Var g'
+      `Var
+        (fun () ->
+           let g' = aux `Grd in
+           let eq = mkBinOp ~loc (if n then Ne else Eq) (evar' v) e in
+           push [set (var' g') @@ may_map (mkBinOp ~loc LAnd eq % evar') ~dft:eq g];
+           g')
     let neq = eq ~n:true
 
     let eq1 ?n e =
@@ -333,7 +341,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
                                         | Top_or_bot _)                -> `False
       | (Val_or_top { g = g1; v = v1 }
         | Mixed { g = g1; v = v1; _ }), (Val_or_top { g = g2; v = v2 }
-                                        | Mixed { g = g2; v = v2; _ }) -> `Var g1 &&?
+                                        | Mixed { g = g2; v = v2; _ }) -> `Var (const g1) &&?
                                                                           eq ~g:g2 (conv `V v1) (evar' @@ conv `V v2)
       | (Val_or_top { g; v = v1 }
         | Mixed { g; v = v1; _ }),      (Val_or_bot { v = v2; _ }
@@ -376,13 +384,13 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
 
     let split_g_a =
       function
-      | Top                 -> `False, `True
-      | Bot                 -> `False, `False
-      | Top_or_bot a        -> `False, `Var a
-      | Val_or_top { g; _ } -> `Var g, `True
-      | Val_or_bot { a; _ } -> `True,  `Var a
-      | Mixed { a; g; _ }   -> `Var g, `Var a
-      | Val _               -> `True,  `True
+      | Top                 -> `False,         `True
+      | Bot                 -> `False,         `False
+      | Top_or_bot a        -> `False,         `Var (const a)
+      | Val_or_top { g; _ } -> `Var (const g), `True
+      | Val_or_bot { a; _ } -> `True,          `Var (const a)
+      | Mixed { a; g; _ }   -> `Var (const g), `Var (const a)
+      | Val _               -> `True,          `True
 
     let value k t =
       function
@@ -403,10 +411,10 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       match g, a with
       | `False, `True  -> Top
       | _,      `False -> Bot
-      | `False, `Var a -> Top_or_bot a
-      | `Var g, `True  -> Val_or_top { g; v = v () }
-      | `True,  `Var a -> Val_or_bot { a; v = v () }
-      | `Var g, `Var a -> Mixed { a; g; v = v () }
+      | `False, `Var a -> Top_or_bot (a ())
+      | `Var g, `True  -> Val_or_top { g = g (); v = v () }
+      | `True,  `Var a -> Val_or_bot { a = a (); v = v () }
+      | `Var g, `Var a -> Mixed { a = a (); g = g (); v = v () }
       | `True,  `True  -> Val (v ())
 
     let ndv k ty size =
@@ -496,8 +504,8 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       fun k i t e ty ->
         let (gi, ai), (gt, at), (ge, ae) = split_g_a i, split_g_a t, split_g_a e in
         elem
-          ~g:(gi &&? gt &&? ge ||? neq1 z i &&? gt ||? eq1 z i &&? ge ||? eq2 t e)
-          ~a:(ai &&? (neq1 z i &&? at ||? eq1 z i &&? ae))
+          ~g:(gi &&? gt &&? ge ||? (gt &&? neq1 z i) ||? (ge &&? eq1 z i) ||? eq2 t e)
+          ~a:(ai &&? (at &&? ae ||? (at &&? neq1 z i) ||? (ae &&? eq1 z i)))
           (fun () -> op k (value `V intType i) (value k ty t) (value k ty e) ty)
 
     module H_stack = FCHashtbl.Make (Datatype.List (Stmt))
