@@ -712,70 +712,6 @@ module Make
 
     let merge stmt (pdd1, s1) (pdd2, s2) = Path_dd.merge pdd1 pdd2, merge ~join stmt lval s1 s2
 
-    let handle ?(cond=true) stmt =
-      let finish ?(stop=false) (_, s as st : state) =
-        let Refl = S.eq in
-        let covers = covers (snd @@ state stmt) s in
-        if not covers then set_state stmt st;
-        let stop = stop || covers in
-        if stop then add_stop s.pre;
-        stop
-      in
-      let dcall ?lv kf args =
-        if Kernel_function.is_definition kf then call stmt ?lv kf args else may_map ~dft:id (stub stmt) lv
-      in
-      stmt.preds |>
-      List.map state |>
-      (function
-      | []      ->(assert (Stmt.equal stmt start);
-                   initial, [])
-      | s :: ss -> s, ss) |>
-      uncurry @@ List.fold_left (merge stmt) |>
-      match[@warning "-4"] stmt.skind with
-      | Instr (Set (lv, e, _))                                       -> finish % assign lv e
-      | Instr (Local_init (vi, AssignInit i, _))                     -> finish % init (var vi) i
-      | Instr (Call
-                 (_,
-                  { enode = Lval (Var f, NoOffset); _ },
-                  _, _))
-        when Options.Target_functions.mem f.vname                    -> finish % reach stmt f
-      | Instr (Call
-                 (Some lv,
-                  { enode = Lval (Var f, NoOffset); _ },
-                  (e :: _), _))
-        when Options.Alloc_functions.mem f.vname                     -> finish % alloc stmt lv e
-      | Instr (Local_init
-                 (vi, ConsInit (f, e :: _, Plain_func), _))
-        when Options.Alloc_functions.mem f.vname                     -> finish % alloc stmt (var vi) e
-
-      | Instr (Call (_,
-                     { enode = Lval (Var f, NoOffset); _ }, [e], _))
-        when Options.Assume_functions.mem f.vname                    -> finish % assume e true
-      | Instr (Call (_,
-                     { enode = Lval (Var f, NoOffset); _ }, [], _))
-        when Options.Path_assume_functions.mem f.vname               -> finish ~stop:true
-      | Instr (Call (lv,
-                     { enode = Lval (Var f, NoOffset); _ },
-                     args, _))                                       -> finish % dcall
-                                                                                   ?lv (Globals.Functions.get f) args
-      | Instr (Local_init (vi, ConsInit (f, args, Plain_func), _))   -> finish % dcall
-                                                                                   ~lv:(var vi)
-                                                                                   (Globals.Functions.get f)
-                                                                                   args
-      | Instr (Call (Some lv, _, _, _))                              -> finish % stub stmt lv
-      | Instr (Call (None, _, _, _))                                 -> finish % id
-      | Instr (Local_init (_, ConsInit (_, _, Constructor), _))      -> Console.fatal
-                                                                          "Symbolic.handle: C++ constructors \
-                                                                           are unsupported"
-      | Instr (Asm _ | Skip _ | Code_annot _)
-      | Return _ | Goto _ | AsmGoto _ | Break _ | Continue _         -> finish % id
-      | If (e, _, _, _)                                              -> finish % assume e cond
-      | Switch _                                                     -> assert false
-      | Loop _ | Block _                                             -> finish % id
-      | UnspecifiedSequence _                                        -> finish % id
-      | Throw _ | TryCatch _ | TryFinally _ | TryExcept _            -> Console.fatal
-                                                                          "Unsupported features: exceptions \
-                                                                           and their handling"
     let expand =
       let h = H_stmt.create 64 in
       let set = H_stmt.replace h in
@@ -835,6 +771,75 @@ module Make
                                  may_map ~dft:false (not % Stmt.equal s) (if the cond then e else t))
                               s.succs])
       | _               -> s.succs
+
+    let handle ?(cond=true) stmt =
+      let finish ?(stop=false) (pdd, s as st : state) =
+        let Refl = S.eq in
+        let covers =
+          let pdd', s' = after stmt in
+          let pdd', pdd = map_pair V.(weaken stmt (dummy F.f.svar intType) % Path_dd.inst_v top intType) (pdd', pdd) in
+          V.covers pdd' pdd && covers s' s
+        in
+        let stop = stop || covers in
+        if stop
+        then add_stop s.pre
+        else begin
+          List.iter (fun s -> set_before s @@ merge s (before s) st) (succs ~cond stmt);
+          set_after ~cond stmt st
+        end;
+        stop
+      in
+      let dcall ?lv kf args =
+        if Kernel_function.is_definition kf then call stmt ?lv kf args else may_map ~dft:id (stub stmt) lv
+      in
+      before stmt |>
+      match[@warning "-4"] stmt.skind with
+      | Instr (Set (lv, e, _))                                       -> finish % assign lv e
+      | Instr (Local_init (vi, AssignInit i, _))                     -> finish % init (var vi) i
+      | Instr (Call
+                 (_,
+                  { enode = Lval (Var f, NoOffset); _ },
+                  _, _))
+        when Options.Target_functions.mem f.vname                    -> finish
+                                                                          ~stop:(hasAttribute
+                                                                                   "noreturn" f.vattr) % reach stmt f
+      | Instr (Call
+                 (Some lv,
+                  { enode = Lval (Var f, NoOffset); _ },
+                  (e :: _), _))
+        when Options.Alloc_functions.mem f.vname                     -> finish % alloc stmt lv e
+      | Instr (Local_init
+                 (vi, ConsInit (f, e :: _, Plain_func), _))
+        when Options.Alloc_functions.mem f.vname                     -> finish % alloc stmt (var vi) e
+
+      | Instr (Call (_,
+                     { enode = Lval (Var f, NoOffset); _ }, [e], _))
+        when Options.Assume_functions.mem f.vname                    -> finish % assume e true
+      | Instr (Call (_,
+                     { enode = Lval (Var f, NoOffset); _ }, [], _))
+        when Options.Path_assume_functions.mem f.vname               -> finish ~stop:true
+      | Instr (Call (lv,
+                     { enode = Lval (Var f, NoOffset); _ },
+                     args, _))                                       -> finish % dcall
+                                                                                   ?lv (Globals.Functions.get f) args
+      | Instr (Local_init (vi, ConsInit (f, args, Plain_func), _))   -> finish % dcall
+                                                                                   ~lv:(var vi)
+                                                                                   (Globals.Functions.get f)
+                                                                                   args
+      | Instr (Call (Some lv, _, _, _))                              -> finish % stub stmt lv
+      | Instr (Call (None, _, _, _))                                 -> finish % id
+      | Instr (Local_init (_, ConsInit (_, _, Constructor), _))      -> Console.fatal
+                                                                          "Symbolic.handle: C++ constructors \
+                                                                           are unsupported"
+      | Instr (Asm _ | Skip _ | Code_annot _)
+      | Return _ | Goto _ | AsmGoto _ | Break _ | Continue _         -> finish % id
+      | If (e, _, _, _)                                              -> finish % assume e cond
+      | Switch _                                                     -> assert false
+      | Loop _ | Block _                                             -> finish % id
+      | UnspecifiedSequence _                                        -> finish % id
+      | Throw _ | TryCatch _ | TryFinally _ | TryExcept _            -> Console.fatal
+                                                                          "Unsupported features: exceptions \
+                                                                           and their handling"
 
     let fix =
       let push, clear, empty, pop =
