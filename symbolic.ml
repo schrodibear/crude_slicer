@@ -68,16 +68,6 @@ module Make
         | Ite (c0, s0, t1, e1), (Ite (c1, _, _, _) as t)
           when Exp.compare c0 c1 < 0                     -> Ite (c0, s0, merge t1 t, merge e1 t)
         | t1,                   Ite (c, s, t, e)         -> Ite (c, s, merge t1 t, merge t1 e)
-      let rec cut c s f =
-        function
-        | Top                        -> Ite (c, s, Top, Bot)
-        | Bot                        -> Bot
-        | Ite (c', s', t, e)
-          when Exp.equal c c'
-            && V.equal s s'          -> if f then t else e
-        | Ite (c', _, _, _) as t
-          when Exp.compare c c' < 0  -> Ite (c, s, t, Bot)
-        | Ite (c', s', t, e)         -> Ite (c', s', cut c s f t, cut c s f e)
       module M_d =
         Map.Make
           (struct
@@ -112,6 +102,21 @@ module Make
           | Mem _                    -> v
           | Ndm _                    -> v
           | Upd _                    -> v
+      let rec cut path c (s : V.t) f =
+        let Refl = eq in
+        let cut c' s' f' = cut (M_d.add (c', s') f' path) c s f in
+        let so () = opt V.ite path s in
+        function
+        | Top when f                -> Ite (c, so (), Top, Bot)
+        | Top                       -> Ite (c, so (), Bot, Top)
+        | Bot                       -> Bot
+        | Ite (c', s', t, e)
+          when Exp.equal c c'
+            && V.equal s s'         -> if f then t else e
+        | Ite (c', _, _, _) as t
+          when Exp.compare c c' < 0 -> if f then Ite (c, so (), t, Bot) else Ite (c, so (), Bot, t)
+        | Ite (c', s', t, e)        -> Ite (c', s', cut c' s' true t, cut c' s' false e)
+      let cut = cut M_d.empty
       let rec inst bot (ite : _ -> V.t -> _) path v ty =
         let Refl = eq in
         let inst c f = inst bot ite (M_d.add c f path) v ty in
