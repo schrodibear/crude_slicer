@@ -393,28 +393,50 @@ module Make
         | `Poly_mem   m -> mem (m :> I.mem)
         | `Local_mem  m -> mem (m :> I.mem)
 
-    let one = CInt64 (Integer.one, IInt, None)
-
-    let join (v1 : V.t) (v2 : V.t) =
+    let join =
       let open Info.Symbolic in
       let Refl = eq in
-      match v1.node, v2.node with
-      | Cst (CInt64 (c, IInt, _)), _
-        when Integer.is_one c                                -> V.cst one
-      | _,                         Cst (CInt64 (c, IInt, _))
-        when Integer.is_one c                                -> V.cst one
-      | Ite _,                     _
-      | _,                         Ite _                     -> Console.fatal "Symbolic.join: ite is being lost"
-      | (Top
-        | Bot
-        | Cst _
-        | Adr _
-        | Var _
-        | Ndv _
-        | Una _
-        | Bin _
+      let rec split v =
+        match v.node with
+        | Bin (`Or, v1, v2, _) -> V.S.union (split v1) (split v2)
+        | Top | Bot
+        | Cst _ | Adr _
+        | Var _ | Ndv _
+        | Una _ | Bin _
         | Sel _
-        | Let _),                  _                         -> V.bin `Or v1 v2 intType
+        | Ite _ | Let _        -> V.S.singleton v
+      in
+      fun (v1 : V.t) (v2 : V.t) ->
+        match v1.node, v2.node with
+        | Cst (CInt64 (c, IInt, _)), _
+          when Integer.is_one c                                -> V.one
+        | _,                         Cst (CInt64 (c, IInt, _))
+          when Integer.is_one c                                -> V.one
+        | Cst (CInt64 (c, IInt, _)), _
+          when Integer.is_zero c                               -> v2
+        | _,                         Cst (CInt64 (c, IInt, _))
+          when Integer.is_zero c                               -> v1
+        | Ite _,                     _
+        | _,                         Ite _                     -> Console.fatal "Symbolic.join: ite is being lost"
+        | _,                         _
+          when V.equal v1 v2                                   -> v1
+        | (Top
+          | Bot
+          | Cst _
+          | Adr _
+          | Var _
+          | Ndv _
+          | Una _
+          | Bin _
+          | Sel _
+          | Let _),                  _                         ->(let v1, v2 =
+                                                                    map_pair (V.S.elements % split) (v1, v2)
+                                                                  in
+                                                                  let vs = v1 @ v2 in
+                                                                  List.(fold_left
+                                                                          (fun s1 s2 -> V.bin `Or s1 s2 intType)
+                                                                          (hd vs)
+                                                                          (tl vs)))
 
     let call stmt ?lv kf es (pdd, s : state) : state =
       let I.E.Some { local = (module L'); eff = eff' } = I.get info R.flag @@ Kernel_function.get_definition kf in
