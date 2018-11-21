@@ -671,7 +671,7 @@ module Make
     let init = fold_init assign
     let reach stmt f (pdd, s : state) : state =
       let Refl = S.eq in
-      pdd, { s with pre = V.merge ~join stmt (dummy f intType) s.pre @@ Path_dd.inst_v (V.cst one) intType pdd }
+      pdd, { s with pre = V.merge ~join stmt (dummy f intType) s.pre @@ Path_dd.inst_v V.one intType pdd }
     let stub stmt lv (pdd, s) = pdd, set lv NoOffset (V.ndv stmt % (swap addOffsetLval) lv) pdd s
     let alloc stmt lv sz (pdd, s : state) =
       let Refl = S.eq in
