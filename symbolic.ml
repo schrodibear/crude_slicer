@@ -630,8 +630,18 @@ module Make
         let v =
           Path_dd.inst_v
             (if clashes
-             then V.cst one
-             else V'.prj stmt S.Symbolic.readable env s'.pre)
+             then V.one
+             else
+               let open Info.Symbolic in
+               match s'.pre.node with
+               | Bot                    -> V.bot
+               | Cst (CInt64 (c, _, _))
+                 when Integer.is_zero c -> V.zero
+               | Top
+               | Cst _ | Adr _
+               | Var _ | Ndv _
+               | Una _ | Bin _ | Sel _
+               | Ite _ | Let _          -> V'.prj stmt S.Symbolic.readable env s'.pre)
             intType
             pdd
         in
