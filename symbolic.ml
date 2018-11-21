@@ -694,14 +694,21 @@ module Make
         | `Local_mem m as w  -> set_local_mem m @@ M.ndm start @@ lval w)
         (I.E.depends E.eff)
 
-    let state, set_state =
-      let h = H_stmt.create 64 in
-      (fun s -> H_stmt.find_def h s (Path_dd.bot, S.empty)),
-      H_stmt.replace h
-    let add_stop, stops =
+    let before, after, set_before, set_after, reset_states =
+      let b = H_stmt.create 64 in
+      let module H = FCHashtbl.Make (Datatype.Pair (Stmt) (Datatype.Bool)) in
+      let a = H.create 64 in
+      let empty = Path_dd.bot, S.empty in
+      (fun s -> H_stmt.find_def b s empty),
+      (fun ?(cond=true) s -> H.find_def a (s, cond) empty),
+      H_stmt.replace b,
+      (fun ?(cond=true) s -> H.replace a (s, cond)),
+      fun () -> H_stmt.clear b; H_stmt.replace b start initial; H.clear a
+    let add_stop, stops, reset_stops =
       let stops = ref [] in
       (fun s -> stops := s :: !stops),
-      fun () -> !stops
+      (fun () -> !stops),
+      fun () -> stops := []
 
     let merge stmt (pdd1, s1) (pdd2, s2) = Path_dd.merge pdd1 pdd2, merge ~join stmt lval s1 s2
 
@@ -819,8 +826,18 @@ module Make
         F.f.sallstmts;
       H_stmt.find h
 
+    let succs ?cond s =
+      match[@warning "-4"] s.skind with
+      | If (_, t, e, _) ->(let t, e = map_pair (fun b -> opt_of_list @@ List.take 1 b.bstmts) (t, e) in
+                           [List.find
+                              (fun s ->
+                                 may_map ~dft:false (Stmt.equal s) (if the cond then t else e) ||
+                                 may_map ~dft:false (not % Stmt.equal s) (if the cond then e else t))
+                              s.succs])
+      | _               -> s.succs
+
     let fix =
-      let push, succs, clear, empty, pop =
+      let push, clear, empty, pop =
         let q = Queue.create () in
         (fun s ->
            let s = expand s in
@@ -828,13 +845,6 @@ module Make
            | If _ ->(Queue.push (s, Some true) q;
                      Queue.push (s, Some false) q)
            | _    -> Queue.push (s, None) q),
-        (fun ?cond s ->
-           match[@warning "-4"] s.skind with
-           | If (_, t, e, _) ->(let t, e = map_pair (fun b -> opt_of_list @@ List.take 1 b.bstmts) (t, e) in
-                                [List.find
-                                   (may_map ~dft:(const true) (not %% Stmt.equal) @@ if the cond then e else t)
-                                   s.succs])
-           | _               -> s.succs),
         (fun () -> Queue.clear q),
         (fun () -> Queue.is_empty q),
         (fun () -> Queue.pop q)
@@ -847,14 +857,14 @@ module Make
           if not (handle ?cond s) then List.iter push (succs ?cond s)
         done;
         let rs = Kernel_function.find_return @@ Globals.Functions.get F.f.svar in
-        let r = snd @@ state rs in
+        let r = snd @@ after rs in
         let Refl = S.eq in
         ({ r with pre = List.fold_left (V.merge ~join rs @@ dummy F.f.svar intType) r.pre @@ stops () } : S.t)
 
     let visitor =
       object
         inherit frama_c_inplace
-        method start = ()
+        method start = reset_states (); reset_stops ()
         method! vfunc _ = SkipChildren
         method finish =
           let s = fix () in
