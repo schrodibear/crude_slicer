@@ -7,6 +7,7 @@ open Cil
 open Cil_printer
 open Visitor
 open Extlib
+open Format
 
 open Common
 open Info
@@ -47,6 +48,7 @@ module Make
       val merge : t -> t -> t
       val inst_v : V.t -> typ -> t -> V.t
       val inst_m : M.t -> typ -> t -> M.t
+      val pp : formatter -> t -> unit
     end = struct
       type t =
         | Top
@@ -119,6 +121,12 @@ module Make
         | Ite (c, s, t, e) -> ite c s (inst (c, s) true t) (inst (c, s) false e) ty
       let inst_v : V.t -> _ -> _ -> V.t = let Refl = eq in V.(inst bot ite) M_d.empty
       let inst_m : M.t -> _ -> _ -> M.t = let Refl = eq in M.(inst bot ite) M_d.empty
+      let rec pp fmt =
+        let pr f = fprintf fmt f in
+        function
+        | Top              -> pr "T"
+        | Bot              -> pr "_|_"
+        | Ite (c, s, t, e) -> pr "@[(%a (%d)) ?@ %a :@ %a@]" Symbolic.V.pp s c.eid pp t pp e
     end
 
     let loc = Location.unknown
