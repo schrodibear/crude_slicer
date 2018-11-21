@@ -643,6 +643,9 @@ module type Summary = sig
       val ite : exp -> t -> t -> t -> typ -> t
       val prj : stmt -> ('v, 'm) readables -> ('v, 'm) env -> t -> ('v, 'm, v) Symbolic.t
 
+      val zero : t
+      val one : t
+
       val strengthen : stmt -> lval -> t -> t
       val covers : t -> t -> bool
       val weaken : ?join:(t -> t -> t) -> stmt -> lval -> t -> t
@@ -667,6 +670,9 @@ module type Summary = sig
       val upd : tm -> tv -> tv -> typ -> t
       val ite : exp -> tv -> t -> t -> typ -> t
       val prj : stmt -> ('v, 'm) readables -> ('v, 'm) env -> t -> ('v, 'm, m) Symbolic.t
+
+      val zero : t
+      val one : t
 
       val strengthen : stmt -> lval -> t -> t
       val covers : t -> t -> bool
@@ -1319,6 +1325,10 @@ module Summary
         | V -> ndv V s ?size l
         | M -> ndm s l
 
+    let zero, one =
+      let c i k = cst k @@ CInt64 (i, IInt, None) in
+      Integer.((fun k -> c zero k), fun k -> c one k)
+
     let strengthen (type k) k s l (v : k u) : k u =
       match v.node with
       | Bot
@@ -1458,6 +1468,8 @@ module Summary
       let ite = ite V
       let prj r = prj V r
 
+      let zero, one = zero V, one V
+
       let strengthen = strengthen V
       let weaken = weaken V
       let covers = covers
@@ -1493,6 +1505,8 @@ module Summary
       let ite = ite M
       let prj r = prj M r
 
+      let zero, one = zero M, one M
+
       let strengthen = strengthen M
       let weaken = weaken M
       let covers = covers
@@ -1519,7 +1533,7 @@ module Summary
   open Symbolic
   let empty =
     {
-      pre = V.bot;
+      pre = V.zero;
       post =
         {
           poly_vars   = F.Poly.Var.M.empty;
