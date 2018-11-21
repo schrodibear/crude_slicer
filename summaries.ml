@@ -56,8 +56,36 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
   module U = R.U
   open M
 
-  module Make_local (L : I.E.Local) (E : sig val eff : (L.A.t, L.R.t, L.S.t) I.E.t end) = struct
-    module F = L.F
+  module Make_local (L : I.E.Local) (E : sig val eff : (L.A.t, L.R.t, L.S.t) I.E.t end) () = struct
+
+    let fresh_stub_name oldname =
+      let doesn't_exist name =
+        try ignore @@ Globals.Functions.find_by_name name; false
+        with Not_found ->                                  true
+      in
+      let name = oldname ^ Options.Stub_postfix.get () in
+      if doesn't_exist name
+      then
+        name
+      else
+        let rec find n =
+          let name = name ^ string_of_int n in
+          if doesn't_exist name
+          then name
+          else find (n + 1)
+        in
+        find 0
+
+    let f =
+      let f = L.F.f in
+      let d = emptyFunctionFromVI @@ copyVarinfo f.svar @@ fresh_stub_name f.svar.vname in
+      d.sformals <- getFormalsDecl d.svar;
+      d.svar.vattr <- Attr (Kf.stub_attr, [AStr d.svar.vname]) :: f.svar.vattr;
+      d
+
+    module L' = (val I.E.(match create R.flag f with Some { local; _ } -> (local :> (module Local))))
+
+    module F = L'.F
     open F
 
     type value = [`V | `M] * Local.Var.t
@@ -78,31 +106,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
     let set lv e = instr @@ Set (lv, e, loc)
     let call ?lv v es = instr @@ Call (lv, evar v, es, loc)
 
-    let fresh_stub_name oldname =
-      let doesn't_exist name =
-        try ignore @@ Globals.Functions.find_by_name name; false
-        with Not_found ->                                  true
-      in
-      let name = oldname ^ Options.Stub_postfix.get () in
-      if doesn't_exist name
-      then
-        name
-      else
-        let rec find n =
-          let name = name ^ string_of_int n in
-          if doesn't_exist name
-          then name
-          else find (n + 1)
-        in
-        find 0
-
-    module M_v = Varinfo.Map
-    let f =
-      let f = F.f in
-      let d = emptyFunctionFromVI @@ copyVarinfo f.svar @@ fresh_stub_name f.svar.vname in
-      d.sformals <- getFormalsDecl d.svar;
-      d.svar.vattr <- Attr (Kf.stub_attr, [AStr d.svar.vname]) :: f.svar.vattr;
-      d
+    module M_v : FCMap.S with type key := varinfo = Varinfo.Map
     let retvar =
       let rety = getReturnType f.svar.vtype in
       makeTempVar F.f ~insert:(not @@ isVoidType rety) ~name:"result" rety
@@ -516,8 +520,8 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
 
     let conv_elem k =
       function
-      | Top -> Top
-      | Bot -> Bot
+      | Top                 -> Top
+      | Bot                 -> Bot
       | Top_or_bot _ as t   -> t
       | Val_or_top { g; v } -> Val_or_top { g; v = k, conv k v }
       | Val_or_bot { a; v } -> Val_or_bot { a; v = k, conv k v }
@@ -618,10 +622,12 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         fun w ->
           if
             match w with
+            | `Local'_var _      -> true
             | `Result            -> I.E.has_result_dep E.eff
             | #L.W.readable as w -> L.R.(mem_some (of_write w) @@ I.E.depends E.eff)
           then
-            match (w : L.W.t :> I.writable) with
+            match (w : [L.W.t | `Local'_var of Local.Var.t] :> [I.writable | `Local'_var of varinfo]) with
+            | `Local'_var v -> `Var (mk_var v)
             | `Global_mem m -> mk_mem m
             | `Global_var v -> `Var (mk_var v)
             | `Local_mem  _ -> `Skip
@@ -654,16 +660,18 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
             l
         in
         if bots = [] then
-          let froms w =
-            List.rev @@
-            L.R.fold
-              (fun r ->
-                 match mk_w r with
-                 | `Var lv -> List.cons @@ new_exp ~loc (Lval lv)
-                 | `Mem e  -> List.cons e
-                 | `Skip   -> id)
-              (L.A.find w @@ I.E.assigns E.eff)
-              []
+          let froms =
+            function
+            | `Local'_var _ -> []
+            | #L.W.t as w   -> List.rev
+                                 (L.R.fold
+                                    (fun r ->
+                                       match mk_w r with
+                                       | `Var lv -> List.cons @@ new_exp ~loc (Lval lv)
+                                       | `Mem e  -> List.cons e
+                                       | `Skip   -> id)
+                                    (L.A.find w @@ I.E.assigns E.eff)
+                                    [])
           in
           let nondet w =
             match mk_w w with
@@ -709,7 +717,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       let Refl = L.S.Symbolic.eq in
       let open L.S in
       let open L.S.Symbolic in
-      let rvo = Kf.retvar @@ Globals.Functions.get F.f.svar in
+      let rvo = Kf.retvar @@ Globals.Functions.get L.F.f.svar in
       let cache = H_stack.create 4 in
       let lcache = C (readable, V.H.memo, V.H.create 32, M.H.memo, M.H.create 32) in
       H_stack.add cache [] lcache;
@@ -729,11 +737,12 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       in
       assume [pre];
       let p = aux `Grd in
-      assign [`Local_var p, pre];
+      assign [`Local'_var p, pre];
       push @@ [stmt @@ If (evar' p, mkBlock @@ error (), mkBlock [], loc)];
       assume @@ List.map snd ass;
       assign ass;
-      if not (isVoidType retvar.vtype) then push [stmt @@ Return (Some (evar retvar), loc)]
+      if not (isVoidType retvar.vtype) then push [stmt @@ Return (Some (evar retvar), loc)];
+      f.sbody.bstmts <- List.of_seq @@ stmts ()
   end
 
   let generate =
@@ -770,7 +779,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       H_d.filter_map_inplace
         (fun _ d ->
            let I.E.Some { local = (module L); eff } = I.get info R.flag d in
-           let module L = Make_local (L) (struct let eff = eff end) in
+           let module L = Make_local (L) (struct let eff = eff end) () in
            L.body ();
            some @@ L.f)
         h_ins;
