@@ -572,42 +572,50 @@ module Make
       in
       let retvar' = Kf.retvar kf in
       let handle_v w' v s =
-        let clashes = L'.W.S.mem (w' :> L'.W.t) clashes in
-        match w' with
-        | `Global_var g as w ->(check w clashes;
-                                let v =
-                                  if clashes
-                                  then V.ndv stmt (lval w)
-                                  else V'.prj stmt S.Symbolic.readable env v
-                                in
-                                set_global_var g (Path_dd.inst_v v (type_of w) pdd) s)
-        | `Result            ->(check `Result clashes;
-                                let lv = the lv in
-                                let v =
-                                  if clashes
-                                  then V.ndv stmt lv
-                                  else V'.prj stmt S.Symbolic.readable env v
-                                in
-                                set lv NoOffset (const v) pdd s)
+        if not @@ L'.A.mem (w' :> L'.W.t) (I.E.assigns eff')
+        then
+          s
+        else
+          let clashes = L'.W.S.mem (w' :> L'.W.t) clashes in
+          match w' with
+          | `Global_var g as w ->(check w clashes;
+                                  let v =
+                                    if clashes
+                                    then V.ndv stmt (lval w)
+                                    else V'.prj stmt S.Symbolic.readable env v
+                                  in
+                                  set_global_var g (Path_dd.inst_v v (type_of w) pdd) s)
+          | `Result            ->(check `Result clashes;
+                                  let lv = the lv in
+                                  let v =
+                                    if clashes
+                                    then V.ndv stmt lv
+                                    else V'.prj stmt S.Symbolic.readable env v
+                                  in
+                                  set lv NoOffset (const v) pdd s)
       in
       let handle_m w' m s =
-        let clashes = L'.W.S.mem (w' :> L'.W.t) clashes in
-        let set set mem w =
-          check (w :> W.t) clashes;
-          let m =
-            if clashes
-            then M.ndm stmt (lval w)
-            else M'.prj stmt S.Symbolic.readable env m
+        if not @@ L'.A.mem (w' :> L'.W.t) (I.E.assigns eff')
+        then
+          s
+        else
+          let clashes = L'.W.S.mem (w' :> L'.W.t) clashes in
+          let set set mem w =
+            check (w :> W.t) clashes;
+            let m =
+              if clashes
+              then M.ndm stmt (lval w)
+              else M'.prj stmt S.Symbolic.readable env m
+            in
+            set mem (Path_dd.inst_m m (type_of w) pdd) s
           in
-          set mem (Path_dd.inst_m m (type_of w) pdd) s
-        in
-        match w' with
-        | `Global_mem g as w   -> set set_global_mem g w
-        | `Poly_mem p'         ->
-          match prj_poly_mem p' with
-          | `Global_mem g as w -> set set_global_mem g w
-          | `Poly_mem p as w   -> set set_poly_mem p w
-          | `Local_mem l as w  -> set set_local_mem l w
+          match w' with
+          | `Global_mem g as w   -> set set_global_mem g w
+          | `Poly_mem p'         ->
+            match prj_poly_mem p' with
+            | `Global_mem g as w -> set set_global_mem g w
+            | `Poly_mem p as w   -> set set_poly_mem p w
+            | `Local_mem l as w  -> set set_local_mem l w
       in
       let pre =
         let clashes =
