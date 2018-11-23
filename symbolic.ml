@@ -822,8 +822,8 @@ module Make
         stop
       in
       let dcall ?lv kf' args =
-        if Kernel_function.is_definition kf
-        then call ~same_scc:(same_scc kf kf') stmt ?lv kf args
+        if Kernel_function.is_definition kf'
+        then call ~same_scc:(same_scc kf kf') stmt ?lv kf' args
         else may_map ~dft:id (stub stmt) lv
       in
       before stmt |>
