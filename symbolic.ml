@@ -367,15 +367,22 @@ module Make
            | Some fi -> mkMem ~addr ~off:(Field (fi, NoOffset)))
         eo
 
-    let dummy v newt =
-      mkMem
-        ~addr:(
-          mkCast
-            ~force:false
-            ~overflow:Check
-            ~e:(mkAddrOf ~loc @@ var v)
-            ~newt)
-        ~off:NoOffset
+    let dummy =
+      let module H = FCHashtbl.Make (Datatype.Pair (Varinfo) (Typ)) in
+      let h = H.create 10 in
+      fun v newt ->
+        H.memo
+          h
+          (v, newt)
+          (fun _ ->
+             mkMem
+               ~addr:(
+                 mkCast
+                   ~force:false
+                   ~overflow:Check
+                   ~e:(mkAddrOf ~loc @@ var v)
+                   ~newt)
+               ~off:NoOffset)
 
     let lval =
       let mem m =
@@ -383,14 +390,19 @@ module Make
         | Some lv -> lv
         | None    -> dummy F.f.svar @@ TPtr ((fst m).R.typ, [])
       in
+      let h = W.H.create 10 in
       fun w ->
-        match (w :> W.readable) with
-        | `Global_var v -> var (v :> varinfo)
-        | `Poly_var   v -> var (v :> varinfo)
-        | `Local_var  v -> var (v :> varinfo)
-        | `Global_mem m -> mem (m :> I.mem)
-        | `Poly_mem   m -> mem (m :> I.mem)
-        | `Local_mem  m -> mem (m :> I.mem)
+        W.H.memo
+          h
+          (w :> W.t)
+          (fun _ ->
+             match (w :> W.readable) with
+             | `Global_var v -> var (v :> varinfo)
+             | `Poly_var   v -> var (v :> varinfo)
+             | `Local_var  v -> var (v :> varinfo)
+             | `Global_mem m -> mem (m :> I.mem)
+             | `Poly_mem   m -> mem (m :> I.mem)
+             | `Local_mem  m -> mem (m :> I.mem))
 
     let type_of =
       let mem (r, fi) =
