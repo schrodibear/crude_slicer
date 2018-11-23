@@ -511,7 +511,17 @@ module Make
            | `Local_mem _
            | `Result       -> const id
            | `Global_mem m -> writes (m :> I.mem) (fun ?fi u -> `Global_mem (I.G.Mem.mk ?fi u))
-           | `Poly_mem m   -> writes (m :> I.mem) (fun ?fi u -> `Poly_mem (L'.F.Poly.Mem.mk ?fi u)))
+           | `Poly_mem m   -> writes
+                                (m :> I.mem)
+                                (fun ?fi u ->
+                                   match (U.repr u).R.kind with
+                                   | `Poly f
+                                     when String.equal f L'.F.f.svar.vname -> `Poly_mem (L'.F.Poly.Mem.mk ?fi u)
+                                   | `Global                               -> `Global_mem (I.G.Mem.mk ?fi u)
+                                   | `Poly _
+                                   | `Local _
+                                   | `Dummy                                -> Console.fatal "Symbolic.call: \
+                                                                                             unexpected region kind"))
           (I.E.assigns eff')
           L'.W.S.empty |> fun clashes ->
         L'.A.fold
