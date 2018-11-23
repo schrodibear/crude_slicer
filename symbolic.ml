@@ -334,6 +334,15 @@ module Make
         pdd
         s
 
+    let return eo s =
+      opt_fold
+        (function
+          [@warning "-4"]
+        | { enode = Lval lv; _ } as e -> assign lv e
+        | _                           -> Console.fatal "Symbolic.return: not an lvalue")
+        eo
+        s
+
     let kf = Globals.Functions.get F.f.svar
     let retvar = Kf.retvar kf
     let retexp = opt_map (fun r -> if isStructOrUnionType r.vtype then mkAddrOf ~loc (var r) else evar r) retvar
@@ -844,8 +853,9 @@ module Make
       | Instr (Local_init (_, ConsInit (_, _, Constructor), _))      -> Console.fatal
                                                                           "Symbolic.handle: C++ constructors \
                                                                            are unsupported"
+      | Return (eo, _)                                               -> finish % return eo
       | Instr (Asm _ | Skip _ | Code_annot _)
-      | Return _ | Goto _ | AsmGoto _ | Break _ | Continue _         -> finish % id
+      | Goto _ | AsmGoto _ | Break _ | Continue _                    -> finish % id
       | If (e, _, _, _)                                              -> finish % assume e cond
       | Switch _                                                     -> assert false
       | Loop _ | Block _                                             -> finish % id
