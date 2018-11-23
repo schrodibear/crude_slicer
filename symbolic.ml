@@ -76,36 +76,31 @@ module Make
               let c = Exp.compare e1 e2 in
               if c <> 0 then c else V.compare v1 v2
           end)
-      let rec opt : type k. (_ -> _ -> k u -> k u -> _ -> k u) -> _ -> k u -> k u =
-        fun ite path v ->
+      let rec opt : type k. k kind -> _ -> k u -> k u =
+        fun k path v ->
           let open Info.Symbolic in
           let Refl = eq in
+          let opt' c s f = opt k @@ M_d.add (c, s) f path in
+          let opt k = opt k path in
           match v.node with
           | Ite (c, s, t, e, _)
-            when M_d.mem (c, s) path -> if M_d.find (c, s) path then opt ite path t else opt ite path e
-          | Ite (c, s, t, e, ty)     -> ite
-                                          c
-                                          s
-                                          (opt ite (M_d.add (c, s) true path) t)
-                                          (opt ite (M_d.add (c, s) false path) e)
-                                          ty
-          | Top
-          | Bot
-          | Cst _
-          | Adr _
-          | Var _
-          | Ndv _
-          | Una _
-          | Bin _
-          | Sel _                    -> v
-          | Let _                    -> v
+            when M_d.mem (c, s) path -> if M_d.find (c, s) path then opt k t else opt k e
+          | Ite (c, s, t, e, ty)     -> ite k c s (opt' c s true t) (opt' c s false e) ty
+          | Top | Bot
+          | Cst _ | Adr _ | Var _
+          | Let _
+          | Ndv (_, _, None)         -> v
           | Mem _                    -> v
           | Ndm _                    -> v
-          | Upd _                    -> v
+          | Ndv (s, l, Some a)       -> ndv k s ~size:(opt V a) l
+          | Una (u, s, ty)           -> una k u (opt V s) ty
+          | Bin (b, s1, s2, ty)      -> bin k b (opt V s1) (opt V s2) ty
+          | Sel (m, a, ty)           -> sel k (opt M m) (opt V a) ty
+          | Upd (m, a, v, ty)        -> upd (opt M m) (opt V a) (opt V v) ty
       let rec cut path c (s : V.t) f =
         let Refl = eq in
         let cut c' s' f' = cut (M_d.add (c', s') f' path) c s f in
-        let so () = opt V.ite path s in
+        let so () = opt V path s in
         function
         | Top when f                -> Ite (c, so (), Top, Bot)
         | Top                       -> Ite (c, so (), Bot, Top)
@@ -117,15 +112,15 @@ module Make
           when Exp.compare c c' < 0 -> if f then Ite (c, so (), t, Bot) else Ite (c, so (), Bot, t)
         | Ite (c', s', t, e)        -> Ite (c', s', cut c' s' true t, cut c' s' false e)
       let cut = cut M_d.empty
-      let rec inst bot (ite : _ -> V.t -> _) path v ty =
+      let rec inst k path v ty =
         let Refl = eq in
-        let inst c f = inst bot ite (M_d.add c f path) v ty in
+        let inst c f = inst k (M_d.add c f path) v ty in
         function
-        | Top              -> opt ite path v
-        | Bot              -> bot
-        | Ite (c, s, t, e) -> ite c s (inst (c, s) true t) (inst (c, s) false e) ty
-      let inst_v : V.t -> _ -> _ -> V.t = let Refl = eq in V.(inst bot ite) M_d.empty
-      let inst_m : M.t -> _ -> _ -> M.t = let Refl = eq in M.(inst bot ite) M_d.empty
+        | Top              -> opt k path v
+        | Bot              -> Symbolic.bot k
+        | Ite (c, s, t, e) -> ite k c s (inst (c, s) true t) (inst (c, s) false e) ty
+      let inst_v : V.t -> _ -> _ -> V.t = let Refl = eq in inst V M_d.empty
+      let inst_m : M.t -> _ -> _ -> M.t  = let Refl = eq in inst M M_d.empty
       let rec pp fmt =
         let pr f = fprintf fmt f in
         function
