@@ -548,7 +548,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         let memo f =
           let handle_v v m =
             let e = memo_v cv v @@ fun v -> f @@ `V v in
-            ignore @@ memo_m cm m (fun _ -> lazy (conv_elem `M @@ Lazy.force e));
+            ignore @@ memo_m cm m (fun _ -> lazy (conv_elem `M @@ !! e));
             e
           in
           match s with
@@ -634,23 +634,15 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       let mk_w =
         let mk_mem m = may_map (fun m -> `Mem m) ~dft:`Skip @@ mk_mem m in
         fun w ->
-          if
-            match w with
-            | `Local'_var _      -> true
-            | `Result            -> I.E.has_result_dep E.eff
-            | #L.W.readable as w -> L.R.(mem_some (of_write w) @@ I.E.depends E.eff)
-          then
-            match (w : [L.W.t | `Local'_var of Local.Var.t] :> [I.writable | `Local'_var of varinfo]) with
-            | `Local'_var v -> `Var (mk_var v)
-            | `Global_mem m -> mk_mem m
-            | `Global_var v -> `Var (mk_var v)
-            | `Local_mem  _ -> `Skip
-            | `Local_var  v -> `Var (mk_var v)
-            | `Poly_mem   m -> mk_mem m
-            | `Poly_var   v -> `Var (mk_var v)
-            | `Result       -> `Var (var retvar)
-          else
-            `Skip
+          match (w : [L.W.t | `Local'_var of Local.Var.t] :> [I.writable | `Local'_var of varinfo]) with
+          | `Local'_var v -> `Var (mk_var v)
+          | `Global_mem m -> mk_mem m
+          | `Global_var v -> `Var (mk_var v)
+          | `Local_mem  _ -> `Skip
+          | `Local_var  v -> `Var (mk_var v)
+          | `Poly_mem   m -> mk_mem m
+          | `Poly_var   v -> `Var (mk_var v)
+          | `Result       -> `Var (var retvar)
       in
       let insert k v m =
         let open Local.Var.M in
@@ -661,15 +653,24 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       fun l ->
         let (tops, grds, vals, bots) =
           List.fold_left
-            (fun (tops, grds, vals, bots) (w, e) ->
-               match e with
-               | Top
-               | Top_or_bot _        -> w :: tops, grds,                     vals,               bots
-               | Bot                 -> tops,      grds,                     vals,               w :: bots
-               | Val_or_top { g; v }
-               | Mixed { g; v; _ }   -> tops,      insert g (w, snd v) grds, vals,               bots
-               | Val_or_bot { v; _ }
-               | Val v               -> tops,      grds,                     (w, snd v) :: vals, bots)
+            (fun (tops, grds, vals, bots as q) (w, e) ->
+               if
+                 match w with
+                 | `Local'_var _      -> true
+                 | `Result            -> I.E.has_result_dep E.eff
+                 | #L.W.readable as w -> L.A.(mem w @@ I.E.assigns E.eff) &&
+                                         L.R.(mem_some (of_write w) @@ I.E.depends E.eff)
+               then
+                 match !! e with
+                 | Top
+                 | Top_or_bot _        -> w :: tops, grds,                     vals,               bots
+                 | Bot                 -> tops,      grds,                     vals,               w :: bots
+                 | Val_or_top { g; v }
+                 | Mixed { g; v; _ }   -> tops,      insert g (w, snd v) grds, vals,               bots
+                 | Val_or_bot { v; _ }
+                 | Val v               -> tops,      grds,                     (w, snd v) :: vals, bots
+               else
+                 q)
             ([], Local.Var.M.empty, [], [])
             l
         in
@@ -735,7 +736,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       let cache = H_stack.create 4 in
       let lcache = C (readable, V.H.memo, V.H.create 32, M.H.memo, M.H.create 32) in
       H_stack.add cache [] lcache;
-      let eval = Lazy.force % eval cache [] lcache (module L) in
+      let eval = eval cache [] lcache (module L) in
       let pre = eval @@ `V s.pre in
       let ass =
         [] |>
@@ -749,11 +750,11 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
              else id)
           s.local_vars
       in
-      assume [pre];
+      assume [!! pre];
       let p = aux `Grd in
       assign [`Local'_var p, pre];
       push @@ [stmt @@ If (evar' p, mkBlock @@ error (), mkBlock [], loc)];
-      assume @@ List.map snd ass;
+      assume @@ List.map ((!!) % snd) ass;
       assign ass;
       if not (isVoidType retvar.vtype) then push [stmt @@ Return (Some (evar retvar), loc)];
       f.sbody.bstmts <- List.of_seq @@ stmts ()
