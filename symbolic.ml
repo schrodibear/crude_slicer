@@ -935,7 +935,7 @@ module Make
       in
       fun kf kf' -> M.(find kf scc_map = find kf' scc_map)
     in
-    Fixpoint.visit_until_convergence ~order:`topological (const @@ H_fundec.find @@ fixpoints same_scc) info
+    Fixpoint.visit_until_convergence ~order:`topological (const @@ H_fundec.find @@ fixpoints same_scc) info sccs
 end
 
 let prepare () =

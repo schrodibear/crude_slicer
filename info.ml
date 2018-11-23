@@ -1339,7 +1339,6 @@ module Summary
     let pp_env = pp_env { f = pp }
 
     let nondet (type k) : k kind -> _ -> ?size:_ -> _ -> k u =
-      let open Bare in
       fun k s ?size l ->
         match k with
         | V -> ndv V s ?size l
@@ -1392,7 +1391,7 @@ module Summary
         let merge_v v1 v2 =
           let s = { s with sid } in
           let l = dummy_int in
-          Bare.(merge V s l (weaken V s l v1) (weaken V s l v2))
+          merge V s l (weaken V s l v1) (weaken V s l v2)
         and merge = merge k ?join s l
         in
         let join_ () = may_map ~dft:(nondet k s l) (fun j -> j v1 v2) join in
@@ -1470,7 +1469,6 @@ module Summary
       module M = FCMap.Make (T)
       module S = FCSet.Make (T)
 
-      open Bare
       let top = top V
       let bot = bot V
       let cst = cst V
@@ -1504,7 +1502,6 @@ module Summary
       module M = FCMap.Make (T)
       module S = FCSet.Make (T)
 
-      open Bare
       let top = top M
       let bot = bot M
       let cst = cst M
