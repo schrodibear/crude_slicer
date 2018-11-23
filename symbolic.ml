@@ -61,15 +61,17 @@ module Make
       let rec merge t1 t2 =
         match t1, t2 with
         | Top,                  _
-        | _,                    Top                      -> Top
+        | _,                    Top                       -> Top
         | Bot,                  t
-        | t,                    Bot                      -> t
+        | t,                    Bot                       -> t
         | Ite (c0, s0, t1, e1), Ite (c1, s1, t2, e2)
           when Exp.equal c0 c1
-            && V.equal s0 s1                             -> Ite (c0, s0, merge t1 t2, merge e1 e2)
-        | Ite (c0, s0, t1, e1), (Ite (c1, _, _, _) as t)
-          when Exp.compare c0 c1 < 0                     -> Ite (c0, s0, merge t1 t, merge e1 t)
-        | t1,                   Ite (c, s, t, e)         -> Ite (c, s, merge t1 t, merge t1 e)
+            && V.equal s0 s1                              -> Ite (c0, s0, merge t1 t2, merge e1 e2)
+        | Ite (c0, s0, t1, e1), (Ite (c1, s1, _, _) as t)
+          when Exp.compare c0 c1 < 0
+            ||  Exp.compare c0 c1 = 0 &&
+                V.compare s0 s1 < 0                       -> Ite (c0, s0, merge t1 t, merge e1 t)
+        | t1,                   Ite (c, s, t, e)          -> Ite (c, s, merge t1 t, merge t1 e)
       module M_d =
         Map.Make
           (struct
@@ -104,15 +106,17 @@ module Make
         let cut c' s' f' = cut (M_d.add (c', s') f' path) c s f in
         let so () = opt V path s in
         function
-        | Top when f                -> Ite (c, so (), Top, Bot)
-        | Top                       -> Ite (c, so (), Bot, Top)
-        | Bot                       -> Bot
+        | Top when f                   -> Ite (c, so (), Top, Bot)
+        | Top                          -> Ite (c, so (), Bot, Top)
+        | Bot                          -> Bot
         | Ite (c', s', t, e)
           when Exp.equal c c'
-            && V.equal s s'         -> if f then t else e
-        | Ite (c', _, _, _) as t
-          when Exp.compare c c' < 0 -> if f then Ite (c, so (), t, Bot) else Ite (c, so (), Bot, t)
-        | Ite (c', s', t, e)        -> Ite (c', s', cut c' s' true t, cut c' s' false e)
+            && V.equal s s'            -> if f then t else e
+        | Ite (c', s', _, _) as t
+          when Exp.compare c c' < 0
+            || Exp.compare c c' = 0 &&
+               V.compare s s' < 0      -> if f then Ite (c, so (), t, Bot) else Ite (c, so (), Bot, t)
+        | Ite (c', s', t, e)           -> Ite (c', s', cut c' s' true t, cut c' s' false e)
       let cut = cut M_d.empty
       let rec inst k path v ty =
         let Refl = eq in
