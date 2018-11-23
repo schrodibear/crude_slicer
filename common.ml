@@ -413,4 +413,5 @@ module Kf = struct
                                                                                   unexpected return statement"
 
   let stub_attr = "stub"
+  let unreachable_attr = "unreachable"
 end

@@ -990,6 +990,11 @@ module Make (Analysis : Region.Analysis) = struct
           | GCompTag _ | GVar _ | GVarDecl _                           -> true
           | _                                                          -> false)
         file;
+      Globals.Functions.iter_on_fundecs
+        Varinfo.Set.(
+          let fs = List.fold_right (function GFun (f, _) -> add f.svar | _ -> id) file.globals empty in
+          fun f ->
+            if not @@ mem f.svar fs then f.svar.vattr <- addAttribute (Attr (Kf.unreachable_attr, [])) f.svar.vattr);
       may ((|>) ()) after_sweeping_funcs;
       Rmtmps.removeUnusedTemps
         ~isRoot:(function
@@ -1079,10 +1084,17 @@ let slice () =
         M.R.W
         M.w_lval
   end in
-  let module Symbolic = Symbolic_.Make (Region_analysis2) (Info) (Export) in
   Slice.sweep
     ~after_sweeping_funcs:(
-      fun () -> if Options.Summaries.get () then begin Symbolic.compute sccs; Summaries.generate sccs end)
+      fun () ->
+        Symbolic_.prepare ();
+        let module Symbolic = Symbolic_.Make (Region_analysis2) (Info) (Export) in
+        let sccs =
+          List.(map
+                  (filter @@ fun kf -> not @@ hasAttribute Kf.unreachable_attr (Kernel_function.get_vi kf).vattr)
+                  sccs)
+        in
+        if Options.Summaries.get () then begin Symbolic.compute sccs; Summaries.generate sccs end)
     ();
   let stat = Gc.stat () in
   Console.debug  "Current # of live words: %d" stat.Gc.live_words;

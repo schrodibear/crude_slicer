@@ -327,7 +327,8 @@ module Make
         pdd
         s
 
-    let retvar = Kf.retvar @@ Globals.Functions.get F.f.svar
+    let kf = Globals.Functions.get F.f.svar
+    let retvar = Kf.retvar kf
     let retexp = opt_map (fun r -> if isStructOrUnionType r.vtype then mkAddrOf ~loc (var r) else evar r) retvar
 
     let mk_mem (r, fo) =
@@ -435,7 +436,7 @@ module Make
                                                                           (hd vs)
                                                                           (tl vs)))
 
-    let call stmt ?lv kf es (pdd, s : state) : state =
+    let call ~same_scc stmt ?lv kf es (pdd, s : state) : state =
       let I.E.Some { local = (module L'); eff = eff' } = I.get info R.flag @@ Kernel_function.get_definition kf in
       let h_map = R.map stmt kf in
       let h_rev =
@@ -573,7 +574,7 @@ module Make
         then
           s
         else
-          let clashes = L'.W.S.mem (w' :> L'.W.t) clashes in
+          let clashes = same_scc || L'.W.S.mem (w' :> L'.W.t) clashes in
           match w' with
           | `Global_var g as w ->(check w clashes;
                                   let v =
@@ -596,7 +597,7 @@ module Make
         then
           s
         else
-          let clashes = L'.W.S.mem (w' :> L'.W.t) clashes in
+          let clashes = same_scc || L'.W.S.mem (w' :> L'.W.t) clashes in
           let set set mem w =
             check (w :> W.t) clashes;
             let m =
@@ -650,8 +651,14 @@ module Make
       I.G.Mem.M.fold (fun m -> handle_m @@ `Global_mem m) s'.post.global_mems |>
       L'.F.Poly.Mem.M.fold (fun m -> handle_m @@ `Poly_mem m) s'.post.poly_mems |>
       if has_some lv && not @@ isStructOrUnionType @@ Kernel_function.get_return_type kf
-      then handle_v `Result L'.F.Local.Var.(M.find (of_varinfo @@ the retvar') s'.local_vars)
-      else id
+      then
+        handle_v
+          `Result
+          (if not same_scc
+           then L'.F.Local.Var.(M.find (of_varinfo @@ the retvar') s'.local_vars)
+           else V'.ndv stmt @@ Cil.var @@ the retvar)
+      else
+        id
 
     let rec fold_init f lv =
       function
@@ -769,7 +776,7 @@ module Make
                               s.succs])
       | _               -> s.succs
 
-    let handle ?(cond=true) stmt =
+    let handle ~same_scc ?(cond=true) stmt =
       let finish ?(stop=false) (pdd, s as st : state) =
         let Refl = S.eq in
         let covers =
@@ -786,8 +793,10 @@ module Make
         end;
         stop
       in
-      let dcall ?lv kf args =
-        if Kernel_function.is_definition kf then call stmt ?lv kf args else may_map ~dft:id (stub stmt) lv
+      let dcall ?lv kf' args =
+        if Kernel_function.is_definition kf
+        then call ~same_scc:(same_scc kf kf') stmt ?lv kf args
+        else may_map ~dft:id (stub stmt) lv
       in
       before stmt |>
       match[@warning "-4"] stmt.skind with
@@ -851,25 +860,25 @@ module Make
         (fun () -> Queue.is_empty q),
         (fun () -> Queue.pop q)
       in
-      fun () ->
+      fun same_scc ->
         clear ();
         push start;
         while not @@ empty () do
           let s, cond = pop () in
-          if not (handle ?cond s) then List.iter push (succs ?cond s)
+          if not (handle ~same_scc ?cond s) then List.iter push (succs ?cond s)
         done;
         let rs = Kernel_function.find_return @@ Globals.Functions.get F.f.svar in
         let r = snd @@ after rs in
         let Refl = S.eq in
         ({ r with pre = List.fold_left (V.merge ~join rs @@ dummy F.f.svar intType) r.pre @@ stops () } : S.t)
 
-    let visitor =
+    let visitor same_scc =
       object
         inherit frama_c_inplace
         method start = reset_states (); reset_stops ()
         method! vfunc _ = SkipChildren
         method finish =
-          let s = fix () in
+          let s = fix same_scc in
           if not @@ covers (I.E.summary E.eff) s then begin
             I.E.set_summary s E.eff;
             Flag.report I.flag
@@ -877,17 +886,58 @@ module Make
       end
   end
 
-  let fixpoints =
+  let fixpoints same_scc =
     let h = H_fundec.create 256 in
     Globals.Functions.iter_on_fundecs
       (fun d ->
          let I.E.Some { local = (module L); eff } = I.get info R.flag d in
          let module Import = Import (L) in
          let module L = Make_local (L) (struct let eff = eff end) (Import) in
-         H_fundec.replace h d L.visitor);
+         H_fundec.replace h d @@ L.visitor same_scc);
     h
 
   module Fixpoint = Fixpoint.Make (I)
 
-  let compute = Fixpoint.visit_until_convergence ~order:`topological (const @@ H_fundec.find fixpoints) info
+  let compute sccs =
+    let same_scc =
+      let module M = Kf.Map in
+      let scc_map, _ =
+        List.(fold_left (fun (m, i) kfs -> fold_left (fun m kf -> M.add kf i m) m kfs, i + 1) (M.empty, 0) sccs)
+      in
+      fun kf kf' -> M.(find kf scc_map = find kf' scc_map)
+    in
+    Fixpoint.visit_until_convergence ~order:`topological (const @@ H_fundec.find @@ fixpoints same_scc) info
 end
+
+let prepare () =
+  visitFramacFile
+    (object (self)
+      inherit frama_c_inplace
+
+      method! vstmt s =
+        match[@warning "-4"] s.skind with
+        | Return (Some { enode = Lval (Var v, NoOffset); _ }, _)
+          when not v.vformal && not v.vglob                      -> SkipChildren
+        | Return (Some e, loc)                                   ->(let f = the self#current_func in
+                                                                    let ass, s' =
+                                                                      let r =
+                                                                        makeTempVar f @@ typeOf e
+                                                                      in
+                                                                      mkStmt
+                                                                        ~valid_sid:true
+                                                                        (Instr (Set (var r, e, loc))),
+                                                                      mkStmt
+                                                                        ~valid_sid:true
+                                                                        (Return (some @@ evar r, loc))
+                                                                    in
+                                                                    f.sallstmts <-
+                                                                      f.sallstmts @ [ass; s'];
+                                                                    s.skind <- Block
+                                                                                 (mkBlock [ass; s']);
+                                                                    s.succs <- [ass];
+                                                                    ass.succs <- [s'];
+                                                                    ass.preds <- [s];
+                                                                    s'.preds <- [ass];                 SkipChildren)
+        | _                                                      ->                                    SkipChildren
+    end)
+    (Ast.get ())
