@@ -243,15 +243,19 @@ module Make
       let Refl = S.eq in
       let Refl = eq in
       let deref m = V.sel m (eval_addr s lv) @@ typeOfLval lv in
-      opt_map
-        (function
-        | `Global_var v -> find_global_var v s
-        | `Poly_var   v -> find_poly_var v s
-        | `Local_var  v -> find_local_var v s
-        | `Global_mem m -> deref @@ find_global_mem m s
-        | `Poly_mem   m -> deref @@ find_poly_mem m s
-        | `Local_mem  m -> deref @@ find_local_mem m s)
-        (w_lval lv)
+      try
+        opt_map
+          (function
+          | `Global_var v -> find_global_var v s
+          | `Poly_var   v -> find_poly_var v s
+          | `Local_var  v -> find_local_var v s
+          | `Global_mem m -> deref @@ find_global_mem m s
+          | `Poly_mem   m -> deref @@ find_poly_mem m s
+          | `Local_mem  m -> deref @@ find_local_mem m s)
+          (w_lval lv)
+      with
+      | Not_found ->
+        some @@ V.ndv dummyStmt lv
     and eval_expr =
       let size s = some @@ V.cst @@ CInt64 (Integer.of_int s, theMachine.kindOfSizeOf, None) in
       fun s e ->
@@ -282,7 +286,10 @@ module Make
       let Refl = eq in
       let ty = typeOfLval lv in
       let set_v set vr = set vr (Path_dd.inst_v (v off) ty pdd) s in
-      let set_m find set m = set m (Path_dd.inst_m (M.upd (find m s) (eval_addr s lv) (v off) ty) ty pdd) s in
+      let set_m find set m =
+        let vm = try find m s with Not_found -> M.ndm dummyStmt lv in
+        set m (Path_dd.inst_m (M.upd vm (eval_addr s lv) (v off) ty) ty pdd) s
+      in
       match w_lval lv with
       | Some (`Global_var v)       -> set_v set_global_var v
       | Some (`Poly_var v)         -> set_v set_poly_var v
