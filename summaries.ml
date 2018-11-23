@@ -546,11 +546,17 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         let Refl = eq_readables r S'.readable in
         let Refl = S'.eq in
         let memo f =
+          let handle_v v m =
+            let e = memo_v cv v @@ fun v -> f @@ `V v in
+            ignore @@ memo_m cm m (fun _ -> lazy (conv_elem `M @@ Lazy.force e));
+            e
+          in
           match s with
-          | `V v ->(let e = memo_v cv v (fun v -> f @@ `V v) in
-                    ignore @@ memo_m cm (Symbolic.coerce v) (fun _ -> lazy (conv_elem `M @@ Lazy.force e));
-                    e)
-          | `M m -> memo_m cm m (fun m -> f @@ `M m)
+          | `V v     -> handle_v v (Symbolic.coerce v)
+          | `M m     ->
+            match Symbolic.coerce' m with
+            | Some v -> handle_v v m
+            | None   -> memo_m cm m (fun m -> f @@ `M m)
         in
         memo @@
         fun s ->
