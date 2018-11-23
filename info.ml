@@ -1408,38 +1408,33 @@ module Summary
         | Upd _,                     _                         -> join_ ()
     and weaken : type k. k Bare.k -> ?join:(k u -> k u -> k u) ->_ -> _ -> k u -> k u =
       fun k ?join s l v ->
-        let weaken = weaken k s l in
+        let weaken = weaken k ?join s l in
         let merge = merge k ?join s l in
         match v.node with
-        | Ite (c, i,
-               { node = Ite (ct, _, tt, et, _); _ },
-               { node = Ite (ce, _, te, ee, _); _ },
-               ty)
-          when Exp.(equal c ct && equal ct ce)       -> ite k c i
-                                                          (merge (weaken tt) (weaken et))
-                                                          (merge (weaken te) (weaken ee)) ty
-        | Ite (c, i,
-               { node = Ite (ct, _, tt, et, _); _ },
-               e, ty)
-          when Exp.equal c ct                        -> ite k c i (merge (weaken tt) (weaken et)) (weaken e) ty
-        | Ite (c, i, t,
-               { node = Ite (ce, _, te, ee, _); _ },
-               ty)
-          when Exp.equal c ce                        -> ite k c i (weaken t) (merge (weaken te) (weaken ee)) ty
-        | Ite (c, i, t, e, ty)                       -> ite k c i (weaken t) (weaken e) ty
-        | (Top
-          | Bot
-          | Cst _
-          | Adr _
-          | Var _
-          | Ndv _
-          | Una _
-          | Bin _
-          | Sel _
-          | Let _)                                   -> v
-        | Mem _                                      -> v
-        | Ndm _                                      -> v
-        | Upd _                                      -> v
+        | Ite (c, i, t, e, ty)                             ->
+          let t, e = map_pair weaken (t, e) in
+          begin match t.node, e.node with
+          | Ite (ct, _, tt, et, _), Ite (ce, _, te, ee, _)
+            when Exp.(equal c ct && equal ct ce)           -> ite k c i (merge tt et) (merge te ee) ty
+          | Ite (ct, _, tt, et, _), _
+            when Exp.equal c ct                            -> ite k c i (merge tt et) e ty
+          | _,                      Ite (ce, _, te, ee, _)
+            when Exp.equal c ce                            -> ite k c i t (merge te ee) ty
+          | (Top | Bot
+            | Cst _ | Adr _
+            | Var _ | Ndv _
+            | Una _ | Bin _
+            | Sel _
+            | Ite _ | Let _),       _                      -> ite k c i t e ty
+          | Mem _,                  _                      -> ite k c i t e ty
+          | Ndm _,                  _                      -> ite k c i t e ty
+          | Upd _,                  _                      -> ite k c i t e ty
+          end
+        | (Top | Bot | Cst _ | Adr _| Var _ | Ndv _
+          | Una _ | Bin _ | Sel _ | Let _)                 -> v
+        | Mem _                                            -> v
+        | Ndm _                                            -> v
+        | Upd _                                            -> v
 
     let merge k ?join s l v1 v2 = merge k ?join s l (weaken k ?join s l v1) (weaken k ?join s l v2)
 
