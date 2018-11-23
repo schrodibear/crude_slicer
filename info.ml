@@ -626,6 +626,25 @@ module type Summary = sig
     type _ binding +=
         W : ('v, 'm) readables -> < crv : 'crv; crm : 'crm; cev : 'v; cem : 'm; cee : ('crv, 'crm) env > binding
 
+    type _ kind =
+      | V : v kind
+      | M : m kind
+
+    val top : 'k kind -> 'k u
+    val bot : 'k kind -> 'k u
+    val cst : 'k kind -> constant -> 'k u
+    val adr : 'k kind -> Global_var.t -> 'k u
+    val var : 'k kind -> W.frameable_var -> 'k u
+    val mem : W.frameable_mem -> m u
+    val ndv : 'k kind -> stmt -> ?size:(v u) -> lval -> 'k u
+    val ndm : stmt -> lval -> m u
+    val una : 'k kind -> Op.unary -> v u -> typ -> 'k u
+    val bin : 'k kind -> Op.binary -> v u -> v u -> typ -> 'k u
+    val sel : 'k kind -> m u -> v u -> typ -> 'k u
+    val upd : m u -> v u -> v u -> typ -> m u
+    val ite : 'k kind -> exp -> v u -> 'k u -> 'k u -> typ -> 'k u
+    val prj : 'k kind -> stmt -> ('v, 'm) readables -> ('v, 'm) env -> 'k u -> ('v, 'm, 'k) Symbolic.t
+
     module V : sig
       type t = tv
 
@@ -1207,14 +1226,15 @@ module Summary
     type _ binding +=
         W : ('v, 'm) readables -> < crv : 'crv; crm : 'crm; cev : 'v; cem : 'm; cee : ('crv, 'crm) env > binding
 
+    type _ kind =
+      | V : v kind
+      | M : m kind
+
     module Bare = struct
       open Node
-      type _ k =
-        | V : v k
-        | M : m k
-      type t = E : ('v, 'm) readables * 'k k * ('v, 'm, 'k) node -> t
-      let hk (type a) = function (V : a k) -> 0 | M -> 1
-      let ek (type a b) (k1 : a k) (k2 : b k) =
+      type t = E : ('v, 'm) readables * 'k kind * ('v, 'm, 'k) node -> t
+      let hk (type a) = function (V : a kind) -> 0 | M -> 1
+      let ek (type a b) (k1 : a kind) (k2 : b kind) =
         match k1, k2 with
         | V, V -> true
         | M, M -> true
@@ -1256,12 +1276,12 @@ module Summary
         | _    -> false
     end
 
-    type mk = { f : 'v 'm 'k. ('v, 'm) readables -> 'k Bare.k -> ('v, 'm, 'k) node -> ('v, 'm, 'k) t } [@@unboxed]
+    type mk = { f : 'v 'm 'k. ('v, 'm) readables -> 'k kind -> ('v, 'm, 'k) node -> ('v, 'm, 'k) t } [@@unboxed]
     let mk : mk =
-      let module Ex = struct type t = E : ('v, 'm) readables * 'k Bare.k * ('v, 'm, 'k) Symbolic.t -> t end in
+      let module Ex = struct type t = E : ('v, 'm) readables * 'k kind * ('v, 'm, 'k) Symbolic.t -> t end in
       let module H = Hashtbl.Make (Bare) in
       let h = H.create 128 in
-      { f = fun (type v m k) ((module R0) as r : (v, m) readables) (k0 : k Bare.k) n : (v, m, k) t ->
+      { f = fun (type v m k) ((module R0) as r : (v, m) readables) (k0 : k kind) n : (v, m, k) t ->
           let Ex.E ((module R1), k1, v) =
             let k = Bare.E (r, k0, n) in
             try
@@ -1270,17 +1290,17 @@ module Summary
               let s = mk n in
               let v = Ex.E (r, k0, s) in
               begin match k0 with
-              | Bare.V -> let s' = coerce s in H.add h Bare.(E (r, M, s'.node)) @@ Ex.E (r, Bare.M, s')
-              | Bare.M -> may (fun s' -> H.add h Bare.(E (r, V, s'.node)) @@ Ex.E (r, Bare.V, s')) @@ coerce' s
+              | V -> let s' = coerce s in H.add h (Bare.E (r, M, s'.node)) @@ Ex.E (r, M, s')
+              | M -> may (fun s' -> H.add h (Bare.E (r, V, s'.node)) @@ Ex.E (r, V, s')) @@ coerce' s
               end;
               H.add h k v;
               v
           in
-          match R1.W, (k1, k0) with
-          | R0.W, Bare.(V, V) -> v
-          | R0.W, Bare.(M, M) -> v
-          | _,    Bare.(V, _) -> Console.fatal "Symbolic.mk: unexpected witness"
-          | _,    Bare.(M, _) -> Console.fatal "Symbolic.mk: unexpected witness" }
+          match R1.W, k1, k0 with
+          | R0.W, V, V -> v
+          | R0.W, M, M -> v
+          | _,    V, _ -> Console.fatal "Symbolic.mk: unexpected witness"
+          | _,    M, _ -> Console.fatal "Symbolic.mk: unexpected witness" }
 
     let mk' k = mk.f readable k
 
@@ -1289,13 +1309,13 @@ module Summary
     let cst k c = mk' k @@ Cst c
     let adr k g = mk' k @@ Adr g
     let var k v = mk' k @@ Var v
-    let mem m = mk' Bare.M @@ Mem m
+    let mem m = mk' M @@ Mem m
     let ndv k s ?size l = mk' k @@ Ndv (s, l, size)
-    let ndm s l = mk' Bare.M @@ Ndm (s, l)
+    let ndm s l = mk' M @@ Ndm (s, l)
     let una k u a t = mk' k @@ Una (u, a, t)
     let bin k b a1 a2 t = mk' k @@ Bin (b, a1, a2, t)
     let sel k m a t = mk' k @@ Sel (m, a, t)
-    let upd m a v t = mk' Bare.M @@ Upd (m, a, v, t)
+    let upd m a v t = mk' M @@ Upd (m, a, v, t)
     let ite k c i t e ty = mk' k @@ Ite (c, i, t, e, ty)
     let pp_env (pp : _ pp) fmt e =
       let open Pretty_utils in
@@ -1318,7 +1338,7 @@ module Summary
     let pp f = Symbolic.pp W.pp' W.pp' f
     let pp_env = pp_env { f = pp }
 
-    let nondet (type k) : k Bare.k -> _ -> ?size:_ -> _ -> k u =
+    let nondet (type k) : k kind -> _ -> ?size:_ -> _ -> k u =
       let open Bare in
       fun k s ?size l ->
         match k with
@@ -1367,7 +1387,7 @@ module Summary
       | Upd _,    _      -> false
     let sid = Sid.next ()
     let dummy_int = Cil.var @@ makeVarinfo true false "pre" intType
-    let rec merge : type k. k Bare.k -> ?join:(k u -> k u -> k u) -> _ -> _ -> k u -> k u -> k u =
+    let rec merge : type k. k kind -> ?join:(k u -> k u -> k u) -> _ -> _ -> k u -> k u -> k u =
       fun k ?join s l v1 v2 ->
         let merge_v v1 v2 =
           let s = { s with sid } in
@@ -1406,7 +1426,7 @@ module Summary
         | Mem _,                     _                         -> join_ ()
         | Ndm _,                     _                         -> join_ ()
         | Upd _,                     _                         -> join_ ()
-    and weaken : type k. k Bare.k -> ?join:(k u -> k u -> k u) ->_ -> _ -> k u -> k u =
+    and weaken : type k. k kind -> ?join:(k u -> k u -> k u) ->_ -> _ -> k u -> k u =
       fun k ?join s l v ->
         let weaken = weaken k ?join s l in
         let merge = merge k ?join s l in
