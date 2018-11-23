@@ -40,6 +40,8 @@ module Make
     open Import
     open Symbolic
 
+    let var = Cil.var
+
     module Path_dd : sig
       type t
       val top : t
