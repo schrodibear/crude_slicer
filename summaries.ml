@@ -391,7 +391,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
     let split_g_a =
       function
       | Top                 -> `False,         `True
-      | Bot                 -> `False,         `False
+      | Bot                 -> `True,          `False
       | Top_or_bot a        -> `False,         `Var (const a)
       | Val_or_top { g; _ } -> `Var (const g), `True
       | Val_or_bot { a; _ } -> `True,          `Var (const a)
@@ -510,7 +510,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       fun k i t e ty ->
         let (gi, ai), (gt, at), (ge, ae) = split_g_a i, split_g_a t, split_g_a e in
         elem
-          ~g:(gi &&? gt &&? ge ||? (gt &&? neq1 z i) ||? (ge &&? eq1 z i) ||? eq2 t e)
+          ~g:(gi &&? gt &&? ge ||? (gt &&? neq1 z i) ||? (ge &&? eq1 z i) ||? if is_const t then eq2 t e else `False)
           ~a:(ai &&? (at &&? ae ||? (at &&? neq1 z i) ||? (ae &&? eq1 z i)))
           (fun () -> op k (value `V intType i) (value k ty t) (value k ty e) ty)
 
