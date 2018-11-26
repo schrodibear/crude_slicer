@@ -89,7 +89,8 @@ module Make
           match v.node with
           | Ite (c, s, t, e, _)
             when M_d.mem (c, s) path -> if M_d.find (c, s) path then opt k t else opt k e
-          | Ite (c, s, t, e, ty)     -> ite k c s (opt' c s true t) (opt' c s false e) ty
+          | Ite (c, s, t, e, ty)     ->(let t, e = map_pair (uncurry @@ opt' c s) ((true, t), (false, e)) in
+                                        if equal t e then t else ite k c s t e ty)
           | Top | Bot
           | Cst _ | Adr _ | Var _
           | Let _
