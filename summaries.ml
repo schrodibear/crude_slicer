@@ -654,7 +654,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         let open Local.Var.M in
         match find k m with
         | l                   -> add k (v :: l) m
-        | exception Not_found -> add k [] m
+        | exception Not_found -> add k [v] m
       in
       fun l ->
         let (tops, grds, vals, bots) =
