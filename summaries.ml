@@ -112,6 +112,12 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       makeTempVar F.f ~insert:(not @@ isVoidType rety) ~name:"result" rety
     let retexp = if isStructOrUnionType retvar.vtype then mkAddrOf ~loc (var retvar) else evar retvar
     let params = List.fold_right2 M_v.add F.f.sformals f.sformals M_v.empty
+    let conv_ty =
+      function
+        [@warning "-4"]
+      | TFun _ as ty            -> TPtr (ty, [])
+      | TArray (ty, _, _, attr) -> TPtr (ty, attr)
+      | ty                      -> ty
     let aux kind =
       Local.Var.of_varinfo @@
       makeTempVar
@@ -125,7 +131,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
           | `Tmp _       -> "tmp")
         (match kind with
         | `Grd | `Ass           -> intType
-        | `Val (`V, t) | `Tmp t -> t
+        | `Val (`V, t) | `Tmp t -> conv_ty t
         | `Val (`M, t)          -> TPtr (typeAddAttributes [Attr ("const", [])] t, []))
     let var' v = var (v : Local.Var.t :> varinfo)
     let evar' v = evar (v : Local.Var.t :> varinfo)
