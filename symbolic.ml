@@ -302,33 +302,34 @@ module Make
         let vm = try find m s with Not_found -> M.ndm dummyStmt lv in
         set m (Path_dd.inst_m (M.upd vm (eval_addr s lv) (v off) ty) ty pdd) s
       in
-      match w_lval lv with
-      | Some (`Global_var v)       -> set_v set_global_var v
-      | Some (`Poly_var v)         -> set_v set_poly_var v
-      | Some (`Local_var v)        -> set_v set_local_var v
-      | Some (`Global_mem m)       -> set_m find_global_mem set_global_mem m
-      | Some (`Poly_mem m)         -> set_m find_poly_mem set_poly_mem m
-      | Some (`Local_mem m)        -> set_m find_local_mem set_local_mem m
-      | None                       ->
-        match[@warning "-4"] ty with
-        | TComp (ci, _, _)
-          when ci.cstruct          -> List.fold_left
-                                        (fun s fi ->
-                                           let fi = Field (fi, NoOffset) in
-                                           set (addOffsetLval fi lv) (addOffset fi off) v pdd s)
-                                        s
-                                        ci.cfields
-        | TComp (ci, _, _)         ->(let fi = Field (List.hd ci.cfields, NoOffset) in
-                                      set (addOffsetLval fi lv) (addOffset fi off) v pdd s)
-        | TArray (_, Some e, _, _) ->(let l = may_map ~dft:0 Integer.to_int @@ constFoldToInt e in
-                                      Array.init l id |>
-                                      Array.fold_left
-                                        (fun s i ->
-                                           let i = Index (integer ~loc i, NoOffset) in
-                                           set (addOffsetLval i lv) (addOffset i off) v pdd s)
-                                        s)
-        | TArray _                 -> s
-        | ty                       -> Console.fatal "Symbolic.set: unexpected type: %a : %a" pp_lval lv pp_typ ty
+      match[@warning "-4"] unrollType ty with
+      | TComp (ci, _, _)
+        when ci.cstruct          -> List.fold_left
+                                      (fun s fi ->
+                                         let fi = Field (fi, NoOffset) in
+                                         set (addOffsetLval fi lv) (addOffset fi off) v pdd s)
+                                      s
+                                      ci.cfields
+      | TComp (ci, _, _)         ->(let fi = Field (List.hd ci.cfields, NoOffset) in
+                                    set (addOffsetLval fi lv) (addOffset fi off) v pdd s)
+      | TArray (_, Some e, _, _) ->(let l = may_map ~dft:0 Integer.to_int @@ constFoldToInt e in
+                                    Array.init l id |>
+                                    Array.fold_left
+                                      (fun s i ->
+                                         let i = Index (integer ~loc i, NoOffset) in
+                                         set (addOffsetLval i lv) (addOffset i off) v pdd s)
+                                      s)
+      | TArray _                 -> s
+      | ty                       ->
+        match w_lval lv with
+        | Some (`Global_var v)   -> set_v set_global_var v
+        | Some (`Poly_var v)     -> set_v set_poly_var v
+        | Some (`Local_var v)    -> set_v set_local_var v
+        | Some (`Global_mem m)   -> set_m find_global_mem set_global_mem m
+        | Some (`Poly_mem m)     -> set_m find_poly_mem set_poly_mem m
+        | Some (`Local_mem m)    -> set_m find_local_mem set_local_mem m
+        | None                   -> Console.fatal "Symbolic.set: unexpected type: %a : %a" pp_lval lv pp_typ ty
+
 
     let assign lv e (pdd, s : state) =
       let Refl = S.eq in
