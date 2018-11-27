@@ -204,6 +204,24 @@ module Assign_function =
       let default = "__VERIFIER_assign"
     end)
 
+module Ite_function =
+  String
+    (struct
+      let option_name = "-ite_function"
+      let help = "May specify an alternative name for __VERIFIER_ite"
+      let arg_name = "name"
+      let default = "__VERIFIER_ite"
+    end)
+
+module Ite_mem_function =
+  String
+    (struct
+      let option_name = "-ite_mem_function"
+      let help = "May specify an alternative name for __VERIFIER_ite_mem"
+      let arg_name = "name"
+      let default = "__VERIFIER_ite_mem"
+    end)
+
 module Stub_postfix =
   String
     (struct

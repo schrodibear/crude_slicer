@@ -44,6 +44,11 @@ let ensure_nondet_mem_function_present () =
   Kf.ensure_proto voidConstPtrType (Options.Nondet_mem_function.get ()) [] false
 let ensure_assign_function_present () =
   Kf.ensure_proto voidType (Options.Assign_function.get ()) [voidConstPtrType; voidConstPtrType] false
+let ensure_ite_function_present () =
+  Kf.ensure_proto ulongLongType (Options.Ite_function.get ()) [ulongLongType; ulongLongType; ulongLongType] false
+let ensure_ite_mem_function_present () =
+  Kf.ensure_proto
+    voidConstPtrType (Options.Ite_mem_function.get ()) [ulongLongType; voidConstPtrType; voidConstPtrType] false
 let ensure_assume_function_present () = Kf.ensure_proto voidType (Options.Assume_function.get ()) [intType] false
 let ensure_error_function_present () = Kf.ensure_proto voidType (Options.Error_function.get ()) [] false
 
@@ -197,6 +202,12 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
     let assume =
       let ass = get_vi @@ Options.Assume_function.get () in
       fun a -> [call ass [a]]
+    let ite =
+      let ite = get_vi @@ Options.Ite_function.get () in
+      fun lv i t e -> [call ~lv ite [i; t; e]]
+    let ite_mem =
+      let ite = get_vi @@ Options.Ite_mem_function.get () in
+      fun lv i t e -> [call ~lv ite [i; t; e]]
     let error =
       let err = get_vi @@ Options.Error_function.get () in
       fun () -> [call err []]
@@ -504,7 +515,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
         let i = conv `V i in
         let t, e = map_pair (conv k) (t, e) in
         let v' = aux (`Val (k, ty)) in
-        push [stmt @@ If (evar' i, mkBlock [set (var' v') @@ evar' t], mkBlock [set (var' v') @@ evar' e], loc)];
+        push @@ (if k = `V then ite else ite_mem) (var' v') (evar' i) (evar' t) @@ evar' e;
         k, v'
       in
       fun k i t e ty ->
@@ -782,6 +793,8 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       ensure_nondet_mem_function_present ();
       ensure_assign_function_present ();
       ensure_assume_function_present ();
+      ensure_ite_function_present ();
+      ensure_ite_mem_function_present ();
       ensure_error_function_present ();
       let ds = sccs |> flatten |> Kernel_function.(filter_map is_definition get_definition) |> S_d.of_list in
       let file = Ast.get () in
