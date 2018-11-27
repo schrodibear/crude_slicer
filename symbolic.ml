@@ -903,10 +903,17 @@ module Make
         let q = Queue.create () in
         (fun s ->
            let s = expand s in
+           let push ?c s =
+             if
+               try Queue.iter (fun (s', c') -> if Stmt.equal s s' && c = c' then raise Exit) q; true
+               with Exit                                                                     -> false
+             then
+               Queue.push (s, c) q
+           in
            match[@warning "-4"] s.skind with
-           | If _ ->(Queue.push (s, Some true) q;
-                     Queue.push (s, Some false) q)
-           | _    -> Queue.push (s, None) q),
+           | If _ ->(push ~c:true s;
+                     push ~c:false s)
+           | _    -> push s),
         (fun () -> Queue.clear q),
         (fun () -> Queue.is_empty q),
         (fun () -> Queue.pop q)
