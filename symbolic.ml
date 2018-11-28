@@ -948,11 +948,12 @@ module Make
         method start = reset_states (); reset_stops ()
         method! vfunc _ = SkipChildren
         method finish =
-          let s = fix same_scc in
-          if not @@ covers (I.E.summary E.eff) s then begin
-            I.E.set_summary s E.eff;
-            Flag.report I.flag
-          end
+          if not @@ String.equal F.f.svar.vname @@ Kernel.MainFunction.get () then
+            let s = fix same_scc in
+            if not @@ covers (I.E.summary E.eff) s then begin
+              I.E.set_summary s E.eff;
+              Flag.report I.flag
+            end
       end
   end
 
