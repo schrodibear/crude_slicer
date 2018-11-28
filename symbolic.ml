@@ -566,7 +566,13 @@ module Make
       let module M' = M in
       let module V = S.Symbolic.V in
       let module M = S.Symbolic.M in
-      let formals = Kernel_function.get_formals kf in
+      let es, formals =
+        let open List in
+        Kernel_function.get_formals kf |>
+        combine es |>
+        filter ((=) `None % R.of_var % snd) |>
+        split
+      in
       let es = List.map (eval_expr s) es in
       let prj_poly_var =
         let open List in
