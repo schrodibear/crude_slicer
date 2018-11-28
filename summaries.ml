@@ -123,21 +123,33 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       | TFun _ as ty            -> TPtr (ty, [])
       | TArray (ty, _, _, attr) -> TPtr (ty, attr)
       | ty                      -> ty
-    let aux kind =
-      Local.Var.of_varinfo @@
-      makeTempVar
-        f
-        ~name:
-          (match kind with
-          | `Grd         -> "grd"
-          | `Ass         -> "ass"
-          | `Val (`V, _) -> "var"
-          | `Val (`M, _) -> "mem"
-          | `Tmp _       -> "tmp")
-        (match kind with
-        | `Grd | `Ass           -> intType
-        | `Val (`V, t) | `Tmp t -> conv_ty t
-        | `Val (`M, t)          -> TPtr (typeAddAttributes [Attr ("const", [])] t, []))
+    let aux, push_locals =
+      let idx = ref ~-1 in
+      let locals = ref [] in
+      (fun (kind : [> `Ass]) ->
+         incr idx;
+         let v =
+           makeTempVar
+             f
+             ~insert:false
+             ~name:
+               ((match kind with
+                | `Grd         -> "grd"
+                | `Ass         -> "ass"
+                | `Val (`V, _) -> "var"
+                | `Val (`M, _) -> "mem"
+                | `Tmp _       -> "tmp")
+                ^ string_of_int !idx)
+             (match kind with
+             | `Grd | `Ass           -> intType
+             | `Val (`V, t) | `Tmp t -> conv_ty t
+             | `Val (`M, t)          -> TPtr (typeAddAttributes [Attr ("const", [])] t, []))
+         in
+         locals := v :: !locals;
+         Local.Var.of_varinfo v),
+      fun () ->
+        f.slocals <- f.slocals @ !locals;
+        f.sbody.blocals <- f.sbody.blocals @ !locals
     let var' v = var (v : Local.Var.t :> varinfo)
     let evar' v = evar (v : Local.Var.t :> varinfo)
 
@@ -774,6 +786,7 @@ module Make (R : Region.Analysis) (M : sig val info : R.I.t end) = struct
       assume @@ List.map ((!!) % snd) ass;
       assign ass;
       if not (isVoidType retvar.vtype) then push [stmt @@ Return (Some (evar retvar), loc)];
+      push_locals ();
       f.sbody.bstmts <- List.of_seq @@ stmts ()
   end
 

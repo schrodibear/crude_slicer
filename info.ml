@@ -875,11 +875,16 @@ module Function (R : Representant) (U : Unifiable with module R := R) (F : sig v
     module Var =
       Variable
         (struct
-          let is_ok vi =
-            isArithmeticOrPointerType vi.vtype
-            && not vi.vglob
-            && not vi.vformal
-            && List.exists (Varinfo.equal vi) F.f.slocals
+          let is_ok =
+            let postfix = Options.Stub_postfix.get () in
+            let postlen = String.length postfix in
+            fun vi ->
+              isArithmeticOrPointerType vi.vtype
+              && not vi.vglob
+              && not vi.vformal
+              && (String.length F.f.svar.vname > postlen &&
+                  String.equal (Str.last_chars F.f.svar.vname postlen) postfix
+                  || List.exists (Varinfo.equal vi) F.f.slocals)
         end)
         ()
     module Mem =
