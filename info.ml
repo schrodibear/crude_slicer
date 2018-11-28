@@ -58,7 +58,7 @@ end
 module type Variable = sig
   type t = private varinfo
 
-  include Criterion with type t := t
+  include Criterion with type t := varinfo
   val of_varinfo : varinfo -> t
   include Hashed_ordered_printable with type t := t
   module H : Reporting_bithashset with type elt := t
@@ -68,7 +68,7 @@ end
 module Memory_field : sig
   type t = private fieldinfo
 
-  include Criterion with type t := t
+  include Criterion with type t := fieldinfo
   val of_fieldinfo : fieldinfo -> t
   include Hashed_ordered_printable with type t := t
 end = struct

@@ -570,7 +570,7 @@ module Make
         let open List in
         Kernel_function.get_formals kf |>
         combine es |>
-        filter ((=) `None % R.of_var % snd) |>
+        filter (L'.F.Poly.Var.is_ok % snd) |>
         split
       in
       let es = List.map (eval_expr s) es in
